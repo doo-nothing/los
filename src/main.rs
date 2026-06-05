@@ -91,31 +91,32 @@ impl ScopeState {
 #[derive(Clone)]
 struct Adsr {
     attack: f32, decay: f32, sustain: f32, release: f32,
-    state: u8, // 0=idle 1=attack 2=decay 3=sustain 4=release
+    state: u8,
     value: f32,
     rate: f32,
+    sr: f32,
 }
 
 impl Adsr {
-    fn new(a: f32, d: f32, s: f32, r: f32) -> Self {
-        Self { attack: a, decay: d, sustain: s, release: r, state: 0, value: 0.0, rate: 0.0 }
+    fn new(a: f32, d: f32, s: f32, r: f32, sample_rate: f32) -> Self {
+        Self { attack: a, decay: d, sustain: s, release: r, state: 0, value: 0.0, rate: 0.0, sr: sample_rate }
     }
 
-    fn trigger(&mut self, sample_rate: f32) {
+    fn trigger(&mut self) {
         self.state = 1;
-        self.rate = if self.attack > 0.0 { 1.0 / (self.attack * sample_rate) } else { 1.0 };
+        self.rate = if self.attack > 0.0 { 1.0 / (self.attack * self.sr) } else { 1.0 };
     }
 
-    fn release(&mut self, sample_rate: f32) {
+    fn release(&mut self) {
         self.state = 4;
-        self.rate = if self.release > 0.0 { 1.0 / (self.release * sample_rate) } else { 1.0 };
+        self.rate = if self.release > 0.0 { 1.0 / (self.release * self.sr) } else { 1.0 };
     }
 
     fn tick(&mut self) -> f32 {
         match self.state {
             1 => {
                 self.value += self.rate;
-                if self.value >= 1.0 { self.value = 1.0; self.state = 2; self.rate = if self.decay > 0.0 { (1.0 - self.sustain) / (self.decay * 48000.0) } else { 0.0 }; }
+                if self.value >= 1.0 { self.value = 1.0; self.state = 2; self.rate = if self.decay > 0.0 { (1.0 - self.sustain) / (self.decay * self.sr) } else { 0.0 }; }
             }
             2 => {
                 self.value -= self.rate;
@@ -144,9 +145,10 @@ struct EngineShared {
     playing: AtomicBool,
     trig_freq: AtomicU32,   // frequency * 100 (e.g. 44000 = 440.00 Hz)
     trig_vel: AtomicU32,    // velocity * 1000 (e.g. 1000 = 1.0)
-    trig_gate: AtomicBool,  // rising edge triggers envelope
-    env_value: AtomicU32,   // current envelope value * 1000 for display
-    seq_step: AtomicU32,    // current sequencer step
+    trig_gate: AtomicBool,
+    env_value: AtomicU32,
+    adsr_phase: AtomicU32,  // 0=idle 1=attack 2=decay 3=sustain 4=release
+    seq_step: AtomicU32,
     step_data: Mutex<[[u32; SEQ_STEPS]; SEQ_TRACKS]>, // each step: bit31=active, bits 30-16=note*100, bits 15-0=vel*1000
 }
 
@@ -165,6 +167,7 @@ impl EngineShared {
             trig_vel: AtomicU32::new(1000),
             trig_gate: AtomicBool::new(false),
             env_value: AtomicU32::new(0),
+            adsr_phase: AtomicU32::new(0),
             seq_step: AtomicU32::new(0),
             step_data: Mutex::new(steps),
         }
@@ -360,7 +363,7 @@ fn build_output_stream(
     sample_rate: f32, channels: usize, engine: Arc<EngineShared>,
     scope_buffer: Arc<Mutex<VecDeque<f32>>>,
 ) -> Result<cpal::Stream> {
-    let mut voice = VoiceData { adsr: Adsr::new(0.01, 0.1, 0.7, 0.2), phase: 0.0, freq: 440.0, velocity: 0.0 };
+    let mut voice = VoiceData { adsr: Adsr::new(0.01, 0.1, 0.7, 0.2, sample_rate), phase: 0.0, freq: 440.0, velocity: 0.0 };
     let mut seq_phase: f32 = 0.0;
     let mut prev_step: usize = 0;
     let mut prev_gate = false;
@@ -406,14 +409,15 @@ fn build_output_stream(
                 let vel = engine.trig_vel.load(Ordering::Relaxed) as f32 / 1000.0;
                 voice.freq = freq;
                 voice.velocity = vel;
-                voice.adsr.trigger(sample_rate);
+                voice.adsr.trigger();
             } else if !gate && prev_gate {
-                voice.adsr.release(sample_rate);
+                voice.adsr.release();
             }
             prev_gate = gate;
 
             let env = voice.adsr.tick();
             engine.env_value.store((env * 1000.0) as u32, Ordering::Relaxed);
+            engine.adsr_phase.store(voice.adsr.state as u32, Ordering::Relaxed);
 
             let l = if active {
                 voice.phase = (voice.phase + voice.freq / sample_rate).fract();
@@ -528,13 +532,15 @@ fn render_voice_module(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         let env = app.engine.env_value.load(Ordering::Relaxed) as f32 / 1000.0;
         let freq = app.engine.trig_freq.load(Ordering::Relaxed) as f32;
         let playing = app.engine.playing.load(Ordering::Relaxed);
+        let phase = app.engine.adsr_phase.load(Ordering::Relaxed);
+        let phase_str = ["idle", "ATK", "DEC", "SUS", "REL"][phase as usize];
 
-        let env_bar_w = (inner.width.saturating_sub(2)) as usize;
-        let env_fill = (env * env_bar_w as f32) as usize;
-        let env_bar: String = "█".repeat(env_fill) + &"░".repeat(env_bar_w.saturating_sub(env_fill));
+        let w = inner.width.saturating_sub(2) as usize;
+        let fill = (env * w as f32) as usize;
+        let bar: String = "█".repeat(fill) + &"░".repeat(w.saturating_sub(fill));
 
         let text = format!(
-            " osc: sine\n freq: {freq:.0} Hz\n ADSR: 10/100/70/20\n env: {env_bar}\n state: {}",
+            " osc: sine\n freq: {freq:.0} Hz\n envc: {phase_str} {bar}\n ADSR: 10/100/70/20\n {}",
             if playing { "▶ playing" } else { "⏸ paused" }
         );
         f.render_widget(Paragraph::new(text).style(Style::default().fg(PANEL_LABEL)), inner);
@@ -622,7 +628,7 @@ fn run_ui(
             render_voice_module(f, app, h_chunks[1]);
             render_seq_module(f, app, h_chunks[2]);
 
-            let status = format!(" {} | {} kHz | SPACE:play +/-:bpm h/j/k/l:grid ENTER:tgl s/v/q:module :q:quit ",
+            let status = format!(" {} | {} kHz | SPC:play +/-:bpm hjkl:grid ENT:tgl w/s:pitch 1/2/3:modules :q:quit ",
                 match app.mode { Mode::Normal => "NORMAL", Mode::Command(_) => "COMMAND" }, (sample_rate/1000.0) as u32);
             f.render_widget(Paragraph::new(status).style(Style::default().fg(Color::Black).bg(AMBER_DIM)), v_chunks[2]);
 
@@ -637,9 +643,9 @@ fn run_ui(
                 match &mut app.mode {
                     Mode::Normal => match key.code {
                         KeyCode::Char(':') => app.mode = Mode::Command(String::new()),
-                        KeyCode::Char('s') => app.scope_open = !app.scope_open,
-                        KeyCode::Char('v') => app.voice_open = !app.voice_open,
-                        KeyCode::Char('q') => app.seq_open = !app.seq_open,
+                        KeyCode::Char('1') => app.scope_open = !app.scope_open,
+                        KeyCode::Char('2') => app.voice_open = !app.voice_open,
+                        KeyCode::Char('3') => app.seq_open = !app.seq_open,
                         KeyCode::Char('b') => app.scope_mode = match app.scope_mode { ScopeMode::Braille=>ScopeMode::Crt, ScopeMode::Crt=>ScopeMode::Braille },
                         KeyCode::Char('[') => { app.scope_channel = app.scope_channel.prev(); app.scope_state = ScopeState::new(); app.scope_samples.clear(); }
                         KeyCode::Char(']') => { app.scope_channel = app.scope_channel.next(); app.scope_state = ScopeState::new(); app.scope_samples.clear(); }
@@ -651,6 +657,8 @@ fn run_ui(
                         KeyCode::Char('k') => { app.seq_cursor.0 = app.seq_cursor.0.saturating_sub(1); }
                         KeyCode::Char('j') => { app.seq_cursor.0 = (app.seq_cursor.0 + 1).min(SEQ_TRACKS-1); }
                         KeyCode::Enter => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); steps[t][s] = encode_step(!act, f as u32, (v*1000.0) as u32); } }
+                        KeyCode::Char('w') => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); let new_f = (f * 1.059463).min(4000.0); steps[t][s] = encode_step(act, new_f as u32, (v*1000.0) as u32); } }
+                        KeyCode::Char('s') => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); let new_f = (f / 1.059463).max(20.0); steps[t][s] = encode_step(act, new_f as u32, (v*1000.0) as u32); } }
                         KeyCode::Esc => {}
                         _ => {}
                     },
@@ -690,12 +698,12 @@ mod tests {
     #[test] fn test_channel_cycle() { let ch = ScopeChannel::Left; assert_eq!(ch.next(), ScopeChannel::Right); assert_eq!(ch.next().next(), ScopeChannel::Both); }
     #[test] fn test_decode_step() { let (act, f, v) = decode_step(encode_step(true, 440, 1000)); assert!(act); assert!((f-440.0).abs()<0.01); assert!((v-1.0).abs()<0.01); }
     #[test] fn test_decode_step_inactive() { let (act, _, _) = decode_step(encode_step(false, 440, 1000)); assert!(!act); }
-    #[test] fn test_adsr_attack() { let mut a = Adsr::new(0.01,0.1,0.7,0.2); a.trigger(48000.0); let v = a.tick(); assert!(v > 0.0); }
+    #[test] fn test_adsr_attack() { let mut a = Adsr::new(0.01,0.1,0.7,0.2,48000.0); a.trigger(); let v = a.tick(); assert!(v > 0.0); }
     #[test] fn test_adsr_release() {
-        let mut a = Adsr::new(0.01,0.0,1.0,0.01);
-        a.trigger(48000.0);
-        for _ in 0..1000 { a.tick(); } // through attack+decay to sustain
-        a.release(48000.0);
+        let mut a = Adsr::new(0.01,0.0,1.0,0.01,48000.0);
+        a.trigger();
+        for _ in 0..1000 { a.tick(); }
+        a.release();
         let mut vals = vec![];
         for _ in 0..2000 { vals.push(a.tick()); }
         assert!(vals.last().unwrap() < &0.1);
