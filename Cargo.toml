@@ -4,9 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-ratatui = "0.29"
-crossterm = "0.28"
+ratatui = "0.30"
+crossterm = "0.29"
 cpal = "0.15"
 midir = "0.10"
 crossbeam = "0.8"
 anyhow = "1"
+ratatui-image = { version = "11", default-features = false, features = ["crossterm"] }
+image = "0.25"
