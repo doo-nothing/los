@@ -1,0 +1,12 @@
+[package]
+name = "los"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+cpal = "0.15"
+midir = "0.10"
+crossbeam = "0.8"
+anyhow = "1"
