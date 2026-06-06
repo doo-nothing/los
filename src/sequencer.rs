@@ -2,7 +2,7 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
@@ -12,7 +12,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
-    text::{Line, Span},
+    text::Line,
     widgets::{Block, Borders, Paragraph},
     Terminal,
 };
@@ -151,23 +151,11 @@ fn euclidean_apply(steps: &mut [Step], pulses: usize, length: usize, rotation: u
             }
         }
     }
-    // Apply rotation
     let rot = rotation % len;
     for i in 0..len {
         let src = (i + len - rot) % len;
         steps[i].active = pattern[src];
     }
-}
-
-fn next_char_ms(timeout_ms: u64) -> Option<char> {
-    if event::poll(Duration::from_millis(timeout_ms)).ok()? {
-        if let Event::Key(key) = event::read().ok()? {
-            if let KeyCode::Char(c) = key.code {
-                return Some(c);
-            }
-        }
-    }
-    None
 }
 
 fn draw_ui(
@@ -180,18 +168,16 @@ fn draw_ui(
     terminal.draw(|f| {
         let area = f.area();
         
-        // Minimal layout: grid + status line
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),  // Status line
-                Constraint::Length(3),  // Step grid
-                Constraint::Length(1),  // Note display
-                Constraint::Min(0),     // Empty space for help
+                Constraint::Length(1),
+                Constraint::Length(3),
+                Constraint::Length(1),
+                Constraint::Min(0),
             ])
             .split(area);
 
-        // Status line
         let play_str = if state.playing { "▶" } else { "■" };
         let status = format!(
             "{} {} BPM | Step {}/{} | Sel {} | P:{} L:{} R:{} | {}",
@@ -203,7 +189,6 @@ fn draw_ui(
             .style(Style::default().fg(Color::Cyan));
         f.render_widget(status_widget, chunks[0]);
 
-        // Step grid - horizontal layout
         let step_width = area.width as usize / NUM_STEPS;
         let step_width = step_width.max(3).min(8);
         
@@ -241,7 +226,6 @@ fn draw_ui(
             f.render_widget(step_widget, rect);
         }
 
-        // Note display for selected step
         let sel_step = &state.steps[state.selected];
         let note_info = format!(
             "Step {}: {} | Note: {} ({}) | Vel: {} | {}",
@@ -256,7 +240,6 @@ fn draw_ui(
             .style(Style::default().fg(Color::Yellow));
         f.render_widget(note_widget, chunks[2]);
 
-        // Help overlay
         if show_help {
             let help_text = vec![
                 Line::from("━━━ Sequencer Help ━━━"),
@@ -306,7 +289,6 @@ fn draw_ui(
 }
 
 pub fn run(_instance: usize) -> Result<()> {
-    // Log to file for debugging
     use std::fs::OpenOptions;
     use std::io::Write;
     let mut log = OpenOptions::new()
@@ -317,12 +299,10 @@ pub fn run(_instance: usize) -> Result<()> {
     
     if let Some(ref mut f) = log {
         writeln!(f, "Sequencer starting at {:?}", std::time::SystemTime::now()).ok();
-        // Log TTY status for debugging
         unsafe {
             writeln!(f, "isatty(stdin)={} isatty(stdout)={}", 
                 libc::isatty(libc::STDIN_FILENO), 
                 libc::isatty(libc::STDOUT_FILENO)).ok();
-            // Try /dev/tty
             let tty_path = std::ffi::CString::new("/dev/tty").unwrap();
             let dev = libc::open(tty_path.as_ptr(), libc::O_RDWR);
             if dev >= 0 {
@@ -334,7 +314,6 @@ pub fn run(_instance: usize) -> Result<()> {
         }
     }
     
-    // Initialize terminal with retry logic (handles tmux PTY race)
     let mut last_err = String::new();
     for attempt in 0..20 {
         match enable_raw_mode() {
@@ -373,17 +352,10 @@ pub fn run(_instance: usize) -> Result<()> {
         return Err(anyhow::anyhow!("Failed to enter alternate screen: {}", e));
     }
     
-    if let Some(ref mut f) = log {
-        writeln!(f, "Alternate screen entered").ok();
-    }
-    
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = match Terminal::new(backend) {
         Ok(t) => t,
         Err(e) => {
-            if let Some(ref mut f) = log {
-                writeln!(f, "Failed to create terminal: {}", e).ok();
-            }
             return Err(anyhow::anyhow!("Failed to create terminal: {}", e));
         }
     };
@@ -407,6 +379,7 @@ pub fn run(_instance: usize) -> Result<()> {
     let mut input_buffer = String::new();
     let mut pending_g = false;
     let mut show_help = false;
+    let mut pending_count: Option<String> = None;
 
     loop {
         let current_state = state.lock().unwrap().clone();
@@ -416,95 +389,123 @@ pub fn run(_instance: usize) -> Result<()> {
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc if input_mode == "normal" => break,
-                    // Count prefix for P/L/R/h/l/w/b
-                    KeyCode::Char(c) if input_mode == "normal" && c.is_ascii_digit() && c != '0' => {
-                        let mut num_buf = String::new();
-                        num_buf.push(c);
-                        loop {
-                            if let Some(next) = next_char_ms(30) {
-                                if next.is_ascii_digit() {
-                                    num_buf.push(next);
-                                    continue;
-                                }
-                                let count: usize = num_buf.parse().unwrap_or(1);
-                                match next {
-                                    'P' => {
-                                        let mut s = state.lock().unwrap();
-                                        s.euclidean_pulses = count.min(16);
-                                        let (p, l, r) = (s.euclidean_pulses, s.euclidean_length, s.euclidean_rotation);
-                                        euclidean_apply(&mut s.steps, p, l, r);
-                                    }
-                                    'L' => {
-                                        let mut s = state.lock().unwrap();
-                                        s.euclidean_length = count.min(16).max(1);
-                                        let (p, l, r) = (s.euclidean_pulses, s.euclidean_length, s.euclidean_rotation);
-                                        euclidean_apply(&mut s.steps, p, l, r);
-                                    }
-                                    'R' => {
-                                        let mut s = state.lock().unwrap();
-                                        s.euclidean_rotation = count.min(255);
-                                        let (p, l, r) = (s.euclidean_pulses, s.euclidean_length, s.euclidean_rotation);
-                                        euclidean_apply(&mut s.steps, p, l, r);
-                                    }
-                                    'h' | 'l' => {
-                                        let mut s = state.lock().unwrap();
-                                        if next == 'l' {
-                                            s.selected = (s.selected + count) % NUM_STEPS;
-                                        } else {
-                                            s.selected = s.selected.saturating_sub(count).min(NUM_STEPS - 1);
-                                        }
-                                    }
-                                    'w' => {
-                                        let mut s = state.lock().unwrap();
-                                        for _ in 0..count {
-                                            for i in 1..=NUM_STEPS {
-                                                let idx = (s.selected + i) % NUM_STEPS;
-                                                if s.steps[idx].active {
-                                                    s.selected = idx;
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    'b' => {
-                                        let mut s = state.lock().unwrap();
-                                        for _ in 0..count {
-                                            for i in 1..=NUM_STEPS {
-                                                let idx = (s.selected + NUM_STEPS - i) % NUM_STEPS;
-                                                if s.steps[idx].active {
-                                                    s.selected = idx;
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                                break;
-                            }
-                            break;
+                    
+                    // Digits accumulate into pending_count
+                    KeyCode::Char(c) if input_mode == "normal" && c.is_ascii_digit() => {
+                        if c == '0' && pending_count.is_none() {
+                            let mut s = state.lock().unwrap();
+                            s.selected = 0;
+                        } else {
+                            pending_count.get_or_insert(String::new()).push(c);
                         }
                     }
-                    // Play/pause
+                    
+                    // Count-prefixed P, L, R
+                    KeyCode::Char('P') if pending_count.is_some() => {
+                        let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let mut s = state.lock().unwrap();
+                        if count > 0 { s.euclidean_pulses = count.min(16); }
+                        let (p, l, r) = (s.euclidean_pulses, s.euclidean_length, s.euclidean_rotation);
+                        euclidean_apply(&mut s.steps, p, l, r);
+                    }
+                    KeyCode::Char('L') if pending_count.is_some() => {
+                        let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let mut s = state.lock().unwrap();
+                        if count > 0 { s.euclidean_length = count.min(16).max(1); }
+                        let (p, l, r) = (s.euclidean_pulses, s.euclidean_length, s.euclidean_rotation);
+                        euclidean_apply(&mut s.steps, p, l, r);
+                    }
+                    KeyCode::Char('R') if pending_count.is_some() => {
+                        let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let mut s = state.lock().unwrap();
+                        if count > 0 {
+                            s.euclidean_rotation = count.min(255);
+                        } else {
+                            s.euclidean_rotation = (s.euclidean_rotation + 1) % s.euclidean_length;
+                        }
+                        let (p, l, r) = (s.euclidean_pulses, s.euclidean_length, s.euclidean_rotation);
+                        euclidean_apply(&mut s.steps, p, l, r);
+                    }
+                    // Count-prefixed navigation
+                    KeyCode::Char('l') | KeyCode::Right if pending_count.is_some() => {
+                        let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
+                        let mut s = state.lock().unwrap();
+                        s.selected = (s.selected + count) % NUM_STEPS;
+                    }
+                    KeyCode::Char('h') | KeyCode::Left if pending_count.is_some() => {
+                        let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
+                        let mut s = state.lock().unwrap();
+                        s.selected = s.selected.saturating_sub(count).min(NUM_STEPS - 1);
+                    }
+                    KeyCode::Char('w') if pending_count.is_some() => {
+                        let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
+                        let mut s = state.lock().unwrap();
+                        for _ in 0..count {
+                            for i in 1..=NUM_STEPS {
+                                let idx = (s.selected + i) % NUM_STEPS;
+                                if s.steps[idx].active {
+                                    s.selected = idx;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Char('b') if pending_count.is_some() => {
+                        let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
+                        let mut s = state.lock().unwrap();
+                        for _ in 0..count {
+                            for i in 1..=NUM_STEPS {
+                                let idx = (s.selected + NUM_STEPS - i) % NUM_STEPS;
+                                if s.steps[idx].active {
+                                    s.selected = idx;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Non-count commands (clear pending_count)
+                    KeyCode::Char('P') if input_mode == "normal" => {
+                        pending_count = None;
+                        let mut s = state.lock().unwrap();
+                        let (p, l, r) = (s.euclidean_pulses, s.euclidean_length, s.euclidean_rotation);
+                        euclidean_apply(&mut s.steps, p, l, r);
+                    }
+                    KeyCode::Char('L') if input_mode == "normal" => {
+                        pending_count = None;
+                        let mut s = state.lock().unwrap();
+                        let (p, l, r) = (s.euclidean_pulses, s.euclidean_length, s.euclidean_rotation);
+                        euclidean_apply(&mut s.steps, p, l, r);
+                    }
+                    KeyCode::Char('R') if input_mode == "normal" => {
+                        pending_count = None;
+                        let mut s = state.lock().unwrap();
+                        s.euclidean_rotation = (s.euclidean_rotation + 1) % s.euclidean_length;
+                        let (p, l, r) = (s.euclidean_pulses, s.euclidean_length, s.euclidean_rotation);
+                        euclidean_apply(&mut s.steps, p, l, r);
+                    }
+                    
+                    // Clear pending_count on any other action key
                     KeyCode::Char(' ') if input_mode == "normal" => {
+                        pending_count = None;
                         let mut s = state.lock().unwrap();
                         s.playing = !s.playing;
                     }
-                    // Toggle step on/off
                     KeyCode::Enter if input_mode == "normal" => {
+                        pending_count = None;
                         let mut s = state.lock().unwrap();
                         let sel = s.selected;
                         s.steps[sel].active = !s.steps[sel].active;
                     }
-                    // Delete step (save to clipboard)
                     KeyCode::Char('x') if input_mode == "normal" => {
+                        pending_count = None;
                         let mut s = state.lock().unwrap();
                         let sel = s.selected;
                         s.clipboard = Some(s.steps[sel].clone());
                         s.steps[sel].active = false;
                     }
-                    // Paste step from clipboard
                     KeyCode::Char('p') if input_mode == "normal" => {
+                        pending_count = None;
                         let mut s = state.lock().unwrap();
                         let sel = s.selected;
                         if let Some(ref clip) = s.clipboard {
@@ -512,71 +513,58 @@ pub fn run(_instance: usize) -> Result<()> {
                             s.steps[sel].active = true;
                         }
                     }
-                    // Raise note by semitone
                     KeyCode::Char('k') if input_mode == "normal" => {
+                        pending_count = None;
                         let mut s = state.lock().unwrap();
                         let sel = s.selected;
                         s.steps[sel].note = (s.steps[sel].note + 1).min(127);
                     }
-                    // Lower note by semitone
                     KeyCode::Char('j') if input_mode == "normal" => {
+                        pending_count = None;
                         let mut s = state.lock().unwrap();
                         let sel = s.selected;
                         s.steps[sel].note = s.steps[sel].note.saturating_sub(1).max(0);
                     }
-                    // Raise note by octave
                     KeyCode::Char('K') if input_mode == "normal" => {
+                        pending_count = None;
                         let mut s = state.lock().unwrap();
                         let sel = s.selected;
                         s.steps[sel].note = (s.steps[sel].note + 12).min(127);
                     }
-                    // Lower note by octave
                     KeyCode::Char('J') if input_mode == "normal" => {
+                        pending_count = None;
                         let mut s = state.lock().unwrap();
                         let sel = s.selected;
                         s.steps[sel].note = s.steps[sel].note.saturating_sub(12).max(0);
                     }
-                    // Stop
                     KeyCode::Char('s') if input_mode == "normal" => {
+                        pending_count = None;
                         let mut s = state.lock().unwrap();
                         s.playing = false;
                     }
-                    // Euclidean pulses (recalculate with current)
-                    KeyCode::Char('P') if input_mode == "normal" => {
-                        let mut s = state.lock().unwrap();
-                        let (p, l, r) = (s.euclidean_pulses, s.euclidean_length, s.euclidean_rotation);
-                        euclidean_apply(&mut s.steps, p, l, r);
+                    KeyCode::Char('+') | KeyCode::Char('=') if input_mode == "normal" => {
+                        pending_count = None;
                     }
-                    // Euclidean length (recalculate with current)
-                    KeyCode::Char('L') if input_mode == "normal" => {
-                        let mut s = state.lock().unwrap();
-                        let (p, l, r) = (s.euclidean_pulses, s.euclidean_length, s.euclidean_rotation);
-                        euclidean_apply(&mut s.steps, p, l, r);
+                    KeyCode::Char('-') if input_mode == "normal" => {
+                        pending_count = None;
                     }
-                    // Euclidean rotation (increment by 1)
-                    KeyCode::Char('R') if input_mode == "normal" => {
+                    KeyCode::Char('$') if input_mode == "normal" => {
+                        pending_count = None;
                         let mut s = state.lock().unwrap();
-                        s.euclidean_rotation = (s.euclidean_rotation + 1) % s.euclidean_length;
-                        let (p, l, r) = (s.euclidean_pulses, s.euclidean_length, s.euclidean_rotation);
-                        euclidean_apply(&mut s.steps, p, l, r);
+                        s.selected = NUM_STEPS - 1;
                     }
                     KeyCode::Char('l') | KeyCode::Right if input_mode == "normal" => {
+                        pending_count = None;
                         let mut s = state.lock().unwrap();
                         s.selected = (s.selected + 1) % NUM_STEPS;
                     }
                     KeyCode::Char('h') | KeyCode::Left if input_mode == "normal" => {
+                        pending_count = None;
                         let mut s = state.lock().unwrap();
-                        s.selected = if s.selected == 0 { NUM_STEPS - 1 } else { s.selected - 1 };
-                    }
-                    KeyCode::Char('0') if input_mode == "normal" => {
-                        let mut s = state.lock().unwrap();
-                        s.selected = 0;
-                    }
-                    KeyCode::Char('$') if input_mode == "normal" => {
-                        let mut s = state.lock().unwrap();
-                        s.selected = NUM_STEPS - 1;
+                        s.selected = s.selected.saturating_sub(1).min(NUM_STEPS - 1);
                     }
                     KeyCode::Char('w') if input_mode == "normal" => {
+                        pending_count = None;
                         let mut s = state.lock().unwrap();
                         for i in 1..=NUM_STEPS {
                             let idx = (s.selected + i) % NUM_STEPS;
@@ -587,6 +575,7 @@ pub fn run(_instance: usize) -> Result<()> {
                         }
                     }
                     KeyCode::Char('b') if input_mode == "normal" => {
+                        pending_count = None;
                         let mut s = state.lock().unwrap();
                         for i in 1..=NUM_STEPS {
                             let idx = (s.selected + NUM_STEPS - i) % NUM_STEPS;
@@ -597,6 +586,7 @@ pub fn run(_instance: usize) -> Result<()> {
                         }
                     }
                     KeyCode::Char('g') if input_mode == "normal" => {
+                        pending_count = None;
                         if pending_g {
                             let mut s = state.lock().unwrap();
                             s.selected = 0;
@@ -606,12 +596,18 @@ pub fn run(_instance: usize) -> Result<()> {
                         }
                     }
                     KeyCode::Char('n') if input_mode == "normal" => {
+                        pending_count = None;
                         input_mode = String::from("note");
                         input_buffer.clear();
                     }
                     KeyCode::Char('t') if input_mode == "normal" => {
+                        pending_count = None;
                         input_mode = String::from("bpm");
                         input_buffer.clear();
+                    }
+                    KeyCode::Char('?') if input_mode == "normal" => {
+                        pending_count = None;
+                        show_help = !show_help;
                     }
                     KeyCode::Char(c) if input_mode != "normal" => {
                         if c.is_ascii_digit() || c == '.' {
@@ -641,8 +637,10 @@ pub fn run(_instance: usize) -> Result<()> {
                         input_mode = String::from("normal");
                         input_buffer.clear();
                     }
-                    KeyCode::Char('?') if input_mode == "normal" => {
-                        show_help = !show_help;
+                    
+                    // Any other key clears pending_count
+                    _ if pending_count.is_some() => {
+                        pending_count = None;
                     }
                     _ => {}
                 }
