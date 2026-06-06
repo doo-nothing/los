@@ -8,8 +8,11 @@ use crate::shm::AudioRingbuf;
 const BARS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
 pub fn run(_instance: usize) -> Result<()> {
-    let ringbuf = AudioRingbuf::open("/los_mix_in")
-        .map_err(|e| anyhow::anyhow!("opening audio ringbuffer: {}", e))?;
+    let ringbuf = match AudioRingbuf::open("/los_mix_in") {
+        Ok(rb) => rb,
+        Err(_) => AudioRingbuf::create("/los_mix_in")
+            .map_err(|e| anyhow::anyhow!("creating audio ringbuffer: {}", e))?,
+    };
     let channels = ringbuf.channels() as usize;
     let slot_len = ringbuf.slot_len();
 

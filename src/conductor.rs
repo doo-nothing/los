@@ -130,10 +130,17 @@ pub fn run_create(attach: bool) -> Result<()> {
     let session = &layout.session_name;
 
     if tmux::session_exists(session) {
-        if attach && unsafe { libc::isatty(libc::STDOUT_FILENO) != 0 } {
-            eprintln!("los: session '{session}' already exists, attaching...");
-            let _ = tmux::cmd(["attach-session", "-t", session]);
-            eprintln!("los: session '{session}' detached. Use `tmux attach -t {session}` to reconnect.");
+        if attach {
+            if std::env::var("TMUX").is_ok() {
+                eprintln!("los: switching to session '{session}'...");
+                let _ = tmux::cmd(["switch-client", "-t", session]);
+            } else if unsafe { libc::isatty(libc::STDOUT_FILENO) != 0 } {
+                eprintln!("los: session '{session}' already exists, attaching...");
+                let _ = tmux::cmd(["attach-session", "-t", session]);
+                eprintln!("los: session '{session}' detached.");
+            } else {
+                eprintln!("los: session '{session}' already exists");
+            }
         } else {
             eprintln!("los: session '{session}' already exists");
         }
@@ -143,14 +150,21 @@ pub fn run_create(attach: bool) -> Result<()> {
     let bin = los_bin();
     create_session(&layout, &bin)?;
 
-    if attach && unsafe { libc::isatty(libc::STDOUT_FILENO) != 0 } {
-        let _ = tmux::cmd(["attach-session", "-t", session]);
-        eprintln!(
-            "los: session '{session}' detached. Reattach with `tmux attach -t {session}`, \
-             or clean up with `tmux kill-session -t {session}`."
-        );
+    if attach {
+        if std::env::var("TMUX").is_ok() {
+            eprintln!("los: switching to session '{session}'...");
+            let _ = tmux::cmd(["switch-client", "-t", session]);
+        } else if unsafe { libc::isatty(libc::STDOUT_FILENO) != 0 } {
+            let _ = tmux::cmd(["attach-session", "-t", session]);
+            eprintln!(
+                "los: session '{session}' detached. Reattach with `tmux attach -t {session}`, \
+                 or clean up with `tmux kill-session -t {session}`."
+            );
+        } else {
+            eprintln!("los: session '{session}' created. Use `tmux attach -t {session}` to connect.");
+        }
     } else {
-        eprintln!("los: use `tmux attach -t {session}` to connect");
+        eprintln!("los: session '{session}' created. Use `tmux attach -t {session}` to connect.");
     }
 
     Ok(())
