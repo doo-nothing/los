@@ -132,7 +132,10 @@ pub fn run_create(attach: bool) -> Result<()> {
     if tmux::session_exists(session) {
         if attach {
             eprintln!("los: session '{session}' already exists, attaching...");
-            tmux::cmd(["attach-session", "-t", session])?;
+            if let Err(e) = tmux::cmd(["attach-session", "-t", session]) {
+                eprintln!("los: could not attach: {e}");
+                eprintln!("los: use `tmux attach -t {session}` to connect");
+            }
         } else {
             eprintln!("los: session '{session}' already exists");
         }
@@ -143,11 +146,18 @@ pub fn run_create(attach: bool) -> Result<()> {
     create_session(&layout, &bin)?;
 
     if attach {
-        tmux::cmd(["attach-session", "-t", session])?;
-        eprintln!(
-            "los: session '{session}' detached. Reattach with `tmux attach -t {session}`, \
-             or clean up with `tmux kill-session -t {session}`."
-        );
+        match tmux::cmd(["attach-session", "-t", session]) {
+            Ok(_) => {
+                eprintln!(
+                    "los: session '{session}' detached. Reattach with `tmux attach -t {session}`, \
+                     or clean up with `tmux kill-session -t {session}`."
+                );
+            }
+            Err(e) => {
+                eprintln!("los: could not attach: {e}");
+                eprintln!("los: session '{session}' is ready. Use `tmux attach -t {session}` to connect.");
+            }
+        }
     } else {
         eprintln!("los: use `tmux attach -t {session}` to connect");
     }
