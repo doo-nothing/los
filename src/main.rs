@@ -47,6 +47,7 @@ const PANEL_BORDER: Color = Color::Rgb(60, 60, 68);
 const PANEL_LABEL: Color = Color::Rgb(140, 140, 150);
 const MODE_INSERT: Color = Color::Rgb(100, 200, 80);
 const MODE_COMMAND: Color = Color::Rgb(200, 80, 80);
+const CURSOR_FG: Color = Color::Rgb(200, 220, 255);
 
 const CRT_SIZE: usize = 96;
 const PHOSPHOR_SIZE: u32 = 192;
@@ -756,47 +757,47 @@ fn render_seq_module(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    if app.seq_open {
-        let steps_visible = inner.width.saturating_sub(2) as usize;
-        let show_cursor_info = inner.height > 2 + SEQ_TRACKS as u16;
-        let grid_rows = if show_cursor_info { SEQ_TRACKS } else { (inner.height.saturating_sub(1)) as usize };
-        let mut lines: Vec<String> = Vec::new();
-        let mut cursor_step_data: Option<(bool, f32, f32)> = None;
-        let (ct, cs) = app.seq_cursor;
+        if app.seq_open {
+            let steps_visible = inner.width.saturating_sub(2) as usize;
+            let show_cursor_info = inner.height > 2 + SEQ_TRACKS as u16;
+            let grid_rows = if show_cursor_info { SEQ_TRACKS } else { (inner.height.saturating_sub(1)) as usize };
+            #[allow(clippy::type_complexity)]
+            let mut lines: Vec<Line<'_>> = Vec::new();
+            let mut cursor_step_data: Option<(bool, f32, f32)> = None;
+            let (ct, cs) = app.seq_cursor;
 
-        if let Ok(steps) = app.engine.step_data.try_lock() {
-            for t in 0..SEQ_TRACKS.min(grid_rows) {
-                let mut line = String::new();
-                for s in 0..SEQ_STEPS.min(steps_visible) {
-                    let (active, _, _) = decode_step(steps[t][s]);
-                    let cursor = (t, s) == (ct, cs);
-                    let playhead = s == cur_step && playing;
-                    let ch = match (active, cursor, playhead) {
-                        (_, true, true) => '◈',
-                        (_, _, true) => '▸',
-                        (true, true, _) => '◆',
-                        (false, true, _) => '◇',
-                        (true, false, _) => '■',
-                        (false, false, _) => '·',
-                    };
-                    line.push(ch);
-                    if cursor { cursor_step_data = Some(decode_step(steps[t][s])); }
+            if let Ok(steps) = app.engine.step_data.try_lock() {
+                for t in 0..SEQ_TRACKS.min(grid_rows) {
+                    let mut spans: Vec<Span<'_>> = Vec::new();
+                    for s in 0..SEQ_STEPS.min(steps_visible) {
+                        let (active, _, _) = decode_step(steps[t][s]);
+                        let cursor = (t, s) == (ct, cs);
+                        let playhead = s == cur_step && playing;
+                        let (ch, fg) = match (active, cursor, playhead) {
+                            (_, true, true) => ('◈', CURSOR_FG),
+                            (_, _, true) => ('▸', AMBER),
+                            (true, true, _) => ('◆', CURSOR_FG),
+                            (false, true, _) => ('◇', CURSOR_FG),
+                            (true, false, _) => ('■', AMBER),
+                            (false, false, _) => ('·', AMBER),
+                        };
+                        spans.push(Span::styled(ch.to_string(), Style::default().fg(fg)));
+                        if cursor { cursor_step_data = Some(decode_step(steps[t][s])); }
+                    }
+                    lines.push(Line::from(spans));
                 }
-                lines.push(line);
             }
-        }
-        lines.push("".into());
+            lines.push(Line::from(""));
 
         if show_cursor_info {
             if let Some((_active, freq, vel)) = cursor_step_data {
                 let note = freq_to_note(freq);
-                lines.push(format!(" T{ct}S{cs:02} {note} {freq:.0}Hz vel{vel:.2}", ));
+                lines.push(Line::from(format!(" T{ct}S{cs:02} {note} {freq:.0}Hz vel{vel:.2}")));
             } else {
-                lines.push(format!(" T{ct}S{cs:02}"));
+                lines.push(Line::from(format!(" T{ct}S{cs:02}")));
             }
         }
-        let text = lines.join("\n");
-        f.render_widget(Paragraph::new(text).style(Style::default().fg(AMBER)), inner);
+        f.render_widget(Paragraph::new(lines).style(Style::default().fg(AMBER)), inner);
     }
 }
 
