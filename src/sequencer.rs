@@ -42,6 +42,7 @@ struct SequencerState {
     current_step: usize,
     selected: usize,
     last_note: Option<u8>,
+    clipboard: Option<Step>,
 }
 
 impl Default for SequencerState {
@@ -57,6 +58,7 @@ impl Default for SequencerState {
             current_step: 0,
             selected: 0,
             last_note: None,
+            clipboard: None,
         }
     }
 }
@@ -228,13 +230,17 @@ fn draw_ui(
                 Line::from("  gg         Go to step 0"),
                 Line::from(""),
                 Line::from("Editing:"),
-                Line::from("  space      Toggle step on/off"),
+                Line::from("  Enter      Toggle step on/off"),
+                Line::from("  x          Delete step (copies to clipboard)"),
+                Line::from("  p          Paste step from clipboard"),
+                Line::from("  k/K        Raise note (semitone/octave)"),
+                Line::from("  j/J        Lower note (semitone/octave)"),
                 Line::from("  n<NUM>     Set note (e.g. n60 for C4)"),
                 Line::from("  t<NUM>     Set BPM (e.g. t140)"),
                 Line::from("  e<NUM>     Euclidean fill (e.g. e5)"),
                 Line::from(""),
                 Line::from("Transport:"),
-                Line::from("  p          Play/pause"),
+                Line::from("  space      Play/pause"),
                 Line::from("  s          Stop"),
                 Line::from(""),
                 Line::from("  ?          Close this help"),
@@ -364,15 +370,58 @@ pub fn run(_instance: usize) -> Result<()> {
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc if input_mode == "normal" => break,
+                    // Play/pause
                     KeyCode::Char(' ') if input_mode == "normal" => {
+                        let mut s = state.lock().unwrap();
+                        s.playing = !s.playing;
+                    }
+                    // Toggle step on/off
+                    KeyCode::Enter if input_mode == "normal" => {
                         let mut s = state.lock().unwrap();
                         let sel = s.selected;
                         s.steps[sel].active = !s.steps[sel].active;
                     }
+                    // Delete step (save to clipboard)
+                    KeyCode::Char('x') if input_mode == "normal" => {
+                        let mut s = state.lock().unwrap();
+                        let sel = s.selected;
+                        s.clipboard = Some(s.steps[sel].clone());
+                        s.steps[sel].active = false;
+                    }
+                    // Paste step from clipboard
                     KeyCode::Char('p') if input_mode == "normal" => {
                         let mut s = state.lock().unwrap();
-                        s.playing = !s.playing;
+                        let sel = s.selected;
+                        if let Some(ref clip) = s.clipboard {
+                            s.steps[sel] = clip.clone();
+                            s.steps[sel].active = true;
+                        }
                     }
+                    // Raise note by semitone
+                    KeyCode::Char('k') if input_mode == "normal" => {
+                        let mut s = state.lock().unwrap();
+                        let sel = s.selected;
+                        s.steps[sel].note = (s.steps[sel].note + 1).min(127);
+                    }
+                    // Lower note by semitone
+                    KeyCode::Char('j') if input_mode == "normal" => {
+                        let mut s = state.lock().unwrap();
+                        let sel = s.selected;
+                        s.steps[sel].note = s.steps[sel].note.saturating_sub(1).max(0);
+                    }
+                    // Raise note by octave
+                    KeyCode::Char('K') if input_mode == "normal" => {
+                        let mut s = state.lock().unwrap();
+                        let sel = s.selected;
+                        s.steps[sel].note = (s.steps[sel].note + 12).min(127);
+                    }
+                    // Lower note by octave
+                    KeyCode::Char('J') if input_mode == "normal" => {
+                        let mut s = state.lock().unwrap();
+                        let sel = s.selected;
+                        s.steps[sel].note = s.steps[sel].note.saturating_sub(12).max(0);
+                    }
+                    // Stop
                     KeyCode::Char('s') if input_mode == "normal" => {
                         let mut s = state.lock().unwrap();
                         s.playing = false;
