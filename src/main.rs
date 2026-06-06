@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use anyhow::Result;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -20,7 +18,6 @@ fn usage() {
     eprintln!();
     eprintln!("options:");
     eprintln!("  --create-only  Create session but don't attach");
-    eprintln!("  --force        Bypass inside-tmux guard");
     eprintln!("  --help, -h     Show this help");
 }
 
@@ -30,7 +27,6 @@ fn has_help_flag(args: &[String]) -> bool {
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let flags: HashSet<&str> = args.iter().filter(|a| a.starts_with("--")).map(|a| a.as_str()).collect();
 
     if has_help_flag(&args) {
         usage();
@@ -67,13 +63,7 @@ fn main() -> Result<()> {
             std::process::exit(1);
         }
         None => {
-            if std::env::var("TMUX").is_ok() && !flags.contains("--force") {
-                eprintln!(
-                    "los: already inside tmux. Use explicit subcommand, e.g. 'los conductor'."
-                );
-                std::process::exit(1);
-            }
-            let attach = !flags.contains("--create-only");
+            let attach = !args.iter().any(|a| a == "--create-only");
             los::conductor::run_create(attach)
         }
     }
