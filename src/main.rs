@@ -37,6 +37,8 @@ const MODULE_WIDTH: u16 = 24;
 const MODULE_WF_ROWS: u16 = 12;
 const MODULE_HEIGHT_OPEN: u16 = MODULE_WF_ROWS + 4;
 const MODULE_HEIGHT_CLOSED: u16 = 1;
+const ENV_HEIGHT_OPEN: u16 = 6;
+const ENV_HEIGHT_CLOSED: u16 = 1;
 const SEQ_STEPS: usize = 16;
 const MAX_STEPS: usize = 64;
 const SEQ_TRACKS: usize = 4;
@@ -150,6 +152,47 @@ struct VoiceData {
     velocity: f32,
 }
 
+/// Maths-style envelope generator per track
+struct EnvGen {
+    phase: f32,
+    state: u8,  // 0=idle, 1=rise, 2=fall
+}
+
+impl EnvGen {
+    fn new() -> Self { Self { phase: 0.0, state: 0 } }
+    fn trigger(&mut self) { self.state = 1; self.phase = 0.0; }
+    fn tick(&mut self, attack_rate: f32, decay_rate: f32, shape_norm: f32) -> f32 {
+        match self.state {
+            1 => {
+                self.phase += attack_rate;
+                if self.phase >= 1.0 { self.phase = 0.0; self.state = 2; }
+                curve(self.phase, shape_norm)
+            }
+            2 => {
+                self.phase += decay_rate;
+                if self.phase >= 1.0 { self.state = 0; return 0.0; }
+                1.0 - curve(self.phase, shape_norm)
+            }
+            _ => 0.0,
+        }
+    }
+}
+
+fn curve(t: f32, shape_norm: f32) -> f32 {
+    let power = if shape_norm < 0.5 {
+        0.3 + (shape_norm / 0.5) * 0.7
+    } else {
+        1.0 + ((shape_norm - 0.5) / 0.5) * 2.0
+    };
+    t.powf(power)
+}
+
+/// Map 0-1000 param to 0.001s-10s attack/decay time
+fn param_to_time(param: u32) -> f32 {
+    let p = param as f32 / 1000.0;
+    0.001 * 10_000.0_f32.powf(p)
+}
+
 /// Shared state between audio callback and TUI.
 struct EngineShared {
     bpm: AtomicU32,         // BPM * 100 (e.g. 12000 = 120.00)
@@ -165,6 +208,13 @@ struct EngineShared {
     adsr_phase: [AtomicU32; SEQ_TRACKS],
     cur_freq: [AtomicU32; SEQ_TRACKS],
     seq_progress: AtomicU32, // 0-1000 intra-step progress for scrubber
+    // Maths-inspired envelope per track
+    env_attack: [AtomicU32; SEQ_TRACKS],
+    env_decay: [AtomicU32; SEQ_TRACKS],
+    env_shape: [AtomicU32; SEQ_TRACKS],
+    env_loop: [AtomicU32; SEQ_TRACKS],    // 0=oneshot, 1=cycle
+    env_mod_target: [AtomicU32; SEQ_TRACKS], // 0=amp, 1=pitch, 2=shape, 3=fm
+    env_out: [AtomicU32; SEQ_TRACKS],       // current envelope output 0-1000
 }
 
 impl EngineShared {
@@ -189,6 +239,12 @@ impl EngineShared {
             adsr_phase: [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)],
             cur_freq: [AtomicU32::new(440), AtomicU32::new(440), AtomicU32::new(440), AtomicU32::new(440)],
             seq_progress: AtomicU32::new(0),
+            env_attack: [AtomicU32::new(100), AtomicU32::new(100), AtomicU32::new(100), AtomicU32::new(100)],
+            env_decay: [AtomicU32::new(200), AtomicU32::new(200), AtomicU32::new(200), AtomicU32::new(200)],
+            env_shape: [AtomicU32::new(500), AtomicU32::new(500), AtomicU32::new(500), AtomicU32::new(500)],
+            env_loop: [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)],
+            env_mod_target: [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)],
+            env_out: [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)],
         }
     }
 }
@@ -251,6 +307,7 @@ struct App {
     scope_open: bool,
     voice_open: bool,
     seq_open: bool,
+    env_open: bool,
     scope_channel: ScopeChannel,
     scope_mode: ScopeMode,
     scope_samples: Vec<f32>,
@@ -269,6 +326,7 @@ struct App {
     pending_leader: bool,
     focused_module: Option<usize>,
     voice_param: usize,
+    env_param: usize,
     phosphor_renderer: Option<PhosphorHeadless>,
     phosphor_error: Option<String>,
 }
@@ -521,6 +579,7 @@ fn build_output_stream(
     let mut voices: Vec<VoiceData> = (0..SEQ_TRACKS).map(|_| {
         VoiceData { adsr: Adsr::new(0.01, 0.1, 0.7, 0.2, sample_rate), phase: 0.0, freq: 440.0, velocity: 0.0 }
     }).collect();
+    let mut env_gens: Vec<EnvGen> = (0..SEQ_TRACKS).map(|_| EnvGen::new()).collect();
     let mut seq_phase: f64 = 0.0;
     let mut prev_steps = [0usize; SEQ_TRACKS];
     let mut cached_lens = [SEQ_STEPS; SEQ_TRACKS];
@@ -571,6 +630,7 @@ fn build_output_stream(
                                 voices[t].freq = freq;
                                 voices[t].velocity = vel;
                                 voices[t].adsr.trigger();
+                                env_gens[t].trigger();
                             } else {
                                 voices[t].adsr.release();
                             }
@@ -583,27 +643,51 @@ fn build_output_stream(
                 engine.env_value[t].store((env * 1000.0) as u32, Ordering::Relaxed);
                 engine.adsr_phase[t].store(voices[t].adsr.state as u32, Ordering::Relaxed);
 
+                // Maths-style envelope modulation
+                let env_attack = engine.env_attack[t].load(Ordering::Relaxed);
+                let env_decay = engine.env_decay[t].load(Ordering::Relaxed);
+                let env_shape_norm = engine.env_shape[t].load(Ordering::Relaxed) as f32 / 1000.0;
+                let env_loop = engine.env_loop[t].load(Ordering::Relaxed) != 0;
+                let env_mod = engine.env_mod_target[t].load(Ordering::Relaxed);
+
+                let env_a = 1.0 / (param_to_time(env_attack) * sample_rate);
+                let env_d = 1.0 / (param_to_time(env_decay) * sample_rate);
+                let env_out_val = env_gens[t].tick(env_a, env_d, env_shape_norm);
+                if env_loop && env_gens[t].state == 0 { env_gens[t].trigger(); }
+                engine.env_out[t].store((env_out_val * 1000.0) as u32, Ordering::Relaxed);
+
                 let shape = engine.voice_shape[t].load(Ordering::Relaxed) as f32 / 1000.0;
                 let sub_lvl = engine.voice_sub[t].load(Ordering::Relaxed) as f32 / 1000.0;
                 let fm_amt = engine.voice_fm[t].load(Ordering::Relaxed) as f32 / 1000.0;
                 let output_sel = engine.voice_output[t].load(Ordering::Relaxed);
+                let output_sel = if output_sel < 333 { 0 } else if output_sel < 666 { 1 } else { 2 };
+
+                // apply envelope modulation
+                let mod_amt = env_out_val * 0.5; // +/- 50% modulation depth
 
                 // basic FM modulation from a slow LFO
                 let fm_lfo_phase = (voices[t].phase * 0.1).fract();
                 let fm_mod = (fm_lfo_phase * 2.0 * std::f32::consts::PI).sin() * fm_amt * 0.5;
                 let mod_freq = voices[t].freq * (1.0 + fm_mod);
 
-                voices[t].phase = (voices[t].phase + mod_freq / sample_rate).fract();
+                let (pitch_mod, shape_mod, _fm_mod_extra) = match env_mod {
+                    1 => (mod_amt, 0.0, 0.0),    // pitch
+                    2 => (0.0, mod_amt, 0.0),    // shape
+                    3 => (0.0, 0.0, mod_amt),    // fm amount
+                    _ => (0.0, 0.0, 0.0),        // none/amp
+                };
+
+                voices[t].phase = (voices[t].phase + mod_freq * (1.0 + pitch_mod) / sample_rate).fract();
                 let phase = voices[t].phase;
 
                 let sine = (phase * 2.0 * std::f32::consts::PI).sin();
                 let saw = 2.0 * phase - 1.0;
                 let square = if phase < 0.5 { 1.0 } else { -1.0 };
                 let shaped = if shape < 0.5 {
-                    let tt = shape * 2.0;
+                    let tt = (shape + shape_mod).clamp(0.0, 1.0) * 2.0;
                     sine * (1.0 - tt) + saw * tt
                 } else {
-                    let tt = (shape - 0.5) * 2.0;
+                    let tt = ((shape + shape_mod).clamp(0.0, 1.0) - 0.5) * 2.0;
                     saw * (1.0 - tt) + square * tt
                 };
                 let sub_phase = (phase * 0.5).fract();
@@ -614,7 +698,8 @@ fn build_output_stream(
                     _ => shaped * (1.0 - sub_lvl) + sub * sub_lvl,
                 };
 
-                accum += out * 0.3 * env * voices[t].velocity;
+                let amp_mod = if env_mod == 0 { env_out_val } else { 1.0 };
+                accum += out * 0.3 * env * voices[t].velocity * (0.5 + 0.5 * amp_mod);
             }
 
             // mix down and write output
@@ -670,12 +755,12 @@ fn main() -> Result<()> {
     };
 
     let mut app = App {
-        mode: Mode::Normal, scope_open: true, voice_open: true, seq_open: true,
+        mode: Mode::Normal, scope_open: true, voice_open: true, seq_open: true, env_open: true,
         scope_channel: ScopeChannel::Both, scope_mode: if phosphor_renderer.is_some() { ScopeMode::Phosphor } else { ScopeMode::Crt },
         scope_samples: Vec::with_capacity(SCOPE_CAPACITY), scope_state: ScopeState::new(),
         crt_buf: vec![0.0; CRT_SIZE*CRT_SIZE], crt_mask: build_crt_mask(CRT_SIZE),
         crt_cache: None, scope_dirty: true, crt_frame: 0, picker,
-        engine, seq_cursor: (0, 0), pending_count: 0, pending_g: false, pending_d: false, pending_leader: false, focused_module: None, voice_param: 0, phosphor_renderer, phosphor_error,
+        engine, seq_cursor: (0, 0), pending_count: 0, pending_g: false, pending_d: false, pending_leader: false, focused_module: None, voice_param: 0, env_param: 0, phosphor_renderer, phosphor_error,
     };
 
     let result = run_ui(&mut terminal, &scope_buf, sr, &mut app);
@@ -796,27 +881,29 @@ fn render_voice_module(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         let shape = app.engine.voice_shape[track].load(Ordering::Relaxed) as f32 / 1000.0;
         let sub = app.engine.voice_sub[track].load(Ordering::Relaxed) as f32 / 1000.0;
         let fm = app.engine.voice_fm[track].load(Ordering::Relaxed) as f32 / 1000.0;
-        let output = app.engine.voice_output[track].load(Ordering::Relaxed);
+        let output = app.engine.voice_output[track].load(Ordering::Relaxed) as f32 / 1000.0;
         let freq = app.engine.cur_freq[track].load(Ordering::Relaxed) as f32 / 100.0;
         let env = app.engine.env_value[track].load(Ordering::Relaxed) as f32 / 1000.0;
         let phase = app.engine.adsr_phase[track].load(Ordering::Relaxed);
         let phase_str = ["idle", "ATK", "DEC", "SUS", "REL"][phase as usize];
 
         let w = inner.width.saturating_sub(12) as usize;
-        let mk_bar = |v: f32| -> String {
-            let fill = (v * w as f32) as usize;
-            "█".repeat(fill) + &"░".repeat(w.saturating_sub(fill))
+        let mk_bar = |v: f32, ww: usize| -> String {
+            let fill = (v * ww as f32) as usize;
+            "█".repeat(fill) + &"░".repeat(ww.saturating_sub(fill))
         };
 
         let out_labels = ["sin", "sub", "wav"];
+        let out_idx = (output * 2.999) as usize;
         let out_str: String = out_labels.iter().enumerate()
-            .map(|(i, l)| if i as u32 == output { format!("[{}]", l) } else { format!(" {} ", l) })
+            .map(|(i, l)| if i == out_idx { format!("[{}]", l) } else { format!(" {} ", l) })
             .collect::<Vec<_>>().join("");
 
         let params = [
             (0, "shape", shape),
             (1, "sub  ", sub),
             (2, "fm   ", fm),
+            (3, "out  ", output),
         ];
 
         let mut lines: Vec<Line<'_>> = Vec::new();
@@ -825,20 +912,65 @@ fn render_voice_module(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
             let is_sel = focused && app.voice_param == *idx;
             let marker = if is_sel { "▸" } else { " " };
             let color = if is_sel { CURSOR_FG } else { PANEL_LABEL };
+            let label = if *idx == 3 { format!("{}{}: {} ", marker, name, out_str) } else { format!("{}{}: ", marker, name) };
             lines.push(Line::from(vec![
-                Span::styled(format!("{marker}{name}: "), Style::default().fg(color)),
-                Span::styled(mk_bar(*val), Style::default().fg(if is_sel { CURSOR_FG } else { AMBER_DIM })),
+                Span::styled(label, Style::default().fg(color)),
+                Span::styled(mk_bar(*val, w), Style::default().fg(if is_sel { CURSOR_FG } else { AMBER_DIM })),
                 Span::styled(format!(" {:.2}", val), Style::default().fg(color)),
             ]));
         }
-        lines.push(Line::from(vec![
-            Span::styled(" out: ", Style::default().fg(PANEL_LABEL)),
-            Span::styled(out_str, Style::default().fg(AMBER)),
-        ]));
         let env_fill = (env * (inner.width.saturating_sub(8)) as f32) as usize;
         let env_bar = "█".repeat(env_fill) + &"░".repeat((inner.width.saturating_sub(8) as usize).saturating_sub(env_fill));
         lines.push(Line::from(format!(" env: {phase_str} {env_bar}")));
 
+        f.render_widget(Paragraph::new(lines).style(Style::default().fg(PANEL_LABEL)), inner);
+    }
+}
+
+fn render_env_module(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let focused = app.focused_module == Some(3);
+    let toggle = if app.env_open { "▾" } else { "▸" };
+    let title = format!(" ● MATH {}", if focused { "◉" } else { toggle });
+    let block = module_block(&title, if focused { CURSOR_FG } else if app.env_open { AMBER } else { PANEL_BORDER });
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if app.env_open {
+        let track = app.seq_cursor.0;
+        let attack = app.engine.env_attack[track].load(Ordering::Relaxed);
+        let decay = app.engine.env_decay[track].load(Ordering::Relaxed);
+        let shape = app.engine.env_shape[track].load(Ordering::Relaxed);
+        let looping = app.engine.env_loop[track].load(Ordering::Relaxed) != 0;
+        let mod_tgt = app.engine.env_mod_target[track].load(Ordering::Relaxed);
+        let env_out = app.engine.env_out[track].load(Ordering::Relaxed) as f32 / 1000.0;
+
+        let w = inner.width.saturating_sub(12) as usize;
+        let mk_bar = |v: f32| -> String {
+            let fill = (v * w as f32) as usize;
+            "█".repeat(fill) + &"░".repeat(w.saturating_sub(fill))
+        };
+
+        let mod_labels = ["amp", "pitch", "shape", "fm  "];
+        let mod_str = mod_labels[mod_tgt as usize];
+
+        let params = [
+            (0, "atk", attack as f32 / 1000.0),
+            (1, "dec", decay as f32 / 1000.0),
+            (2, "shp", shape as f32 / 1000.0),
+        ];
+
+        let mut lines: Vec<Line<'_>> = Vec::new();
+        lines.push(Line::from(format!(" T{track}  mod:{mod_str} {}  env:{:.2}", if looping { "cycle" } else {"onesht"}, env_out)));
+        for (idx, name, val) in &params {
+            let is_sel = focused && app.env_param == *idx;
+            let marker = if is_sel { "▸" } else { " " };
+            let color = if is_sel { CURSOR_FG } else { PANEL_LABEL };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{marker}{name}: "), Style::default().fg(color)),
+                Span::styled(mk_bar(*val), Style::default().fg(if is_sel { CURSOR_FG } else { AMBER_DIM })),
+                Span::styled(format!(" {:.3}", val), Style::default().fg(color)),
+            ]));
+        }
         f.render_widget(Paragraph::new(lines).style(Style::default().fg(PANEL_LABEL)), inner);
     }
 }
@@ -933,6 +1065,7 @@ fn run_ui(
                 .constraints([
                     Constraint::Length(4),
                     Constraint::Length(if any_open { MODULE_HEIGHT_OPEN } else { MODULE_HEIGHT_CLOSED }),
+                    Constraint::Length(if app.env_open { ENV_HEIGHT_OPEN } else { ENV_HEIGHT_CLOSED }),
                     Constraint::Fill(1),
                     Constraint::Length(1),
                     Constraint::Length(1),
@@ -950,14 +1083,15 @@ fn run_ui(
 
             render_scope_module(f, app, h_chunks[0]);
             render_voice_module(f, app, h_chunks[1]);
-            render_seq_module(f, app, v_chunks[2]);
+            render_env_module(f, app, v_chunks[2]);
+            render_seq_module(f, app, v_chunks[3]);
 
             let (mode_name, keys, mode_bg) = match app.mode {
                 Mode::Normal => {
-                    let k = if app.focused_module == Some(1) {
-                        "STO: j/k:adjust h/l:param w/b:output 0/$:min/max Esc:unfocus"
-                    } else {
-                        "1/2/3:focus SPC:play +/-:bpm hjkl:grid i:ins w/b:step x:clr J/K:oct B:scope #l:len #p:euclid :q"
+                    let k = match app.focused_module {
+                        Some(1) => "STO: h/l:slide H/L:fine j/k:param 0/$:min/max Esc:unfocus",
+                        Some(3) => "ENV: h/l:slide(5) H/L:slide(50) j/k:param w:mod_trg b:cycle 0/$:min/max Esc:unfocus",
+                        _ => ",#:focus SPC:play +/-:bpm hjkl:grid i:ins w/b:step x:clr J/K:oct B:scope #l:len #p:euclid :q",
                     };
                     ("NORMAL", k, AMBER_DIM)
                 }
@@ -965,10 +1099,10 @@ fn run_ui(
                 Mode::Command(_) => ("COMMAND", "Enter:exec Esc:cancel", MODE_COMMAND),
             };
             let status = format!(" {} | {} kHz | {} ", mode_name, (sample_rate/1000.0) as u32, keys);
-            f.render_widget(Paragraph::new(status).style(Style::default().fg(Color::Black).bg(mode_bg)), v_chunks[3]);
+            f.render_widget(Paragraph::new(status).style(Style::default().fg(Color::Black).bg(mode_bg)), v_chunks[4]);
 
             if let Mode::Command(ref cmd) = app.mode {
-                f.render_widget(Paragraph::new(format!(":{}", cmd)).style(Style::default().fg(Color::Yellow)), v_chunks[4]);
+                f.render_widget(Paragraph::new(format!(":{}", cmd)).style(Style::default().fg(Color::Yellow)), v_chunks[5]);
             }
         })?;
 
@@ -991,13 +1125,13 @@ fn run_ui(
                             if c.is_ascii_digit() {
                                 if app.pending_leader {
                                     app.pending_leader = false;
-                                    match c { '1' => { app.focused_module = Some(0); app.scope_open = true; } '2' => { app.focused_module = Some(1); app.voice_open = true; } '3' => { app.focused_module = Some(2); app.seq_open = true; } _ => {} }
+                                    match c { '1' => { app.focused_module = Some(0); app.scope_open = true; } '2' => { app.focused_module = Some(1); app.voice_open = true; } '3' => { app.focused_module = Some(2); app.seq_open = true; } '4' => { app.focused_module = Some(3); app.env_open = true; } _ => {} }
                                     continue;
                                 }
                                 let d = c as u32 - '0' as u32;
                                 if d == 0 && app.pending_count == 0 && app.focused_module == Some(1) {
                                     let track = app.seq_cursor.0;
-                                    let param = match app.voice_param { 0 => &app.engine.voice_shape[track], 1 => &app.engine.voice_sub[track], _ => &app.engine.voice_fm[track] };
+                                    let param = match app.voice_param { 0 => &app.engine.voice_shape[track], 1 => &app.engine.voice_sub[track], 2 => &app.engine.voice_fm[track], _ => &app.engine.voice_output[track] };
                                     param.store(0, Ordering::Relaxed);
                                 } else {
                                     app.pending_count = if app.pending_count > 0 { app.pending_count * 10 + d } else { d };
@@ -1009,25 +1143,53 @@ fn run_ui(
 
                             if app.focused_module == Some(1) {
                                 let track = app.seq_cursor.0;
+                                let param = |idx: usize, t: usize| -> &AtomicU32 {
+                                    match idx { 0 => &app.engine.voice_shape[t], 1 => &app.engine.voice_sub[t], 2 => &app.engine.voice_fm[t], _ => &app.engine.voice_output[t] }
+                                };
                                 match (lower, shifted) {
-                                    ('j', false) => {
-                                        let param = match app.voice_param { 0 => &app.engine.voice_shape[track], 1 => &app.engine.voice_sub[track], _ => &app.engine.voice_fm[track] };
-                                        let v = param.load(Ordering::Relaxed);
-                                        param.store(v.saturating_sub(50), Ordering::Relaxed);
+                                    ('h', _) => {
+                                        let p = param(app.voice_param, track);
+                                        let v = p.load(Ordering::Relaxed);
+                                        p.store(v.saturating_sub(if shifted { 5 } else { 50 }), Ordering::Relaxed);
                                     }
-                                    ('k', false) => {
-                                        let param = match app.voice_param { 0 => &app.engine.voice_shape[track], 1 => &app.engine.voice_sub[track], _ => &app.engine.voice_fm[track] };
-                                        let v = param.load(Ordering::Relaxed);
-                                        param.store((v + 50).min(1000), Ordering::Relaxed);
+                                    ('l', _) => {
+                                        let p = param(app.voice_param, track);
+                                        let v = p.load(Ordering::Relaxed);
+                                        p.store((v + if shifted { 5 } else { 50 }).min(1000), Ordering::Relaxed);
                                     }
-                                    ('h', _) => { app.voice_param = app.voice_param.saturating_sub(1); }
-                                    ('l', _) => { app.voice_param = (app.voice_param + 1).min(2); }
+                                    ('j', false) => { app.voice_param = (app.voice_param + 1).min(3); }
+                                    ('k', false) => { app.voice_param = app.voice_param.saturating_sub(1); }
                                     ('w', _) => { let v = app.engine.voice_output[track].load(Ordering::Relaxed); app.engine.voice_output[track].store((v + 1) % 3, Ordering::Relaxed); }
                                     ('b', _) => { let v = app.engine.voice_output[track].load(Ordering::Relaxed); app.engine.voice_output[track].store(if v == 0 { 2 } else { v - 1 }, Ordering::Relaxed); }
-                                    ('$', _) => {
-                                        let param = match app.voice_param { 0 => &app.engine.voice_shape[track], 1 => &app.engine.voice_sub[track], _ => &app.engine.voice_fm[track] };
-                                        param.store(1000, Ordering::Relaxed);
+                                    ('$', _) => { param(app.voice_param, track).store(1000, Ordering::Relaxed); }
+                                    ('0', _) => { param(app.voice_param, track).store(0, Ordering::Relaxed); }
+                                    _ => {}
+                                }
+                                continue;
+                            }
+
+                            if app.focused_module == Some(3) {
+                                let track = app.seq_cursor.0;
+                                let param = |idx: usize, t: usize| -> &AtomicU32 {
+                                    match idx { 0 => &app.engine.env_attack[t], 1 => &app.engine.env_decay[t], _ => &app.engine.env_shape[t] }
+                                };
+                                match (lower, shifted) {
+                                    ('h', _) => {
+                                        let p = param(app.env_param, track);
+                                        let v = p.load(Ordering::Relaxed);
+                                        p.store(v.saturating_sub(if shifted { 5 } else { 50 }), Ordering::Relaxed);
                                     }
+                                    ('l', _) => {
+                                        let p = param(app.env_param, track);
+                                        let v = p.load(Ordering::Relaxed);
+                                        p.store((v + if shifted { 5 } else { 50 }).min(1000), Ordering::Relaxed);
+                                    }
+                                    ('j', false) => { app.env_param = (app.env_param + 1).min(2); }
+                                    ('k', false) => { app.env_param = app.env_param.saturating_sub(1); }
+                                    ('w', _) => { let v = app.engine.env_mod_target[track].load(Ordering::Relaxed); app.engine.env_mod_target[track].store((v + 1) % 4, Ordering::Relaxed); }
+                                    ('b', _) => { let v = app.engine.env_loop[track].load(Ordering::Relaxed); app.engine.env_loop[track].store(if v == 0 { 1 } else { 0 }, Ordering::Relaxed); }
+                                    ('$', _) => { param(app.env_param, track).store(1000, Ordering::Relaxed); }
+                                    ('0', _) => { param(app.env_param, track).store(0, Ordering::Relaxed); }
                                     _ => {}
                                 }
                                 continue;
