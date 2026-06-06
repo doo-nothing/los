@@ -154,18 +154,17 @@ struct VoiceData {
 struct EngineShared {
     bpm: AtomicU32,         // BPM * 100 (e.g. 12000 = 120.00)
     playing: AtomicBool,
-    trig_freq: AtomicU32,   // frequency * 100 (e.g. 44000 = 440.00 Hz)
-    trig_vel: AtomicU32,    // velocity * 1000 (e.g. 1000 = 1.0)
-    trig_gate: AtomicBool,
-    env_value: AtomicU32,
-    adsr_phase: AtomicU32,  // 0=idle 1=attack 2=decay 3=sustain 4=release
     seq_step: AtomicU32,
     step_data: Mutex<[[u32; MAX_STEPS]; SEQ_TRACKS]>, // each step: bit31=active, bits 30-16=note*100, bits 15-0=vel*1000
     track_len: Mutex<[usize; SEQ_TRACKS]>,
-    voice_shape: AtomicU32, // 0-1000 → 0.0-1.0 wave shape (sine→saw→square)
-    voice_sub: AtomicU32,   // 0-1000 → 0.0-1.0 sub oscillator level
-    voice_fm: AtomicU32,    // 0-1000 → 0.0-1.0 FM amount (modulation input)
-    voice_output: AtomicU32, // 0=sin, 1=sub, 2=wave
+    voice_shape: [AtomicU32; SEQ_TRACKS],
+    voice_sub: [AtomicU32; SEQ_TRACKS],
+    voice_fm: [AtomicU32; SEQ_TRACKS],
+    voice_output: [AtomicU32; SEQ_TRACKS],
+    env_value: [AtomicU32; SEQ_TRACKS],
+    adsr_phase: [AtomicU32; SEQ_TRACKS],
+    cur_freq: [AtomicU32; SEQ_TRACKS],
+    seq_progress: AtomicU32, // 0-1000 intra-step progress for scrubber
 }
 
 impl EngineShared {
@@ -179,18 +178,17 @@ impl EngineShared {
         Self {
             bpm: AtomicU32::new(12000),
             playing: AtomicBool::new(false),
-            trig_freq: AtomicU32::new(440),
-            trig_vel: AtomicU32::new(1000),
-            trig_gate: AtomicBool::new(false),
-            env_value: AtomicU32::new(0),
-            adsr_phase: AtomicU32::new(0),
             seq_step: AtomicU32::new(0),
             step_data: Mutex::new(steps),
             track_len: Mutex::new([SEQ_STEPS; SEQ_TRACKS]),
-            voice_shape: AtomicU32::new(0),
-            voice_sub: AtomicU32::new(0),
-            voice_fm: AtomicU32::new(0),
-            voice_output: AtomicU32::new(0),
+            voice_shape: [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)],
+            voice_sub: [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)],
+            voice_fm: [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)],
+            voice_output: [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)],
+            env_value: [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)],
+            adsr_phase: [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)],
+            cur_freq: [AtomicU32::new(440), AtomicU32::new(440), AtomicU32::new(440), AtomicU32::new(440)],
+            seq_progress: AtomicU32::new(0),
         }
     }
 }
@@ -267,6 +265,8 @@ struct App {
     seq_cursor: (usize, usize),
     pending_count: u32,
     pending_g: bool,
+    pending_d: bool,
+    pending_leader: bool,
     focused_module: Option<usize>,
     voice_param: usize,
     phosphor_renderer: Option<PhosphorHeadless>,
@@ -518,79 +518,93 @@ fn build_output_stream(
     sample_rate: f32, channels: usize, engine: Arc<EngineShared>,
     scope_buffer: Arc<Mutex<VecDeque<f32>>>,
 ) -> Result<cpal::Stream> {
-    let mut voice = VoiceData { adsr: Adsr::new(0.01, 0.1, 0.7, 0.2, sample_rate), phase: 0.0, freq: 440.0, velocity: 0.0 };
+    let mut voices: Vec<VoiceData> = (0..SEQ_TRACKS).map(|_| {
+        VoiceData { adsr: Adsr::new(0.01, 0.1, 0.7, 0.2, sample_rate), phase: 0.0, freq: 440.0, velocity: 0.0 }
+    }).collect();
     let mut seq_phase: f64 = 0.0;
-    let mut prev_step: usize = 0;
-    let mut prev_gate = false;
-    let mut cached_len: usize = SEQ_STEPS;
+    let mut prev_steps = [0usize; SEQ_TRACKS];
+    let mut cached_lens = [SEQ_STEPS; SEQ_TRACKS];
+    let mut was_playing = false;
 
     let stream = device.build_output_stream(config, move |data: &mut [f32], _info| {
-        let active = running.load(Ordering::Relaxed);
+        let _active = running.load(Ordering::Relaxed);
         let mut burst = [0.0f32; 256]; let mut bi = 0usize;
 
         let bpm = engine.bpm.load(Ordering::Relaxed) as f32 / 100.0;
         let playing = engine.playing.load(Ordering::Relaxed);
+
+        // reset sequencer on play start
+        if playing && !was_playing { seq_phase = 0.0; prev_steps = [0; SEQ_TRACKS]; }
+        was_playing = playing;
+
         let steps_per_beat = 4.0; // 16th notes
         let step_dur_samples = sample_rate * 60.0 / bpm / steps_per_beat;
 
+        // refresh cached track lengths once per callback
+        if let Ok(tl) = engine.track_len.try_lock() {
+            for t in 0..SEQ_TRACKS { cached_lens[t] = tl[t].max(1); }
+        }
+
         for (i, frame) in data.chunks_mut(channels).enumerate() {
-            // sequencer advance
+            // sequencer advance per track
+            if playing { seq_phase += 1.0; }
+
+            // scrubber: intra-step progress (for display)
             if playing {
-                seq_phase += 1.0;
-                let cur_step = (seq_phase / step_dur_samples as f64) as usize % cached_len;
-                if cur_step != prev_step {
-                    prev_step = cur_step;
-                    engine.seq_step.store(cur_step as u32, Ordering::Relaxed);
-                    if let Ok(steps) = engine.step_data.try_lock()
-                        && let Ok(tl) = engine.track_len.try_lock() {
-                            cached_len = tl[0].max(1);
-                            let track_data = steps[0];
-                            let enc = track_data[cur_step.min(MAX_STEPS - 1)];
-                            let (active, freq, vel) = decode_step(enc);
-                            if active {
-                                engine.trig_freq.store(freq as u32, Ordering::Relaxed);
-                                engine.trig_vel.store((vel * 1000.0) as u32, Ordering::Relaxed);
-                                engine.trig_gate.store(true, Ordering::Relaxed);
+                let phase_remainder = seq_phase % step_dur_samples as f64;
+                let progress = (phase_remainder / step_dur_samples as f64 * 1000.0) as u32;
+                engine.seq_progress.store(progress, Ordering::Relaxed);
+            }
+
+            // generate each track's voice and accumulate
+            let mut accum = 0.0f32;
+            for t in 0..SEQ_TRACKS {
+                if playing {
+                    let cur_step = (seq_phase / step_dur_samples as f64) as usize % cached_lens[t];
+                    if cur_step != prev_steps[t] {
+                        prev_steps[t] = cur_step;
+                        if t == 0 { engine.seq_step.store(cur_step as u32, Ordering::Relaxed); }
+                        if let Ok(steps) = engine.step_data.try_lock() {
+                            let (step_active, freq, vel) = decode_step(steps[t][cur_step.min(MAX_STEPS - 1)]);
+                            engine.cur_freq[t].store((freq * 100.0) as u32, Ordering::Relaxed);
+                            if step_active {
+                                voices[t].freq = freq;
+                                voices[t].velocity = vel;
+                                voices[t].adsr.trigger();
                             } else {
-                                engine.trig_gate.store(false, Ordering::Relaxed);
+                                voices[t].adsr.release();
                             }
                         }
+                    }
                 }
-            }
 
-            // voice: read trigger
-            let gate = engine.trig_gate.load(Ordering::Relaxed);
-            if gate && !prev_gate {
-                let freq = engine.trig_freq.load(Ordering::Relaxed) as f32;
-                let vel = engine.trig_vel.load(Ordering::Relaxed) as f32 / 1000.0;
-                voice.freq = freq;
-                voice.velocity = vel;
-                voice.adsr.trigger();
-            } else if !gate && prev_gate {
-                voice.adsr.release();
-            }
-            prev_gate = gate;
+                // voice generation for this track
+                let env = voices[t].adsr.tick();
+                engine.env_value[t].store((env * 1000.0) as u32, Ordering::Relaxed);
+                engine.adsr_phase[t].store(voices[t].adsr.state as u32, Ordering::Relaxed);
 
-            let env = voice.adsr.tick();
-            engine.env_value.store((env * 1000.0) as u32, Ordering::Relaxed);
-            engine.adsr_phase.store(voice.adsr.state as u32, Ordering::Relaxed);
+                let shape = engine.voice_shape[t].load(Ordering::Relaxed) as f32 / 1000.0;
+                let sub_lvl = engine.voice_sub[t].load(Ordering::Relaxed) as f32 / 1000.0;
+                let fm_amt = engine.voice_fm[t].load(Ordering::Relaxed) as f32 / 1000.0;
+                let output_sel = engine.voice_output[t].load(Ordering::Relaxed);
 
-            let shape = engine.voice_shape.load(Ordering::Relaxed) as f32 / 1000.0;
-            let sub_lvl = engine.voice_sub.load(Ordering::Relaxed) as f32 / 1000.0;
-            let output_sel = engine.voice_output.load(Ordering::Relaxed);
+                // basic FM modulation from a slow LFO
+                let fm_lfo_phase = (voices[t].phase * 0.1).fract();
+                let fm_mod = (fm_lfo_phase * 2.0 * std::f32::consts::PI).sin() * fm_amt * 0.5;
+                let mod_freq = voices[t].freq * (1.0 + fm_mod);
 
-            let l = if active {
-                voice.phase = (voice.phase + voice.freq / sample_rate).fract();
-                let phase = voice.phase;
+                voices[t].phase = (voices[t].phase + mod_freq / sample_rate).fract();
+                let phase = voices[t].phase;
+
                 let sine = (phase * 2.0 * std::f32::consts::PI).sin();
                 let saw = 2.0 * phase - 1.0;
                 let square = if phase < 0.5 { 1.0 } else { -1.0 };
                 let shaped = if shape < 0.5 {
-                    let t = shape * 2.0;
-                    sine * (1.0 - t) + saw * t
+                    let tt = shape * 2.0;
+                    sine * (1.0 - tt) + saw * tt
                 } else {
-                    let t = (shape - 0.5) * 2.0;
-                    saw * (1.0 - t) + square * t
+                    let tt = (shape - 0.5) * 2.0;
+                    saw * (1.0 - tt) + square * tt
                 };
                 let sub_phase = (phase * 0.5).fract();
                 let sub = if sub_phase < 0.5 { 1.0 } else { -1.0 };
@@ -599,14 +613,19 @@ fn build_output_stream(
                     1 => sine * (1.0 - sub_lvl) + sub * sub_lvl,
                     _ => shaped * (1.0 - sub_lvl) + sub * sub_lvl,
                 };
-                out * 0.3 * env * voice.velocity
-            } else { 0.0 };
-            let r = l;
 
-            if let Some(s) = frame.first_mut() { *s = l; }
-            if frame.len() > 1 { frame[1] = r; }
+                accum += out * 0.3 * env * voices[t].velocity;
+            }
 
-            if i % 2 == 0 && bi + 1 < burst.len() { burst[bi] = l; burst[bi+1] = r; bi += 2; }
+            // mix down and write output
+            accum /= SEQ_TRACKS as f32;
+            if let Some(s) = frame.first_mut() { *s = accum; }
+            if frame.len() > 1 { frame[1] = accum; }
+
+            // scope burst (track 0's voice)
+            if i % 2 == 0 && bi + 1 < burst.len() {
+                burst[bi] = accum; burst[bi+1] = accum; bi += 2;
+            }
         }
 
         if bi > 0
@@ -656,7 +675,7 @@ fn main() -> Result<()> {
         scope_samples: Vec::with_capacity(SCOPE_CAPACITY), scope_state: ScopeState::new(),
         crt_buf: vec![0.0; CRT_SIZE*CRT_SIZE], crt_mask: build_crt_mask(CRT_SIZE),
         crt_cache: None, scope_dirty: true, crt_frame: 0, picker,
-        engine, seq_cursor: (0, 0), pending_count: 0, pending_g: false, focused_module: None, voice_param: 0, phosphor_renderer, phosphor_error,
+        engine, seq_cursor: (0, 0), pending_count: 0, pending_g: false, pending_d: false, pending_leader: false, focused_module: None, voice_param: 0, phosphor_renderer, phosphor_error,
     };
 
     let result = run_ui(&mut terminal, &scope_buf, sr, &mut app);
@@ -773,13 +792,14 @@ fn render_voice_module(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     f.render_widget(block, area);
 
     if app.voice_open {
-        let shape = app.engine.voice_shape.load(Ordering::Relaxed) as f32 / 1000.0;
-        let sub = app.engine.voice_sub.load(Ordering::Relaxed) as f32 / 1000.0;
-        let fm = app.engine.voice_fm.load(Ordering::Relaxed) as f32 / 1000.0;
-        let output = app.engine.voice_output.load(Ordering::Relaxed);
-        let freq = app.engine.trig_freq.load(Ordering::Relaxed) as f32;
-        let env = app.engine.env_value.load(Ordering::Relaxed) as f32 / 1000.0;
-        let phase = app.engine.adsr_phase.load(Ordering::Relaxed);
+        let track = app.seq_cursor.0;
+        let shape = app.engine.voice_shape[track].load(Ordering::Relaxed) as f32 / 1000.0;
+        let sub = app.engine.voice_sub[track].load(Ordering::Relaxed) as f32 / 1000.0;
+        let fm = app.engine.voice_fm[track].load(Ordering::Relaxed) as f32 / 1000.0;
+        let output = app.engine.voice_output[track].load(Ordering::Relaxed);
+        let freq = app.engine.cur_freq[track].load(Ordering::Relaxed) as f32 / 100.0;
+        let env = app.engine.env_value[track].load(Ordering::Relaxed) as f32 / 1000.0;
+        let phase = app.engine.adsr_phase[track].load(Ordering::Relaxed);
         let phase_str = ["idle", "ATK", "DEC", "SUS", "REL"][phase as usize];
 
         let w = inner.width.saturating_sub(12) as usize;
@@ -958,51 +978,54 @@ fn run_ui(
                 match &mut app.mode {
                     Mode::Normal => match key.code {
                         KeyCode::Char(':') => app.mode = Mode::Command(String::new()),
-                        KeyCode::Char('1') => { app.focused_module = Some(0); app.scope_open = true; }
-                        KeyCode::Char('2') => { app.focused_module = Some(1); app.voice_open = true; }
-                        KeyCode::Char('3') => { app.focused_module = Some(2); app.seq_open = true; }
                         KeyCode::Char('[') => { app.scope_channel = app.scope_channel.prev(); app.scope_state = ScopeState::new(); app.scope_samples.clear(); }
                         KeyCode::Char(']') => { app.scope_channel = app.scope_channel.next(); app.scope_state = ScopeState::new(); app.scope_samples.clear(); }
-                        KeyCode::Char(' ') => { let was_playing = app.engine.playing.load(Ordering::Relaxed); app.engine.playing.store(!was_playing, Ordering::Relaxed); if was_playing { app.engine.trig_gate.store(false, Ordering::Relaxed); } }
+                        KeyCode::Char(' ') => { let was_playing = app.engine.playing.load(Ordering::Relaxed); app.engine.playing.store(!was_playing, Ordering::Relaxed); }
                         KeyCode::Char('+') | KeyCode::Char('=') => { let b = app.engine.bpm.load(Ordering::Relaxed); app.engine.bpm.store((b+100).min(30000), Ordering::Relaxed); }
                         KeyCode::Char('-') => { let b = app.engine.bpm.load(Ordering::Relaxed); app.engine.bpm.store(b.saturating_sub(100).max(2000), Ordering::Relaxed); }
+                        KeyCode::Char(',') => { app.pending_leader = true; }
                         KeyCode::Char(c) => {
                             let lower = c.to_ascii_lowercase();
                             let shifted = c.is_ascii_uppercase() || key.modifiers.contains(KeyModifiers::SHIFT);
 
                             if c.is_ascii_digit() {
+                                if app.pending_leader {
+                                    app.pending_leader = false;
+                                    match c { '1' => { app.focused_module = Some(0); app.scope_open = true; } '2' => { app.focused_module = Some(1); app.voice_open = true; } '3' => { app.focused_module = Some(2); app.seq_open = true; } _ => {} }
+                                    continue;
+                                }
                                 let d = c as u32 - '0' as u32;
-                                if d == 0 && app.pending_count == 0 {
-                                    if app.focused_module == Some(1) {
-                                        let param = match app.voice_param { 0 => &app.engine.voice_shape, 1 => &app.engine.voice_sub, _ => &app.engine.voice_fm };
-                                        param.store(0, Ordering::Relaxed);
-                                    } else {
-                                        app.seq_cursor.1 = 0;
-                                    }
+                                if d == 0 && app.pending_count == 0 && app.focused_module == Some(1) {
+                                    let track = app.seq_cursor.0;
+                                    let param = match app.voice_param { 0 => &app.engine.voice_shape[track], 1 => &app.engine.voice_sub[track], _ => &app.engine.voice_fm[track] };
+                                    param.store(0, Ordering::Relaxed);
                                 } else {
                                     app.pending_count = if app.pending_count > 0 { app.pending_count * 10 + d } else { d };
                                 }
                                 continue;
                             }
 
+                            if app.pending_leader { app.pending_leader = false; }
+
                             if app.focused_module == Some(1) {
+                                let track = app.seq_cursor.0;
                                 match (lower, shifted) {
                                     ('j', false) => {
-                                        let param = match app.voice_param { 0 => &app.engine.voice_shape, 1 => &app.engine.voice_sub, _ => &app.engine.voice_fm };
+                                        let param = match app.voice_param { 0 => &app.engine.voice_shape[track], 1 => &app.engine.voice_sub[track], _ => &app.engine.voice_fm[track] };
                                         let v = param.load(Ordering::Relaxed);
                                         param.store(v.saturating_sub(50), Ordering::Relaxed);
                                     }
                                     ('k', false) => {
-                                        let param = match app.voice_param { 0 => &app.engine.voice_shape, 1 => &app.engine.voice_sub, _ => &app.engine.voice_fm };
+                                        let param = match app.voice_param { 0 => &app.engine.voice_shape[track], 1 => &app.engine.voice_sub[track], _ => &app.engine.voice_fm[track] };
                                         let v = param.load(Ordering::Relaxed);
                                         param.store((v + 50).min(1000), Ordering::Relaxed);
                                     }
                                     ('h', _) => { app.voice_param = app.voice_param.saturating_sub(1); }
                                     ('l', _) => { app.voice_param = (app.voice_param + 1).min(2); }
-                                    ('w', _) => { let v = app.engine.voice_output.load(Ordering::Relaxed); app.engine.voice_output.store((v + 1) % 3, Ordering::Relaxed); }
-                                    ('b', _) => { let v = app.engine.voice_output.load(Ordering::Relaxed); app.engine.voice_output.store(if v == 0 { 2 } else { v - 1 }, Ordering::Relaxed); }
+                                    ('w', _) => { let v = app.engine.voice_output[track].load(Ordering::Relaxed); app.engine.voice_output[track].store((v + 1) % 3, Ordering::Relaxed); }
+                                    ('b', _) => { let v = app.engine.voice_output[track].load(Ordering::Relaxed); app.engine.voice_output[track].store(if v == 0 { 2 } else { v - 1 }, Ordering::Relaxed); }
                                     ('$', _) => {
-                                        let param = match app.voice_param { 0 => &app.engine.voice_shape, 1 => &app.engine.voice_sub, _ => &app.engine.voice_fm };
+                                        let param = match app.voice_param { 0 => &app.engine.voice_shape[track], 1 => &app.engine.voice_sub[track], _ => &app.engine.voice_fm[track] };
                                         param.store(1000, Ordering::Relaxed);
                                     }
                                     _ => {}
@@ -1034,17 +1057,22 @@ fn run_ui(
                                     if let Ok(mut steps) = app.engine.step_data.try_lock() {
                                         let t = app.seq_cursor.0;
                                         for s in 0..track_len.min(MAX_STEPS) {
-                                            let (_, f, v) = decode_step(steps[t][s]);
-                                            steps[t][s] = if s < pattern.len() && pattern[s] {
-                                                encode_step(true, f as u32, (v*1000.0) as u32)
+                                            let (active, f, v) = decode_step(steps[t][s]);
+                                            let should_active = s < pattern.len() && pattern[s];
+                                            if should_active && !active {
+                                                // newly activated — use default note
+                                                steps[t][s] = encode_step(true, 440, 1000);
+                                            } else if should_active {
+                                                steps[t][s] = encode_step(true, f as u32, (v*1000.0) as u32);
                                             } else {
-                                                encode_step(false, f as u32, (v*1000.0) as u32)
-                                            };
+                                                steps[t][s] = encode_step(false, f as u32, (v*1000.0) as u32);
+                                            }
                                         }
                                     }
                                 }
                                 ('j', false) => { app.seq_cursor.0 = (app.seq_cursor.0 + count).min(SEQ_TRACKS-1); }
                                 ('k', false) => { app.seq_cursor.0 = app.seq_cursor.0.saturating_sub(count); }
+                                ('w', _) if app.pending_d => { app.pending_d = false; if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let end = next_active_step(&steps, t, s, track_len).unwrap_or(track_len); for i in s..end { steps[t][i] = encode_step(false, 440, 1000); } } }
                                 ('w', _) => { let (t, s) = app.seq_cursor; if let Ok(steps) = app.engine.step_data.try_lock() { let mut cur = s; for _ in 0..count { if let Some(n) = next_active_step(&steps, t, cur, track_len) { cur = n; } else { break; } } app.seq_cursor.1 = cur; } }
                                 ('b', false) => { let (t, s) = app.seq_cursor; if let Ok(steps) = app.engine.step_data.try_lock() { let mut cur = s; for _ in 0..count { if let Some(n) = prev_active_step(&steps, t, cur, track_len) { cur = n; } else { break; } } app.seq_cursor.1 = cur; } }
                                 ('b', true) => { app.scope_mode = match (app.scope_mode, app.phosphor_renderer.is_some()) { (ScopeMode::Braille, _) => ScopeMode::Crt, (ScopeMode::Crt, true) => ScopeMode::Phosphor, (ScopeMode::Crt, false) => ScopeMode::HalfBlock, (ScopeMode::Phosphor, _) => ScopeMode::HalfBlock, (ScopeMode::HalfBlock, _) => ScopeMode::Braille, }; app.crt_cache = None; }
@@ -1053,14 +1081,18 @@ fn run_ui(
                                 ('g', false) => { if was_pg { app.seq_cursor.0 = 0; } else { app.pending_g = true; } }
                                 ('g', true) => { app.seq_cursor.0 = SEQ_TRACKS - 1; }
                                 ('$', _) => { app.seq_cursor.1 = track_len.saturating_sub(1); }
+                                ('^', _) => { app.seq_cursor.1 = 0; }
                                 ('i', _) => app.mode = Mode::Insert,
                                 ('x', _) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; steps[t][s] = encode_step(false, 440, 1000); } }
-                                _ => {}
+                                ('d', false) => { if app.pending_d { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; steps[t][s] = encode_step(false, 440, 1000); } app.pending_d = false; } else { app.pending_d = true; } }
+                                ('d', true) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; for i in s..track_len.min(MAX_STEPS) { steps[t][i] = encode_step(false, 440, 1000); } } }
+                                _ => { app.pending_g = false; app.pending_d = false; app.pending_leader = false; app.pending_count = 0; }
                             }
+                            app.pending_count = 0;
                         }
                         KeyCode::Enter => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); steps[t][s] = encode_step(!act, f as u32, (v*1000.0) as u32); } }
-                        KeyCode::Esc => { app.pending_g = false; app.pending_count = 0; app.focused_module = None; }
-                        _ => { app.pending_g = false; app.pending_count = 0; }
+                        KeyCode::Esc => { app.pending_g = false; app.pending_d = false; app.pending_leader = false; app.pending_count = 0; app.focused_module = None; }
+                        _ => { app.pending_g = false; app.pending_d = false; app.pending_leader = false; app.pending_count = 0; }
                     },
                     Mode::Insert => match key.code {
                         KeyCode::Esc => app.mode = Mode::Normal,
