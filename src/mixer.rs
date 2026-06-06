@@ -331,19 +331,6 @@ pub fn run() -> Result<()> {
                 }
             }
         }
-
-        if show_help {
-            loop {
-                if event::poll(Duration::from_millis(100))? {
-                    if let Event::Key(key) = event::read()? {
-                        if let KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Esc = key.code {
-                            show_help = false;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
     }
 
     let _ = tx.send(());
