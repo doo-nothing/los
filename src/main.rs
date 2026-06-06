@@ -17,7 +17,7 @@ fn usage() {
     eprintln!("  scope        Run scope module (Phase 4)");
     eprintln!();
     eprintln!("options:");
-    eprintln!("  --create-only  Create session but don't attach");
+    eprintln!("  --attach       Create session and attach (nests inside tmux)");
     eprintln!("  --help, -h     Show this help");
 }
 
@@ -63,8 +63,7 @@ fn main() -> Result<()> {
             std::process::exit(1);
         }
         None => {
-            let attach = !args.iter().any(|a| a == "--create-only");
-            los::conductor::run_create(attach)
+            los::conductor::run_create(args.iter().any(|a| a == "--attach"))
         }
     }
 }
