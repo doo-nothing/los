@@ -1,4 +1,5 @@
-use std::io;
+use std::io::{self, Read};
+use std::os::unix::io::AsRawFd;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -43,6 +44,9 @@ struct SequencerState {
     selected: usize,
     last_note: Option<u8>,
     clipboard: Option<Step>,
+    euclidean_pulses: usize,
+    euclidean_length: usize,
+    euclidean_rotation: usize,
 }
 
 impl Default for SequencerState {
@@ -59,6 +63,9 @@ impl Default for SequencerState {
             selected: 0,
             last_note: None,
             clipboard: None,
+            euclidean_pulses: 5,
+            euclidean_length: 16,
+            euclidean_rotation: 0,
         }
     }
 }
@@ -132,6 +139,43 @@ fn midi_note_name(note: u8) -> String {
     format!("{}{}", names[idx], octave)
 }
 
+fn euclidean_apply(steps: &mut [Step], pulses: usize, length: usize, rotation: usize) {
+    let len = length.min(steps.len());
+    let mut pattern = vec![false; len];
+    if pulses > 0 && pulses <= len {
+        let mut bucket = 0usize;
+        for i in 0..len {
+            bucket += pulses;
+            if bucket >= len {
+                bucket -= len;
+                pattern[i] = true;
+            }
+        }
+    }
+    // Apply rotation
+    let rot = rotation % len;
+    for i in 0..len {
+        let src = (i + len - rot) % len;
+        steps[i].active = pattern[src];
+    }
+}
+
+fn check_input_ms(timeout_ms: i32) -> Option<char> {
+    let mut poll_fds = [libc::pollfd {
+        fd: io::stdin().as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    }];
+    let has = unsafe { libc::poll(poll_fds.as_mut_ptr(), 1, timeout_ms) };
+    if has > 0 && (poll_fds[0].revents & libc::POLLIN) != 0 {
+        let mut buf = [0u8; 1];
+        if io::stdin().read(&mut buf).unwrap_or(0) > 0 {
+            return Some(buf[0] as char);
+        }
+    }
+    None
+}
+
 fn draw_ui(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &SequencerState,
@@ -156,8 +200,10 @@ fn draw_ui(
         // Status line
         let play_str = if state.playing { "▶" } else { "■" };
         let status = format!(
-            "{} {} BPM | Step {}/{} | Sel {} | {}",
-            play_str, state.bpm as u32, state.current_step, NUM_STEPS, state.selected, input_mode
+            "{} {} BPM | Step {}/{} | Sel {} | P:{} L:{} R:{} | {}",
+            play_str, state.bpm as u32, state.current_step, NUM_STEPS, state.selected,
+            state.euclidean_pulses, state.euclidean_length, state.euclidean_rotation,
+            input_mode
         );
         let status_widget = Paragraph::new(status)
             .style(Style::default().fg(Color::Cyan));
@@ -237,7 +283,13 @@ fn draw_ui(
                 Line::from("  j/J        Lower note (semitone/octave)"),
                 Line::from("  n<NUM>     Set note (e.g. n60 for C4)"),
                 Line::from("  t<NUM>     Set BPM (e.g. t140)"),
-                Line::from("  e<NUM>     Euclidean fill (e.g. e5)"),
+                Line::from(""),
+                Line::from("Euclidean:"),
+                Line::from("  <N>P       Set pulses and fill"),
+                Line::from("  <N>L       Set pattern length"),
+                Line::from("  <N>R       Set rotation"),
+                Line::from("  R          Rotate by 1"),
+                Line::from("  (e.g. 5P, 16L, 3R)"),
                 Line::from(""),
                 Line::from("Transport:"),
                 Line::from("  space      Play/pause"),
@@ -370,6 +422,75 @@ pub fn run(_instance: usize) -> Result<()> {
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc if input_mode == "normal" => break,
+                    // Count prefix for P/L/R/h/l/w/b
+                    KeyCode::Char(c) if input_mode == "normal" && c.is_ascii_digit() && c != '0' => {
+                        let mut num_buf = String::new();
+                        num_buf.push(c);
+                        loop {
+                            if let Some(next) = check_input_ms(30) {
+                                if next.is_ascii_digit() {
+                                    num_buf.push(next);
+                                    continue;
+                                }
+                                let count: usize = num_buf.parse().unwrap_or(1);
+                                match next {
+                                    'P' => {
+                                        let mut s = state.lock().unwrap();
+                                        s.euclidean_pulses = count.min(16);
+                                        let (p, l, r) = (s.euclidean_pulses, s.euclidean_length, s.euclidean_rotation);
+                                        euclidean_apply(&mut s.steps, p, l, r);
+                                    }
+                                    'L' => {
+                                        let mut s = state.lock().unwrap();
+                                        s.euclidean_length = count.min(16).max(1);
+                                        let (p, l, r) = (s.euclidean_pulses, s.euclidean_length, s.euclidean_rotation);
+                                        euclidean_apply(&mut s.steps, p, l, r);
+                                    }
+                                    'R' => {
+                                        let mut s = state.lock().unwrap();
+                                        s.euclidean_rotation = count.min(255);
+                                        let (p, l, r) = (s.euclidean_pulses, s.euclidean_length, s.euclidean_rotation);
+                                        euclidean_apply(&mut s.steps, p, l, r);
+                                    }
+                                    'h' | 'l' => {
+                                        let mut s = state.lock().unwrap();
+                                        if next == 'l' {
+                                            s.selected = (s.selected + count) % NUM_STEPS;
+                                        } else {
+                                            s.selected = s.selected.saturating_sub(count).min(NUM_STEPS - 1);
+                                        }
+                                    }
+                                    'w' => {
+                                        let mut s = state.lock().unwrap();
+                                        for _ in 0..count {
+                                            for i in 1..=NUM_STEPS {
+                                                let idx = (s.selected + i) % NUM_STEPS;
+                                                if s.steps[idx].active {
+                                                    s.selected = idx;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    'b' => {
+                                        let mut s = state.lock().unwrap();
+                                        for _ in 0..count {
+                                            for i in 1..=NUM_STEPS {
+                                                let idx = (s.selected + NUM_STEPS - i) % NUM_STEPS;
+                                                if s.steps[idx].active {
+                                                    s.selected = idx;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                break;
+                            }
+                            break;
+                        }
+                    }
                     // Play/pause
                     KeyCode::Char(' ') if input_mode == "normal" => {
                         let mut s = state.lock().unwrap();
@@ -426,6 +547,25 @@ pub fn run(_instance: usize) -> Result<()> {
                         let mut s = state.lock().unwrap();
                         s.playing = false;
                     }
+                    // Euclidean pulses (recalculate with current)
+                    KeyCode::Char('P') if input_mode == "normal" => {
+                        let mut s = state.lock().unwrap();
+                        let (p, l, r) = (s.euclidean_pulses, s.euclidean_length, s.euclidean_rotation);
+                        euclidean_apply(&mut s.steps, p, l, r);
+                    }
+                    // Euclidean length (recalculate with current)
+                    KeyCode::Char('L') if input_mode == "normal" => {
+                        let mut s = state.lock().unwrap();
+                        let (p, l, r) = (s.euclidean_pulses, s.euclidean_length, s.euclidean_rotation);
+                        euclidean_apply(&mut s.steps, p, l, r);
+                    }
+                    // Euclidean rotation (increment by 1)
+                    KeyCode::Char('R') if input_mode == "normal" => {
+                        let mut s = state.lock().unwrap();
+                        s.euclidean_rotation = (s.euclidean_rotation + 1) % s.euclidean_length;
+                        let (p, l, r) = (s.euclidean_pulses, s.euclidean_length, s.euclidean_rotation);
+                        euclidean_apply(&mut s.steps, p, l, r);
+                    }
                     KeyCode::Char('l') | KeyCode::Right if input_mode == "normal" => {
                         let mut s = state.lock().unwrap();
                         s.selected = (s.selected + 1) % NUM_STEPS;
@@ -479,10 +619,6 @@ pub fn run(_instance: usize) -> Result<()> {
                         input_mode = String::from("bpm");
                         input_buffer.clear();
                     }
-                    KeyCode::Char('e') if input_mode == "normal" => {
-                        input_mode = String::from("euclidean");
-                        input_buffer.clear();
-                    }
                     KeyCode::Char(c) if input_mode != "normal" => {
                         if c.is_ascii_digit() || c == '.' {
                             input_buffer.push(c);
@@ -500,25 +636,6 @@ pub fn run(_instance: usize) -> Result<()> {
                             "bpm" => {
                                 if let Ok(bpm) = input_buffer.parse::<f64>() {
                                     s.bpm = bpm.clamp(20.0, 300.0);
-                                }
-                            }
-                            "euclidean" => {
-                                if let Ok(pulses) = input_buffer.parse::<usize>() {
-                                    let pulses = pulses.min(NUM_STEPS);
-                                    let mut pattern = vec![false; NUM_STEPS];
-                                    if pulses > 0 {
-                                        let mut bucket = 0usize;
-                                        for i in 0..NUM_STEPS {
-                                            bucket += pulses;
-                                            if bucket >= NUM_STEPS {
-                                                bucket -= NUM_STEPS;
-                                                pattern[i] = true;
-                                            }
-                                        }
-                                    }
-                                    for (i, step) in s.steps.iter_mut().enumerate() {
-                                        step.active = pattern[i];
-                                    }
                                 }
                             }
                             _ => {}
