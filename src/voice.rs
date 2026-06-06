@@ -174,10 +174,16 @@ fn voice_thread(
             s.level = adsr_level;
         }
 
-        // Write to ringbuffer
-        let _ = ringbuf.write(&block);
-
-        std::thread::sleep(Duration::from_millis(1));
+        // Write to ringbuffer — retry when full, don't drop blocks
+        loop {
+            match ringbuf.write(&block) {
+                Ok(()) => break,
+                Err(_) => {
+                    // Ringbuffer full — yield and retry
+                    std::thread::yield_now();
+                }
+            }
+        }
     }
 
     Ok(())

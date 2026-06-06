@@ -86,7 +86,6 @@ fn mixer_thread(
 
     let channels = config.channels() as usize;
     let slot_len = ringbuf.slot_len();
-    let mut buffer = vec![0.0f32; slot_len];
 
     let stream = device
         .build_output_stream(
@@ -94,24 +93,24 @@ fn mixer_thread(
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 let mut s = state.lock().unwrap();
                 let mut peak = 0.0f32;
+                let mut written = 0;
 
-                for frame in data.chunks_mut(channels) {
-                    let mut mixed = [0.0f32; 2];
-
-                    if let Ok(true) = ringbuf.read(&mut buffer) {
-                        for (i, sample) in buffer.iter().enumerate().take(2) {
-                            mixed[i] = *sample;
+                // Fill output with complete slots from the ringbuffer
+                while written + slot_len <= data.len() {
+                    if let Ok(true) = ringbuf.read(&mut data[written..written + slot_len]) {
+                        for sample in data[written..written + slot_len].iter_mut() {
+                            *sample *= s.master;
+                            peak = peak.max(sample.abs());
                         }
+                        written += slot_len;
+                    } else {
+                        break;
                     }
+                }
 
-                    for sample in mixed.iter_mut() {
-                        *sample *= s.master;
-                        peak = peak.max(sample.abs());
-                    }
-
-                    for (i, sample) in frame.iter_mut().enumerate() {
-                        *sample = mixed[i % 2];
-                    }
+                // Zero-fill any remaining output (silence)
+                for sample in data[written..].iter_mut() {
+                    *sample = 0.0;
                 }
 
                 s.master_meter = peak;
