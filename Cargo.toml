@@ -1,16 +1,11 @@
 [package]
 name = "los"
-version = "0.1.0"
-edition = "2024"
+version = "0.2.0"
+edition = "2021"
 
 [dependencies]
-ratatui = "0.30"
-crossterm = "0.29"
-cpal = "0.15"
-midir = "0.10"
-crossbeam = "0.8"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 anyhow = "1"
-ratatui-image = { version = "11", default-features = false, features = ["crossterm"] }
-image = "0.25"
-phosphor-crt = "0.1.0"
-pollster = "0.4"
+cpal = "0.15"
+libc = "0.2"

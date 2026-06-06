@@ -1,0 +1,17 @@
+session_name = "los"
+
+[[modules]]
+type = "conductor"
+
+[[modules]]
+type = "voice"
+count = 1
+
+[[modules]]
+type = "mixer"
+
+[[modules]]
+type = "scope"
+
+[[modules]]
+type = "sequencer"
