@@ -277,6 +277,10 @@ impl AudioRingbuf {
         self.slot_len
     }
 
+    pub fn num_slots(&self) -> u32 {
+        self.num_slots
+    }
+
     /// Current write index (total slots produced so far).
     pub fn write_index(&self) -> u64 {
         atomic_load_acquire(self.write_idx_ptr())
@@ -443,20 +447,29 @@ impl ShmTransport {
 #[repr(C)]
 #[derive(Default, Clone, Copy, Debug)]
 pub struct AudioEvent {
-    pub event_type: u8,  // 0 = note_on, 1 = note_off
-    pub note: u8,        // MIDI note 0–127
-    pub velocity: u8,    // 0–127
-    _pad: [u8; 1],
+    pub event_type: u8,  // 0 = note_on, 1 = note_off, 2 = param
+    pub note: u8,        // MIDI note 0–127, or param ID for param events
+    pub velocity: u8,    // 0–127, or param value for param events
+    pub value: u8,       // extra param value byte (UNUSED for note events)
     pub step: u32,       // step index that triggered this
     _reserved: [u8; 24],
 }
+
+pub const EVENT_NOTE_ON: u8 = 0;
+pub const EVENT_NOTE_OFF: u8 = 1;
+pub const EVENT_PARAM: u8 = 2;
+
+pub const PARAM_SHAPE: u8 = 0;
+pub const PARAM_SUB: u8 = 1;
+pub const PARAM_FM: u8 = 2;
+pub const PARAM_OUTPUT: u8 = 3;
 
 const _: [(); 1] = [(); (core::mem::size_of::<AudioEvent>() == 32) as usize];
 
 impl AudioEvent {
     pub fn note_on(note: u8, velocity: u8, step: u32) -> Self {
         Self {
-            event_type: 0,
+            event_type: EVENT_NOTE_ON,
             note,
             velocity,
             step,
@@ -466,9 +479,18 @@ impl AudioEvent {
 
     pub fn note_off(note: u8, step: u32) -> Self {
         Self {
-            event_type: 1,
+            event_type: EVENT_NOTE_OFF,
             note,
             step,
+            ..Default::default()
+        }
+    }
+
+    pub fn param(id: u8, value: u8) -> Self {
+        Self {
+            event_type: EVENT_PARAM,
+            note: id,
+            velocity: value,
             ..Default::default()
         }
     }

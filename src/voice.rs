@@ -1,45 +1,15 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use crate::shm::{AudioRingbuf, EventRingbuf, ShmTransport};
+use crate::shm::{
+    AudioRingbuf, EventRingbuf, ShmTransport,
+    EVENT_NOTE_ON, EVENT_NOTE_OFF, EVENT_PARAM,
+    PARAM_SHAPE, PARAM_SUB, PARAM_FM, PARAM_OUTPUT,
+};
 
-// ── oscillator ──────────────────────────────────────────────────────────────
-
-enum Waveform {
-    Sine,
-    Triangle,
-    Saw,
-    Square,
-}
-
-struct Oscillator {
-    phase: f64,
-    waveform: Waveform,
-}
-
-impl Oscillator {
-    fn new(waveform: Waveform) -> Self {
-        Self { phase: 0.0, waveform }
-    }
-
-    fn tick(&mut self, freq: f64, sample_rate: f64) -> f32 {
-        let inc = freq / sample_rate;
-        self.phase = (self.phase + inc).fract();
-        match self.waveform {
-            Waveform::Sine => (self.phase * 2.0 * std::f64::consts::PI).sin() as f32,
-            Waveform::Triangle => (4.0 * (0.5 - (self.phase - 0.5).abs()) - 1.0) as f32,
-            Waveform::Saw => (2.0 * self.phase - 1.0) as f32,
-            Waveform::Square => {
-                if self.phase < 0.5 {
-                    1.0
-                } else {
-                    -1.0
-                }
-            }
-        }
-    }
-}
+const SAMPLE_RATE: f64 = 48000.0;
+const SLOT_FRAMES: usize = 64;
 
 // ── ADSR envelope ──────────────────────────────────────────────────────────
 
@@ -66,7 +36,6 @@ impl Adsr {
 
     fn trigger(&mut self) {
         self.state = 1;
-        // Don't reset level to 0 — legato transition avoids DC pop
     }
 
     fn release(&mut self) {
@@ -91,7 +60,7 @@ impl Adsr {
                     self.state = 3;
                 }
             }
-            3 => {} // sustain
+            3 => {}
             4 => {
                 self.level -= self.release_rate;
                 if self.level <= 0.0 {
@@ -105,37 +74,6 @@ impl Adsr {
     }
 }
 
-// ── state-variable filter ───────────────────────────────────────────────────
-
-struct Svf {
-    cutoff: f64,
-    resonance: f64,
-    state1: f64,
-    state2: f64,
-}
-
-impl Svf {
-    fn new(cutoff: f64, resonance: f64) -> Self {
-        Self {
-            cutoff,
-            resonance,
-            state1: 0.0,
-            state2: 0.0,
-        }
-    }
-
-    fn process(&mut self, input: f64, sample_rate: f64) -> f64 {
-        let f = 2.0 * (self.cutoff * std::f64::consts::PI / sample_rate).sin();
-        let q = 1.0 - self.resonance * 0.95;
-        let hp = input - self.state1 * q - self.state2;
-        let bp = self.state1 + f * hp;
-        let lp = self.state2 + f * bp;
-        self.state1 = bp;
-        self.state2 = lp;
-        lp
-    }
-}
-
 // ── helpers ─────────────────────────────────────────────────────────────────
 
 fn midi_to_freq(note: u8) -> f64 {
@@ -146,36 +84,39 @@ fn midi_to_freq(note: u8) -> f64 {
 
 pub fn run(_frequency: f32, instance: usize) -> Result<()> {
     let shm_name = "/los_mix_in";
-    let sample_rate = 48000.0;
     let channels = 2usize;
-    let slot_frames = 64usize;
+    let slot_frames = SLOT_FRAMES;
     let slot_len = slot_frames * channels;
 
-    // Open the audio ringbuffer (created by tone, or create if first)
     let mut ringbuf = match AudioRingbuf::open(shm_name) {
         Ok(rb) => rb,
         Err(_) => AudioRingbuf::create(shm_name)
             .context("creating SHM audio ringbuffer")?,
     };
 
-    // Open (or create) the transport for clock-based pacing
     let _transport = match ShmTransport::open() {
         Ok(t) => t,
-        Err(_) => ShmTransport::create(sample_rate as u32)?,
+        Err(_) => ShmTransport::create(SAMPLE_RATE as u32)?,
     };
 
-    // Open (or create) the event ringbuffer for sequencer events
     let mut events = match EventRingbuf::open() {
         Ok(e) => Some(e),
         Err(_) => None,
     };
 
-    let mut osc = Oscillator::new(Waveform::Sine);
-    let mut adsr = Adsr::new(sample_rate as f32);
-    let mut current_freq = midi_to_freq(60); // C4 default
+    let mut adsr = Adsr::new(SAMPLE_RATE as f32);
+    let mut phase: f32 = 0.0;
+    let mut freq: f64 = midi_to_freq(60);
+    let mut velocity: f32 = 1.0;
+
+    // STO parameters
+    let mut shape: f32 = 0.0;    // 0..1 morph sine→saw→square
+    let mut sub_lvl: f32 = 0.0;  // 0..1 sub oscillator mix
+    let mut fm_amt: f32 = 0.0;   // 0..1 FM amount
+    let mut output: u8 = 2;      // 0=sine, 1=sine+sub, 2=shaped+sub
 
     let mut block = vec![0.0f32; slot_len];
-    let slot_dur = Duration::from_nanos(slot_frames as u64 * 1_000_000_000 / sample_rate as u64);
+    let capacity = ringbuf.num_slots() as u64;
 
     eprintln!(
         "los voice {}: {} ch, {} frames/slot",
@@ -183,45 +124,89 @@ pub fn run(_frequency: f32, instance: usize) -> Result<()> {
     );
 
     loop {
-        let tick = Instant::now();
-
         // Drain pending events
         if let Some(ref mut evbuf) = events {
             while let Some(event) = evbuf.read_event() {
                 match event.event_type {
-                    0 => {
+                    EVENT_NOTE_ON => {
                         adsr.trigger();
-                        current_freq = midi_to_freq(event.note);
+                        freq = midi_to_freq(event.note);
+                        velocity = event.velocity as f32 / 127.0;
                     }
-                    1 => adsr.release(),
+                    EVENT_NOTE_OFF => adsr.release(),
+                    EVENT_PARAM => {
+                        let val = event.velocity as f32 / 127.0;
+                        match event.note {
+                            PARAM_SHAPE => shape = val,
+                            PARAM_SUB => sub_lvl = val,
+                            PARAM_FM => fm_amt = val,
+                            PARAM_OUTPUT => output = if val < 0.333 { 0 } else if val < 0.666 { 1 } else { 2 },
+                            _ => {}
+                        }
+                    }
                     _ => {}
                 }
             }
         }
 
-        // Generate one block of audio
+        // Generate one block of audio (STO wave shaping)
         for frame in 0..slot_frames {
             let env = adsr.tick();
-            let raw = osc.tick(current_freq, sample_rate);
-            let amp = raw * env;
+
+            // Advance phase with optional FM
+            let fm_lfo = (phase as f64 * 0.1).sin() as f32 * fm_amt * 0.5;
+            let mod_freq = freq * (1.0 + fm_lfo as f64);
+            phase = (phase + mod_freq as f32 / SAMPLE_RATE as f32).fract();
+
+            // STO wave shaping: morph sine → saw → square
+            let sine = (phase * 2.0 * std::f32::consts::PI).sin();
+            let saw = 2.0 * phase - 1.0;
+            let square = if phase < 0.5 { 1.0 } else { -1.0 };
+
+            let shaped = if shape < 0.5 {
+                let t = shape * 2.0; // 0..1 within sine→saw range
+                sine * (1.0 - t) + saw * t
+            } else {
+                let t = (shape - 0.5) * 2.0; // 0..1 within saw→square range
+                saw * (1.0 - t) + square * t
+            };
+
+            // Sub oscillator (square at half frequency)
+            let sub_phase = (phase * 0.5).fract();
+            let sub = if sub_phase < 0.5 { 1.0 } else { -1.0 };
+
+            // Output routing
+            let out = match output {
+                0 => sine,
+                1 => sine * (1.0 - sub_lvl) + sub * sub_lvl,
+                _ => shaped * (1.0 - sub_lvl) + sub * sub_lvl,
+            };
+
+            let amp = out * 0.3 * env * velocity;
             block[frame * channels] = amp;
             block[frame * channels + 1] = amp;
         }
 
-        // Write to ringbuffer — backpressure via short sleep when full
+        // Write to ringbuffer — backpressure via yield+occasional sleep
+        let mut retries = 0u32;
         loop {
             match ringbuf.write(&block) {
                 Ok(()) => break,
                 Err(_) => {
-                    std::thread::sleep(Duration::from_micros(100));
+                    retries += 1;
+                    if retries > 100 {
+                        std::thread::sleep(Duration::from_micros(200));
+                        retries = 0;
+                    } else {
+                        std::thread::yield_now();
+                    }
                 }
             }
         }
 
-        // Pace to real-time rate so the ringbuffer doesn't grow unbounded
-        let elapsed = tick.elapsed();
-        if elapsed < slot_dur {
-            std::thread::sleep(slot_dur - elapsed);
+        // Optional sleep if the ringbuffer is getting ahead of the mixer
+        if ringbuf.available() >= capacity / 2 {
+            std::thread::sleep(Duration::from_micros(200));
         }
     }
 }
