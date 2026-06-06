@@ -12,10 +12,12 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use image::{imageops::FilterType, DynamicImage, RgbaImage};
+use phosphor::{gradient::RgbColor, PhosphorHeadless};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect, Size},
     style::{Color, Style},
+    text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
     Terminal,
 };
@@ -26,10 +28,11 @@ use ratatui_image::{picker::Picker, protocol::Protocol, Image, Resize};
 const SCOPE_CAPACITY: usize = 16384;
 const SCOPE_ROWS: usize = 12;
 const SCOPE_CHARS: usize = 30;
-const DISPLAY_SIZE: usize = 60;
-const PERSISTENCE: f32 = 0.12;
+const DISPLAY_SIZE: usize = 200;
+const PERSISTENCE: f32 = 0.5;
 const RING_SIZE: usize = 2048;
 const SCOPE_ZOOM: f32 = 3.0;
+const AUDIO_LATENCY_SAMPLES: usize = 1024;
 const MODULE_WIDTH: u16 = 24;
 const MODULE_WF_ROWS: u16 = 12;
 const MODULE_HEIGHT_OPEN: u16 = MODULE_WF_ROWS + 4;
@@ -46,7 +49,8 @@ const MODE_INSERT: Color = Color::Rgb(100, 200, 80);
 const MODE_COMMAND: Color = Color::Rgb(200, 80, 80);
 
 const CRT_SIZE: usize = 96;
-const CRT_THROTTLE: u8 = 8;
+const PHOSPHOR_SIZE: u32 = 192;
+const CRT_THROTTLE: u8 = 4;
 const PHOSPHOR_DECAY: f32 = 0.88;
 const GRID_BRIGHT: f32 = 0.22;
 const TRACE_BRIGHT: f32 = 1.0;
@@ -79,15 +83,16 @@ impl ScopeChannel {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum ScopeMode { Braille, Crt }
+enum ScopeMode { Braille, Crt, Phosphor, HalfBlock }
 
 struct ScopeState {
     display: Vec<f32>,
     ring: VecDeque<f32>,
+    delay_buf: VecDeque<f32>,
 }
 
 impl ScopeState {
-    fn new() -> Self { Self { display: vec![0.0; DISPLAY_SIZE], ring: VecDeque::with_capacity(RING_SIZE) } }
+    fn new() -> Self { Self { display: vec![0.0; DISPLAY_SIZE], ring: VecDeque::with_capacity(RING_SIZE), delay_buf: VecDeque::with_capacity(2048) } }
 }
 
 // ─── voice engine ───────────────────────────────────────────────────────────
@@ -241,6 +246,8 @@ struct App {
     picker: Picker,
     engine: Arc<EngineShared>,
     seq_cursor: (usize, usize), // (track, step) for grid cursor
+    phosphor_renderer: Option<PhosphorHeadless>,
+    phosphor_error: Option<String>,
 }
 
 // ─── Braille scope ──────────────────────────────────────────────────────────
@@ -288,12 +295,88 @@ fn render_braille(display: &[f32], char_cols: usize, zoom: f32) -> Vec<String> {
     canvas.iter().map(|row| row.iter().map(|&b| char::from_u32(0x2800 + b as u32).unwrap_or(' ')).collect()).collect()
 }
 
+fn render_halfblock(f: &mut ratatui::Frame, display: &[f32], area: Rect) {
+    let cols = area.width as usize;
+    let rows = area.height as usize;
+    if cols < 2 || rows < 2 || display.len() < 2 { return; }
+
+    let half_rows = rows * 2;
+    let n = display.len();
+    let step = (n.saturating_sub(1)) as f64 / (cols.saturating_sub(1)) as f64;
+    let zoom = SCOPE_ZOOM;
+
+    let points: Vec<(usize, usize)> = (0..cols).map(|i| {
+        let pos = (i as f64 * step) as usize;
+        let frac = i as f64 * step - pos as f64;
+        let v = if pos + 1 < n {
+            (display[pos] as f64 * (1.0 - frac) + display[pos + 1] as f64 * frac) as f32 * zoom
+        } else {
+            display[pos.min(n - 1)] * zoom
+        };
+        let v = v.clamp(-1.0, 1.0);
+        let py = ((1.0 - v) / 2.0 * (half_rows - 1) as f32).round() as usize;
+        (i, py.min(half_rows - 1))
+    }).collect();
+
+    let mut canvas = vec![vec![[0u8; 2]; cols]; rows];
+
+    let center = half_rows / 2;
+    let r = center / 2; let h = center % 2;
+    if r < rows { for cell in canvas[r].iter_mut() { cell[h] = 1; } }
+    for &gy in &[half_rows / 4, 3 * half_rows / 4] {
+        let r = gy / 2; let h = gy % 2;
+        if r < rows { for cell in canvas[r].iter_mut().step_by(3) { cell[h] = 1; } }
+    }
+
+    for w in points.windows(2) {
+        let (mut x, mut y) = (w[0].0 as isize, w[0].1 as isize);
+        let (x1, y1) = (w[1].0 as isize, w[1].1 as isize);
+        let dx = (x1 - x).abs(); let dy = -(y1 - y).abs();
+        let sx = if x < x1 { 1 } else { -1 }; let sy = if y < y1 { 1 } else { -1 };
+        let mut err = dx + dy;
+        loop {
+            if x >= 0 && y >= 0 {
+                let (cx, cy) = (x as usize, y as usize);
+                if cx < cols { let r = cy / 2; let h = cy % 2; if r < rows { canvas[r][cx][h] = 2; } }
+            }
+            if x == x1 && y == y1 { break; }
+            let e2 = 2 * err;
+            if e2 >= dy { if x == x1 { break; } err += dy; x += sx; }
+            if e2 <= dx { if y == y1 { break; } err += dx; y += sy; }
+        }
+    }
+
+    let grid = AMBER_DIM;
+    let trace = AMBER;
+    let bg = Color::Black;
+    let lines: Vec<Line> = canvas.iter().map(|row| {
+        let spans: Vec<Span> = row.iter().map(|cell| {
+            let (t, b) = (cell[0], cell[1]);
+            let (ch, fg, bg_c) = match (t, b) {
+                (2, 2) => ('█', trace, trace),
+                (2, 1) => ('▀', trace, grid),
+                (2, 0) => ('▀', trace, bg),
+                (1, 2) => ('▄', trace, grid),
+                (0, 2) => ('▄', trace, bg),
+                (1, 1) => ('█', grid, grid),
+                (1, 0) => ('▀', grid, bg),
+                (0, 1) => ('▄', grid, bg),
+                _ => (' ', bg, bg),
+            };
+            Span::styled(ch.to_string(), Style::default().fg(fg).bg(bg_c))
+        }).collect();
+        Line::from(spans)
+    }).collect();
+    f.render_widget(Paragraph::new(lines).style(Style::default().bg(Color::Black)), area);
+}
+
 // ─── CRT phosphor engine ────────────────────────────────────────────────────
 
 fn plot_crt(buf: &mut [f32], w: usize, h: usize, px: usize, py: usize, bright: f32) {
     if px < w && py < h { buf[py * w + px] = buf[py * w + px].max(bright); }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn line_crt(buf: &mut [f32], w: usize, h: usize, x0: usize, y0: usize, x1: usize, y1: usize, bright: f32) {
     let (mut x, mut y) = (x0 as isize, y0 as isize);
     let dx = (x1 as isize - x0 as isize).abs(); let dy = -(y1 as isize - y0 as isize).abs();
@@ -387,14 +470,21 @@ fn resample(data: &[f32], target: usize) -> Vec<f32> {
 
 fn process_scope(samples: &[f32], state: &mut ScopeState, channel: ScopeChannel) {
     let data = extract_channel(samples, channel); if data.is_empty() { return; }
-    for &s in &data { if state.ring.len() >= RING_SIZE { state.ring.pop_front(); } state.ring.push_back(s); }
+    for &s in &data {
+        state.delay_buf.push_back(s);
+        if state.delay_buf.len() > AUDIO_LATENCY_SAMPLES {
+            let d = state.delay_buf.pop_front().unwrap();
+            if state.ring.len() >= RING_SIZE { state.ring.pop_front(); }
+            state.ring.push_back(d);
+        }
+    }
     let ring = state.ring.make_contiguous();
     let mut xings = vec![];
     for i in 1..ring.len() { if ring[i-1] < 0.0 && ring[i] >= 0.0 { xings.push(i); } }
     if xings.len() >= 2 {
         let (s, e) = (xings[xings.len()-2], xings[xings.len()-1]);
         if e-s > 4 { let rs = resample(&ring[s..e], DISPLAY_SIZE);
-            for i in 0..DISPLAY_SIZE { state.display[i] = state.display[i]*(1.0-PERSISTENCE) + rs[i]*PERSISTENCE; } }
+            for (i, &v) in rs.iter().enumerate().take(DISPLAY_SIZE) { state.display[i] = state.display[i]*(1.0-PERSISTENCE) + v*PERSISTENCE; } }
     }
 }
 
@@ -427,8 +517,8 @@ fn build_output_stream(
                 if cur_step != prev_step {
                     prev_step = cur_step;
                     engine.seq_step.store(cur_step as u32, Ordering::Relaxed);
-                    if cur_step < SEQ_STEPS {
-                        if let Ok(steps) = engine.step_data.try_lock() {
+                    if cur_step < SEQ_STEPS
+                        && let Ok(steps) = engine.step_data.try_lock() {
                             let track_data = steps[0]; // track 0 drives the voice
                             let enc = track_data[cur_step];
                             let (active, freq, vel) = decode_step(enc);
@@ -440,7 +530,6 @@ fn build_output_stream(
                                 engine.trig_gate.store(false, Ordering::Relaxed);
                             }
                         }
-                    }
                 }
             }
 
@@ -473,11 +562,10 @@ fn build_output_stream(
             if i % 2 == 0 && bi + 1 < burst.len() { burst[bi] = l; burst[bi+1] = r; bi += 2; }
         }
 
-        if bi > 0 {
-            if let Ok(mut buf) = scope_buffer.try_lock() {
+        if bi > 0
+            && let Ok(mut buf) = scope_buffer.try_lock() {
                 for &s in &burst[..bi] { if buf.len() >= SCOPE_CAPACITY { buf.pop_front(); } buf.push_back(s); }
             }
-        }
     }, |err| eprintln!("audio error: {err}"), None)?;
     stream.play()?;
     Ok(stream)
@@ -503,13 +591,25 @@ fn main() -> Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
 
     let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+
+    let (phosphor_renderer, phosphor_error) = match pollster::block_on(PhosphorHeadless::new(
+        (PHOSPHOR_SIZE, PHOSPHOR_SIZE).into()
+    )) {
+        Ok(r) => { eprintln!("phosphor-crt: initialized"); (Some(r), None) }
+        Err(e) => {
+            let msg = format!("phosphor-crt FAILED: {e}");
+            eprintln!("{msg}");
+            (None, Some(format!("{e}")))
+        }
+    };
+
     let mut app = App {
         mode: Mode::Normal, scope_open: true, voice_open: true, seq_open: true,
-        scope_channel: ScopeChannel::Both, scope_mode: ScopeMode::Crt,
+        scope_channel: ScopeChannel::Both, scope_mode: if phosphor_renderer.is_some() { ScopeMode::Phosphor } else { ScopeMode::Crt },
         scope_samples: Vec::with_capacity(SCOPE_CAPACITY), scope_state: ScopeState::new(),
         crt_buf: vec![0.0; CRT_SIZE*CRT_SIZE], crt_mask: build_crt_mask(CRT_SIZE),
         crt_cache: None, scope_dirty: true, crt_frame: 0, picker,
-        engine, seq_cursor: (0, 0),
+        engine, seq_cursor: (0, 0), phosphor_renderer, phosphor_error,
     };
 
     let result = run_ui(&mut terminal, &scope_buf, sr, &mut app);
@@ -532,7 +632,12 @@ fn render_label(f: &mut ratatui::Frame, label: &str, area: Rect, color: Color) {
 
 fn render_scope_module(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let toggle = if app.scope_open { "▾" } else { "▸" };
-    let mode_ind = match app.scope_mode { ScopeMode::Braille => "BR", ScopeMode::Crt => "Φ" };
+    let mode_ind = match app.scope_mode {
+        ScopeMode::Braille => "BR",
+        ScopeMode::Crt => "Φ",
+        ScopeMode::Phosphor => if app.phosphor_renderer.is_some() { "Ph" } else { "Ph!" },
+        ScopeMode::HalfBlock => "HB",
+    };
     let title = format!(" ● TYPE 440 [{mode_ind}] {toggle} ");
     let block = module_block(&title, if app.scope_open { AMBER } else { PANEL_BORDER });
     let inner = block.inner(area);
@@ -542,29 +647,73 @@ fn render_scope_module(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         let scope_inner = Layout::default().direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Fill(1), Constraint::Length(1)]).split(inner);
 
-        let info = format!(" {}  {}Hz  trig↗", app.scope_channel.label(),
-            match app.scope_channel { ScopeChannel::Left=>"440", ScopeChannel::Right=>"554", ScopeChannel::Both=>"440+554" });
+        let info = if app.scope_mode == ScopeMode::Phosphor && app.phosphor_renderer.is_none() {
+            format!(" ✗ Phosphor init failed: {}", app.phosphor_error.as_deref().unwrap_or("unknown"))
+        } else {
+            format!(" {}  {}Hz  trig↗", app.scope_channel.label(),
+                match app.scope_channel { ScopeChannel::Left=>"440", ScopeChannel::Right=>"554", ScopeChannel::Both=>"440+554" })
+        };
         render_label(f, &info, scope_inner[0], AMBER_DIM);
 
-        let crt_protocol: Option<&Protocol> = if app.scope_mode == ScopeMode::Crt {
-            app.crt_frame = app.crt_frame.wrapping_add(1);
-            if app.crt_frame % CRT_THROTTLE == 0 && (app.scope_dirty || app.crt_cache.is_none()) {
-                let size = Size::new(scope_inner[1].width, scope_inner[1].height);
-                app.crt_cache = crt_to_protocol(&app.crt_buf, CRT_SIZE, CRT_SIZE, &app.picker, size).ok();
-                app.scope_dirty = false;
+        let scope_size = Size::new(scope_inner[1].width, scope_inner[1].height);
+
+        let crt_protocol: Option<&Protocol> = match app.scope_mode {
+            ScopeMode::Crt => {
+                app.crt_frame = app.crt_frame.wrapping_add(1);
+                if app.crt_cache.is_none() || (app.crt_frame.is_multiple_of(CRT_THROTTLE) && app.scope_dirty) {
+                    app.crt_cache = crt_to_protocol(&app.crt_buf, CRT_SIZE, CRT_SIZE, &app.picker, scope_size).ok();
+                    app.scope_dirty = false;
+                }
+                app.crt_cache.as_ref()
             }
-            app.crt_cache.as_ref()
-        } else { None };
+            ScopeMode::Phosphor => {
+                if let Some(ref mut renderer) = app.phosphor_renderer {
+                    app.crt_frame = app.crt_frame.wrapping_add(1);
+                    if app.crt_cache.is_none() || (app.crt_frame.is_multiple_of(CRT_THROTTLE) && (app.scope_dirty)) {
+                        renderer.set_waveform_yt(&app.scope_state.display);
+                        renderer.set_xlim(0.0, app.scope_state.display.len().saturating_sub(1) as f32);
+                        renderer.set_ylim(-0.35, 0.35);
+                        let gradient = vec![
+                            (0.0, RgbColor { r: 0.0, g: 0.0, b: 0.0 }),
+                            (0.1, RgbColor { r: 0.0, g: 0.2, b: 0.0 }),
+                            (1.0, RgbColor { r: 0.2, g: 1.0, b: 0.15 }),
+                        ];
+                        renderer.set_lut(gradient);
+                        renderer.set_beam_width(5.0);
+                        renderer.set_intensity(3.0);
+                        match renderer.render_to_buffer() {
+                            Ok(bitmap) => {
+                                if let Some(img) = RgbaImage::from_raw(bitmap.size.width, bitmap.size.height, bitmap.buffer) {
+                                    app.crt_cache = app.picker.new_protocol(
+                                        DynamicImage::ImageRgba8(img), scope_size, Resize::Fit(Some(FilterType::Lanczos3))
+                                    ).ok();
+                                }
+                            }
+                            Err(e) => { eprintln!("phosphor: render error: {e}"); }
+                        }
+                        app.scope_dirty = false;
+                    }
+                }
+                app.crt_cache.as_ref()
+            }
+            ScopeMode::Braille | ScopeMode::HalfBlock => None,
+        };
 
         if let Some(proto) = crt_protocol {
             f.render_widget(Image::new(proto), scope_inner[1]);
+        } else if app.scope_mode == ScopeMode::Phosphor && app.phosphor_renderer.is_none() {
+            let err = app.phosphor_error.as_deref().unwrap_or("init failed");
+            let colorful_err = format!("Phosphor\n\n✗\n\n{}", err);
+            f.render_widget(Paragraph::new(colorful_err).style(Style::default().fg(Color::Red)), scope_inner[1]);
+        } else if app.scope_mode == ScopeMode::HalfBlock {
+            render_halfblock(f, &app.scope_state.display, scope_inner[1]);
         } else {
             let rows = render_braille(&app.scope_state.display, SCOPE_CHARS, SCOPE_ZOOM);
             let wf_rows = Layout::default().direction(Direction::Vertical)
                 .constraints(vec![Constraint::Length(1); SCOPE_ROWS]).split(scope_inner[1]);
             for (i, row) in rows.iter().enumerate() { f.render_widget(Paragraph::new(row.as_str()).style(Style::default().fg(AMBER)), wf_rows[i]); }
         }
-        let scale = match app.scope_mode { ScopeMode::Braille=>" 1cy/div  braille  ×3.0 ", ScopeMode::Crt=>" 1cy/div  Φ-CRT  ×3.0 " };
+        let scale = match app.scope_mode { ScopeMode::Braille=>" 1cy/div  braille  ×3.0 ", ScopeMode::Crt=>" 1cy/div  Φ-CRT  ×3.0 ", ScopeMode::Phosphor=>" 1cy/div  Ph  ×3.0 ", ScopeMode::HalfBlock=>" 1cy/div  ▀▄×3.0 " };
         render_label(f, scale, scope_inner[2], AMBER_DIM);
     }
 }
@@ -609,7 +758,7 @@ fn render_seq_module(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
 
     if app.seq_open {
         let steps_visible = inner.width.saturating_sub(2) as usize;
-        let show_cursor_info = inner.height >= 2 + SEQ_TRACKS as u16 + 1;
+        let show_cursor_info = inner.height > 2 + SEQ_TRACKS as u16;
         let grid_rows = if show_cursor_info { SEQ_TRACKS } else { (inner.height.saturating_sub(1)) as usize };
         let mut lines: Vec<String> = Vec::new();
         let mut cursor_step_data: Option<(bool, f32, f32)> = None;
@@ -705,8 +854,8 @@ fn run_ui(
             }
         })?;
 
-        if event::poll(Duration::from_millis(16))? {
-            if let Event::Key(key) = event::read()? {
+        if event::poll(Duration::from_millis(8))?
+            && let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press { continue; }
                 match &mut app.mode {
                     Mode::Normal => match key.code {
@@ -727,9 +876,9 @@ fn run_ui(
                                 ('l', _) => { app.seq_cursor.1 = (app.seq_cursor.1 + 1).min(SEQ_STEPS-1); }
                                 ('j', false) => { app.seq_cursor.0 = (app.seq_cursor.0 + 1).min(SEQ_TRACKS-1); }
                                 ('k', false) => { app.seq_cursor.0 = app.seq_cursor.0.saturating_sub(1); }
-                                ('w', _) => { let (t, s) = app.seq_cursor; if let Ok(steps) = app.engine.step_data.try_lock() { if let Some(next) = next_active_step(&steps, t, s) { app.seq_cursor.1 = next; } } }
-                                ('b', false) => { let (t, s) = app.seq_cursor; if let Ok(steps) = app.engine.step_data.try_lock() { if let Some(prev) = prev_active_step(&steps, t, s) { app.seq_cursor.1 = prev; } } }
-                                ('b', true) => { app.scope_mode = match app.scope_mode { ScopeMode::Braille=>ScopeMode::Crt, ScopeMode::Crt=>ScopeMode::Braille }; }
+                                ('w', _) => { let (t, s) = app.seq_cursor; if let Ok(steps) = app.engine.step_data.try_lock() && let Some(next) = next_active_step(&steps, t, s) { app.seq_cursor.1 = next; } }
+                                ('b', false) => { let (t, s) = app.seq_cursor; if let Ok(steps) = app.engine.step_data.try_lock() && let Some(prev) = prev_active_step(&steps, t, s) { app.seq_cursor.1 = prev; } }
+                                ('b', true) => { app.scope_mode = match (app.scope_mode, app.phosphor_renderer.is_some()) { (ScopeMode::Braille, _) => ScopeMode::Crt, (ScopeMode::Crt, true) => ScopeMode::Phosphor, (ScopeMode::Crt, false) => ScopeMode::HalfBlock, (ScopeMode::Phosphor, _) => ScopeMode::HalfBlock, (ScopeMode::HalfBlock, _) => ScopeMode::Braille, }; app.crt_cache = None; }
                                 ('j', true) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); steps[t][s] = encode_step(act, octave_down(f) as u32, (v*1000.0) as u32); } }
                                 ('k', true) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); steps[t][s] = encode_step(act, octave_up(f) as u32, (v*1000.0) as u32); } }
                                 ('i', _) => app.mode = Mode::Insert,
@@ -771,7 +920,6 @@ fn run_ui(
                     },
                 }
             }
-        }
     }
 }
 

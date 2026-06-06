@@ -12,3 +12,5 @@ crossbeam = "0.8"
 anyhow = "1"
 ratatui-image = { version = "11", default-features = false, features = ["crossterm"] }
 image = "0.25"
+phosphor-crt = "0.1.0"
+pollster = "0.4"
