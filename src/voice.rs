@@ -105,6 +105,7 @@ pub fn run(_frequency: f32, instance: usize) -> Result<()> {
     };
 
     let mut adsr = Adsr::new(SAMPLE_RATE as f32);
+    adsr.trigger(); // start active so scope/mixer get audio immediately
     let mut phase: f32 = 0.0;
     let mut freq: f64 = midi_to_freq(60);
     let mut velocity: f32 = 1.0;
@@ -124,6 +125,11 @@ pub fn run(_frequency: f32, instance: usize) -> Result<()> {
     );
 
     loop {
+        // Retry opening event ringbuffer if not yet available
+        if events.is_none() {
+            events = EventRingbuf::open().ok();
+        }
+
         // Drain pending events
         if let Some(ref mut evbuf) = events {
             while let Some(event) = evbuf.read_event() {
