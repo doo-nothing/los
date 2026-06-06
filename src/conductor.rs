@@ -33,6 +33,9 @@ fn create_session(layout: &Layout, los_bin: &str) -> Result<()> {
     // The attaching terminal determines the final size.
     tmux::cmd(["resize-window", "-t", &format!("{session}:0"), "-x", "80", "-y", "60"])
         .ok();
+    // Track the largest attached client so panes fill the terminal.
+    tmux::cmd(["set-window-option", "-t", &format!("{session}:0"), "window-size", "largest"])
+        .ok();
 
     // Split vertically: each split creates a pane below the current one.
     for _ in 1..total {
