@@ -12,6 +12,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
+    text::Line,
     widgets::{Block, Borders, Gauge, Paragraph},
     Terminal,
 };
@@ -193,6 +194,7 @@ fn draw_ui(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &VoiceState,
     selected: usize,
+    show_help: bool,
 ) -> Result<()> {
     terminal.draw(|f| {
         let area = f.area();
@@ -264,6 +266,32 @@ fn draw_ui(
             .ratio(state.level as f64)
             .label(format!("Level: {:.0}%", state.level * 100.0));
         f.render_widget(level_gauge, chunks[5]);
+
+        // Help overlay
+        if show_help {
+            let help_text = vec![
+                Line::from("━━━ Voice Help ━━━"),
+                Line::from(""),
+                Line::from("Parameters:"),
+                Line::from("  j/k, ↑/↓  Select parameter"),
+                Line::from("  h/l, ←/→  Adjust value"),
+                Line::from(""),
+                Line::from("Output modes:"),
+                Line::from("  1          Main (sine/saw/square)"),
+                Line::from("  2          Main + Sub"),
+                Line::from("  3          Mix"),
+                Line::from(""),
+                Line::from("  ?          Close this help"),
+                Line::from("  q          Quit"),
+            ];
+            let help = Paragraph::new(help_text)
+                .style(Style::default().fg(Color::White).bg(Color::Black))
+                .block(Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan))
+                    .title("Help"));
+            f.render_widget(help, area);
+        }
     })?;
 
     Ok(())
@@ -302,10 +330,11 @@ pub fn run(_instance: usize) -> Result<()> {
     });
 
     let mut selected = 0usize;
+    let mut show_help = false;
 
     loop {
         let current_state = state.lock().unwrap().clone();
-        draw_ui(&mut terminal, &current_state, selected)?;
+        draw_ui(&mut terminal, &current_state, selected, show_help)?;
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
@@ -334,10 +363,26 @@ pub fn run(_instance: usize) -> Result<()> {
                             1 => s.sub = (s.sub + 0.05).min(1.0),
                             2 => s.fm = (s.fm + 0.05).min(1.0),
                             3 => s.output = (s.output + 1) % 3,
-                            _ => {}
+                             _ => {}
                         }
                     }
+                    KeyCode::Char('?') => {
+                        show_help = !show_help;
+                    }
                     _ => {}
+                }
+            }
+        }
+
+        if show_help {
+            loop {
+                if event::poll(Duration::from_millis(100))? {
+                    if let Event::Key(key) = event::read()? {
+                        if let KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Esc = key.code {
+                            show_help = false;
+                            break;
+                        }
+                    }
                 }
             }
         }

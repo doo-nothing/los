@@ -12,7 +12,8 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::Rect,
     style::{Color, Style},
-    widgets::Paragraph,
+    text::Line,
+    widgets::{Block, Borders, Paragraph},
     Terminal,
 };
 
@@ -140,6 +141,7 @@ fn mixer_thread(
 fn draw_ui(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &MixerState,
+    show_help: bool,
 ) -> Result<()> {
     terminal.draw(|f| {
         let area = f.area();
@@ -193,6 +195,32 @@ fn draw_ui(
 
         let master_widget = Paragraph::new(master_text).style(master_style);
         f.render_widget(master_widget, master_rect);
+
+        // Help overlay
+        if show_help {
+            let help_text = vec![
+                Line::from("━━━ Mixer Help ━━━"),
+                Line::from(""),
+                Line::from("Navigation:"),
+                Line::from("  h/l, ←/→  Select track/master"),
+                Line::from("  j/k, ↑/↓  Select parameter"),
+                Line::from(""),
+                Line::from("Adjusting:"),
+                Line::from("  +/-        Increase/decrease value"),
+                Line::from("  m          Toggle mute"),
+                Line::from("  s          Toggle solo"),
+                Line::from(""),
+                Line::from("  ?          Close this help"),
+                Line::from("  q          Quit"),
+            ];
+            let help = Paragraph::new(help_text)
+                .style(Style::default().fg(Color::White).bg(Color::Black))
+                .block(Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan))
+                    .title("Help"));
+            f.render_widget(help, area);
+        }
     })?;
 
     Ok(())
@@ -230,9 +258,11 @@ pub fn run() -> Result<()> {
         }
     });
 
+    let mut show_help = false;
+
     loop {
         let current_state = state.lock().unwrap().clone();
-        draw_ui(&mut terminal, &current_state)?;
+        draw_ui(&mut terminal, &current_state, show_help)?;
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
@@ -294,7 +324,23 @@ pub fn run() -> Result<()> {
                             s.tracks[sel].solo = !s.tracks[sel].solo;
                         }
                     }
+                    KeyCode::Char('?') => {
+                        show_help = !show_help;
+                    }
                     _ => {}
+                }
+            }
+        }
+
+        if show_help {
+            loop {
+                if event::poll(Duration::from_millis(100))? {
+                    if let Event::Key(key) = event::read()? {
+                        if let KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Esc = key.code {
+                            show_help = false;
+                            break;
+                        }
+                    }
                 }
             }
         }

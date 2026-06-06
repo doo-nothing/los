@@ -13,7 +13,8 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
     symbols::Marker,
-    widgets::{Axis, Chart, Dataset, GraphType, Paragraph},
+    text::Line,
+    widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph},
     Terminal,
 };
 
@@ -93,6 +94,7 @@ fn scope_thread(
 fn draw_ui(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &ScopeState,
+    show_help: bool,
 ) -> Result<()> {
     terminal.draw(|f| {
         let area = f.area();
@@ -165,6 +167,33 @@ fn draw_ui(
             );
 
         f.render_widget(chart, chunks[1]);
+
+        // Help overlay
+        if show_help {
+            let help_text = vec![
+                Line::from("━━━ Scope Help ━━━"),
+                Line::from(""),
+                Line::from("Display:"),
+                Line::from("  m          Cycle render mode"),
+                Line::from("             (Braille/HalfBlock/Bars/Dots)"),
+                Line::from("  c          Cycle channel (L/R/Stereo)"),
+                Line::from(""),
+                Line::from("Controls:"),
+                Line::from("  +/-        Zoom in/out"),
+                Line::from("  g/G        Increase/decrease gain"),
+                Line::from("  t/T        Trigger level"),
+                Line::from(""),
+                Line::from("  ?          Close this help"),
+                Line::from("  q          Quit"),
+            ];
+            let help = Paragraph::new(help_text)
+                .style(Style::default().fg(Color::White).bg(Color::Black))
+                .block(Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan))
+                    .title("Help"));
+            f.render_widget(help, area);
+        }
     })?;
 
     Ok(())
@@ -202,9 +231,11 @@ pub fn run(_instance: usize) -> Result<()> {
         }
     });
 
+    let mut show_help = false;
+
     loop {
         let current_state = state.lock().unwrap().clone();
-        draw_ui(&mut terminal, &current_state)?;
+        draw_ui(&mut terminal, &current_state, show_help)?;
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
@@ -242,7 +273,23 @@ pub fn run(_instance: usize) -> Result<()> {
                         let mut s = state.lock().unwrap();
                         s.trigger_level = (s.trigger_level - 0.1).max(-1.0);
                     }
+                    KeyCode::Char('?') => {
+                        show_help = !show_help;
+                    }
                     _ => {}
+                }
+            }
+        }
+
+        if show_help {
+            loop {
+                if event::poll(Duration::from_millis(100))? {
+                    if let Event::Key(key) = event::read()? {
+                        if let KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Esc = key.code {
+                            show_help = false;
+                            break;
+                        }
+                    }
                 }
             }
         }

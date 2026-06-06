@@ -12,7 +12,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
-    text::Span,
+    text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
     Terminal,
 };
@@ -135,6 +135,7 @@ fn draw_ui(
     state: &SequencerState,
     input_mode: &str,
     input_buffer: &str,
+    show_help: bool,
 ) -> Result<()> {
     terminal.draw(|f| {
         let area = f.area();
@@ -146,7 +147,7 @@ fn draw_ui(
                 Constraint::Length(1),  // Status line
                 Constraint::Length(3),  // Step grid
                 Constraint::Length(1),  // Note display
-                Constraint::Min(0),     // Empty space
+                Constraint::Min(0),     // Empty space for help
             ])
             .split(area);
 
@@ -212,6 +213,41 @@ fn draw_ui(
         let note_widget = Paragraph::new(note_info)
             .style(Style::default().fg(Color::Yellow));
         f.render_widget(note_widget, chunks[2]);
+
+        // Help overlay
+        if show_help {
+            let help_text = vec![
+                Line::from("━━━ Sequencer Help ━━━"),
+                Line::from(""),
+                Line::from("Navigation:"),
+                Line::from("  h/l, ←/→  Move left/right"),
+                Line::from("  0          First step"),
+                Line::from("  $          Last step"),
+                Line::from("  w          Next active step"),
+                Line::from("  b          Previous active step"),
+                Line::from("  gg         Go to step 0"),
+                Line::from(""),
+                Line::from("Editing:"),
+                Line::from("  space      Toggle step on/off"),
+                Line::from("  n<NUM>     Set note (e.g. n60 for C4)"),
+                Line::from("  t<NUM>     Set BPM (e.g. t140)"),
+                Line::from("  e<NUM>     Euclidean fill (e.g. e5)"),
+                Line::from(""),
+                Line::from("Transport:"),
+                Line::from("  p          Play/pause"),
+                Line::from("  s          Stop"),
+                Line::from(""),
+                Line::from("  ?          Close this help"),
+                Line::from("  q          Quit"),
+            ];
+            let help = Paragraph::new(help_text)
+                .style(Style::default().fg(Color::White).bg(Color::Black))
+                .block(Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan))
+                    .title("Help"));
+            f.render_widget(help, area);
+        }
     })?;
 
     Ok(())
@@ -318,10 +354,11 @@ pub fn run(_instance: usize) -> Result<()> {
     let mut input_mode = String::from("normal");
     let mut input_buffer = String::new();
     let mut pending_g = false;
+    let mut show_help = false;
 
     loop {
         let current_state = state.lock().unwrap().clone();
-        draw_ui(&mut terminal, &current_state, &input_mode, &input_buffer)?;
+        draw_ui(&mut terminal, &current_state, &input_mode, &input_buffer, show_help)?;
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
@@ -444,7 +481,24 @@ pub fn run(_instance: usize) -> Result<()> {
                         input_mode = String::from("normal");
                         input_buffer.clear();
                     }
+                    KeyCode::Char('?') if input_mode == "normal" => {
+                        show_help = !show_help;
+                    }
                     _ => {}
+                }
+            }
+        }
+
+        // When help is showing, block until '?' is pressed again
+        if show_help {
+            loop {
+                if event::poll(Duration::from_millis(100))? {
+                    if let Event::Key(key) = event::read()? {
+                        if let KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Esc = key.code {
+                            show_help = false;
+                            break;
+                        }
+                    }
                 }
             }
         }
