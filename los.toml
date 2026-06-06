@@ -1,7 +1,5 @@
 session_name = "los"
 
-session_name = "los"
-
 [[modules]]
 type = "conductor"
 
