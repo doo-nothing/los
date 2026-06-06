@@ -160,6 +160,10 @@ struct EngineShared {
     adsr_phase: AtomicU32,  // 0=idle 1=attack 2=decay 3=sustain 4=release
     seq_step: AtomicU32,
     step_data: Mutex<[[u32; SEQ_STEPS]; SEQ_TRACKS]>, // each step: bit31=active, bits 30-16=note*100, bits 15-0=vel*1000
+    voice_shape: AtomicU32, // 0-1000 → 0.0-1.0 wave shape (sine→saw→square)
+    voice_sub: AtomicU32,   // 0-1000 → 0.0-1.0 sub oscillator level
+    voice_fm: AtomicU32,    // 0-1000 → 0.0-1.0 FM amount (modulation input)
+    voice_output: AtomicU32, // 0=sin, 1=sub, 2=wave
 }
 
 impl EngineShared {
@@ -180,6 +184,10 @@ impl EngineShared {
             adsr_phase: AtomicU32::new(0),
             seq_step: AtomicU32::new(0),
             step_data: Mutex::new(steps),
+            voice_shape: AtomicU32::new(0),
+            voice_sub: AtomicU32::new(0),
+            voice_fm: AtomicU32::new(0),
+            voice_output: AtomicU32::new(0),
         }
     }
 }
@@ -249,6 +257,8 @@ struct App {
     seq_cursor: (usize, usize),
     pending_count: u32,
     pending_g: bool,
+    focused_module: Option<usize>,
+    voice_param: usize,
     phosphor_renderer: Option<PhosphorHeadless>,
     phosphor_error: Option<String>,
 }
@@ -553,9 +563,31 @@ fn build_output_stream(
             engine.env_value.store((env * 1000.0) as u32, Ordering::Relaxed);
             engine.adsr_phase.store(voice.adsr.state as u32, Ordering::Relaxed);
 
+            let shape = engine.voice_shape.load(Ordering::Relaxed) as f32 / 1000.0;
+            let sub_lvl = engine.voice_sub.load(Ordering::Relaxed) as f32 / 1000.0;
+            let output_sel = engine.voice_output.load(Ordering::Relaxed);
+
             let l = if active {
                 voice.phase = (voice.phase + voice.freq / sample_rate).fract();
-                (voice.phase * 2.0 * std::f32::consts::PI).sin() * 0.3 * env * voice.velocity
+                let phase = voice.phase;
+                let sine = (phase * 2.0 * std::f32::consts::PI).sin();
+                let saw = 2.0 * phase - 1.0;
+                let square = if phase < 0.5 { 1.0 } else { -1.0 };
+                let shaped = if shape < 0.5 {
+                    let t = shape * 2.0;
+                    sine * (1.0 - t) + saw * t
+                } else {
+                    let t = (shape - 0.5) * 2.0;
+                    saw * (1.0 - t) + square * t
+                };
+                let sub_phase = (phase * 0.5).fract();
+                let sub = if sub_phase < 0.5 { 1.0 } else { -1.0 };
+                let out = match output_sel {
+                    0 => sine,
+                    1 => sine * (1.0 - sub_lvl) + sub * sub_lvl,
+                    _ => shaped * (1.0 - sub_lvl) + sub * sub_lvl,
+                };
+                out * 0.3 * env * voice.velocity
             } else { 0.0 };
             let r = l;
 
@@ -612,7 +644,7 @@ fn main() -> Result<()> {
         scope_samples: Vec::with_capacity(SCOPE_CAPACITY), scope_state: ScopeState::new(),
         crt_buf: vec![0.0; CRT_SIZE*CRT_SIZE], crt_mask: build_crt_mask(CRT_SIZE),
         crt_cache: None, scope_dirty: true, crt_frame: 0, picker,
-        engine, seq_cursor: (0, 0), pending_count: 0, pending_g: false, phosphor_renderer, phosphor_error,
+        engine, seq_cursor: (0, 0), pending_count: 0, pending_g: false, focused_module: None, voice_param: 0, phosphor_renderer, phosphor_error,
     };
 
     let result = run_ui(&mut terminal, &scope_buf, sr, &mut app);
@@ -722,28 +754,60 @@ fn render_scope_module(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
 }
 
 fn render_voice_module(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let toggle = if app.voice_open { "▾" } else { "▸" };
-    let title = format!(" ● voice {toggle} ");
-    let block = module_block(&title, if app.voice_open { AMBER } else { PANEL_BORDER });
+    let focused = app.focused_module == Some(1);
+    let title = format!(" ● STO {} ", if focused { "◉" } else if app.voice_open { "▾" } else { "▸" });
+    let block = module_block(&title, if focused { CURSOR_FG } else if app.voice_open { AMBER } else { PANEL_BORDER });
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     if app.voice_open {
-        let env = app.engine.env_value.load(Ordering::Relaxed) as f32 / 1000.0;
+        let shape = app.engine.voice_shape.load(Ordering::Relaxed) as f32 / 1000.0;
+        let sub = app.engine.voice_sub.load(Ordering::Relaxed) as f32 / 1000.0;
+        let fm = app.engine.voice_fm.load(Ordering::Relaxed) as f32 / 1000.0;
+        let output = app.engine.voice_output.load(Ordering::Relaxed);
         let freq = app.engine.trig_freq.load(Ordering::Relaxed) as f32;
-        let playing = app.engine.playing.load(Ordering::Relaxed);
+        let env = app.engine.env_value.load(Ordering::Relaxed) as f32 / 1000.0;
         let phase = app.engine.adsr_phase.load(Ordering::Relaxed);
         let phase_str = ["idle", "ATK", "DEC", "SUS", "REL"][phase as usize];
 
-        let w = inner.width.saturating_sub(2) as usize;
-        let fill = (env * w as f32) as usize;
-        let bar: String = "█".repeat(fill) + &"░".repeat(w.saturating_sub(fill));
+        let w = inner.width.saturating_sub(12) as usize;
+        let mk_bar = |v: f32| -> String {
+            let fill = (v * w as f32) as usize;
+            "█".repeat(fill) + &"░".repeat(w.saturating_sub(fill))
+        };
 
-        let text = format!(
-            " osc: sine\n freq: {freq:.0} Hz\n envc: {phase_str} {bar}\n ADSR: 10/100/70/20\n {}",
-            if playing { "▶ playing" } else { "⏸ paused" }
-        );
-        f.render_widget(Paragraph::new(text).style(Style::default().fg(PANEL_LABEL)), inner);
+        let out_labels = ["sin", "sub", "wav"];
+        let out_str: String = out_labels.iter().enumerate()
+            .map(|(i, l)| if i as u32 == output { format!("[{}]", l) } else { format!(" {} ", l) })
+            .collect::<Vec<_>>().join("");
+
+        let params = [
+            (0, "shape", shape),
+            (1, "sub  ", sub),
+            (2, "fm   ", fm),
+        ];
+
+        let mut lines: Vec<Line<'_>> = Vec::new();
+        lines.push(Line::from(format!(" freq: {freq:.0} Hz")));
+        for (idx, name, val) in &params {
+            let is_sel = focused && app.voice_param == *idx;
+            let marker = if is_sel { "▸" } else { " " };
+            let color = if is_sel { CURSOR_FG } else { PANEL_LABEL };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{marker}{name}: "), Style::default().fg(color)),
+                Span::styled(mk_bar(*val), Style::default().fg(if is_sel { CURSOR_FG } else { AMBER_DIM })),
+                Span::styled(format!(" {:.2}", val), Style::default().fg(color)),
+            ]));
+        }
+        lines.push(Line::from(vec![
+            Span::styled(" out: ", Style::default().fg(PANEL_LABEL)),
+            Span::styled(out_str, Style::default().fg(AMBER)),
+        ]));
+        let env_fill = (env * (inner.width.saturating_sub(8)) as f32) as usize;
+        let env_bar = "█".repeat(env_fill) + &"░".repeat((inner.width.saturating_sub(8) as usize).saturating_sub(env_fill));
+        lines.push(Line::from(format!(" env: {phase_str} {env_bar}")));
+
+        f.render_widget(Paragraph::new(lines).style(Style::default().fg(PANEL_LABEL)), inner);
     }
 }
 
@@ -845,7 +909,14 @@ fn run_ui(
             render_seq_module(f, app, h_chunks[2]);
 
             let (mode_name, keys, mode_bg) = match app.mode {
-                Mode::Normal => ("NORMAL", "SPC:play +/-:bpm hjkl:grid i:ins w/b:step x:clr J/K:oct B:scope :q", AMBER_DIM),
+                Mode::Normal => {
+                    let k = if app.focused_module == Some(1) {
+                        "STO: j/k:adjust h/l:param w/b:output 0/$:min/max Esc:unfocus"
+                    } else {
+                        "1/2/3:focus SPC:play +/-:bpm hjkl:grid i:ins w/b:step x:clr J/K:oct B:scope :q"
+                    };
+                    ("NORMAL", k, AMBER_DIM)
+                }
                 Mode::Insert => ("INSERT", "j/k:note J/K:oct h/l:vel SPC:adv ENT:tgl x:clr Esc:normal", MODE_INSERT),
                 Mode::Command(_) => ("COMMAND", "Enter:exec Esc:cancel", MODE_COMMAND),
             };
@@ -863,9 +934,9 @@ fn run_ui(
                 match &mut app.mode {
                     Mode::Normal => match key.code {
                         KeyCode::Char(':') => app.mode = Mode::Command(String::new()),
-                        KeyCode::Char('1') => app.scope_open = !app.scope_open,
-                        KeyCode::Char('2') => app.voice_open = !app.voice_open,
-                        KeyCode::Char('3') => app.seq_open = !app.seq_open,
+                        KeyCode::Char('1') => { app.focused_module = Some(0); app.scope_open = true; }
+                        KeyCode::Char('2') => { app.focused_module = Some(1); app.voice_open = true; }
+                        KeyCode::Char('3') => { app.focused_module = Some(2); app.seq_open = true; }
                         KeyCode::Char('[') => { app.scope_channel = app.scope_channel.prev(); app.scope_state = ScopeState::new(); app.scope_samples.clear(); }
                         KeyCode::Char(']') => { app.scope_channel = app.scope_channel.next(); app.scope_state = ScopeState::new(); app.scope_samples.clear(); }
                         KeyCode::Char(' ') => { let was_playing = app.engine.playing.load(Ordering::Relaxed); app.engine.playing.store(!was_playing, Ordering::Relaxed); if was_playing { app.engine.trig_gate.store(false, Ordering::Relaxed); } }
@@ -878,9 +949,39 @@ fn run_ui(
                             if c.is_ascii_digit() {
                                 let d = c as u32 - '0' as u32;
                                 if d == 0 && app.pending_count == 0 {
-                                    app.seq_cursor.1 = 0;
+                                    if app.focused_module == Some(1) {
+                                        let param = match app.voice_param { 0 => &app.engine.voice_shape, 1 => &app.engine.voice_sub, _ => &app.engine.voice_fm };
+                                        param.store(0, Ordering::Relaxed);
+                                    } else {
+                                        app.seq_cursor.1 = 0;
+                                    }
                                 } else {
                                     app.pending_count = if app.pending_count > 0 { app.pending_count * 10 + d } else { d };
+                                }
+                                continue;
+                            }
+
+                            if app.focused_module == Some(1) {
+                                match (lower, shifted) {
+                                    ('j', false) => {
+                                        let param = match app.voice_param { 0 => &app.engine.voice_shape, 1 => &app.engine.voice_sub, _ => &app.engine.voice_fm };
+                                        let v = param.load(Ordering::Relaxed);
+                                        param.store(v.saturating_sub(50), Ordering::Relaxed);
+                                    }
+                                    ('k', false) => {
+                                        let param = match app.voice_param { 0 => &app.engine.voice_shape, 1 => &app.engine.voice_sub, _ => &app.engine.voice_fm };
+                                        let v = param.load(Ordering::Relaxed);
+                                        param.store((v + 50).min(1000), Ordering::Relaxed);
+                                    }
+                                    ('h', _) => { app.voice_param = app.voice_param.saturating_sub(1); }
+                                    ('l', _) => { app.voice_param = (app.voice_param + 1).min(2); }
+                                    ('w', _) => { let v = app.engine.voice_output.load(Ordering::Relaxed); app.engine.voice_output.store((v + 1) % 3, Ordering::Relaxed); }
+                                    ('b', _) => { let v = app.engine.voice_output.load(Ordering::Relaxed); app.engine.voice_output.store(if v == 0 { 2 } else { v - 1 }, Ordering::Relaxed); }
+                                    ('$', _) => {
+                                        let param = match app.voice_param { 0 => &app.engine.voice_shape, 1 => &app.engine.voice_sub, _ => &app.engine.voice_fm };
+                                        param.store(1000, Ordering::Relaxed);
+                                    }
+                                    _ => {}
                                 }
                                 continue;
                             }
@@ -909,7 +1010,7 @@ fn run_ui(
                             }
                         }
                         KeyCode::Enter => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); steps[t][s] = encode_step(!act, f as u32, (v*1000.0) as u32); } }
-                        KeyCode::Esc => { app.pending_g = false; app.pending_count = 0; }
+                        KeyCode::Esc => { app.pending_g = false; app.pending_count = 0; app.focused_module = None; }
                         _ => { app.pending_g = false; app.pending_count = 0; }
                     },
                     Mode::Insert => match key.code {
