@@ -1,5 +1,4 @@
-use std::io::{self, Read};
-use std::os::unix::io::AsRawFd;
+use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -160,17 +159,12 @@ fn euclidean_apply(steps: &mut [Step], pulses: usize, length: usize, rotation: u
     }
 }
 
-fn check_input_ms(timeout_ms: i32) -> Option<char> {
-    let mut poll_fds = [libc::pollfd {
-        fd: io::stdin().as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    }];
-    let has = unsafe { libc::poll(poll_fds.as_mut_ptr(), 1, timeout_ms) };
-    if has > 0 && (poll_fds[0].revents & libc::POLLIN) != 0 {
-        let mut buf = [0u8; 1];
-        if io::stdin().read(&mut buf).unwrap_or(0) > 0 {
-            return Some(buf[0] as char);
+fn next_char_ms(timeout_ms: u64) -> Option<char> {
+    if event::poll(Duration::from_millis(timeout_ms)).ok()? {
+        if let Event::Key(key) = event::read().ok()? {
+            if let KeyCode::Char(c) = key.code {
+                return Some(c);
+            }
         }
     }
     None
@@ -427,7 +421,7 @@ pub fn run(_instance: usize) -> Result<()> {
                         let mut num_buf = String::new();
                         num_buf.push(c);
                         loop {
-                            if let Some(next) = check_input_ms(30) {
+                            if let Some(next) = next_char_ms(30) {
                                 if next.is_ascii_digit() {
                                     num_buf.push(next);
                                     continue;
