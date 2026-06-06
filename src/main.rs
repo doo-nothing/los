@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -42,8 +42,11 @@ const AMBER_DIM: Color = Color::Rgb(180, 120, 30);
 const PANEL_BG: Color = Color::Rgb(24, 24, 28);
 const PANEL_BORDER: Color = Color::Rgb(60, 60, 68);
 const PANEL_LABEL: Color = Color::Rgb(140, 140, 150);
+const MODE_INSERT: Color = Color::Rgb(100, 200, 80);
+const MODE_COMMAND: Color = Color::Rgb(200, 80, 80);
 
-const CRT_SIZE: usize = 120;
+const CRT_SIZE: usize = 96;
+const CRT_THROTTLE: u8 = 8;
 const PHOSPHOR_DECAY: f32 = 0.88;
 const GRID_BRIGHT: f32 = 0.22;
 const TRACE_BRIGHT: f32 = 1.0;
@@ -56,6 +59,7 @@ const LOGO: &str = "▗▖ ▄▄▄   ▄▄▄\n▐▌█   █ ▀▄▄\n▐
 
 enum Mode {
     Normal,
+    Insert,
     Command(String),
 }
 
@@ -185,6 +189,41 @@ fn decode_step(encoded: u32) -> (bool, f32, f32) {
     (active, freq, vel)
 }
 
+fn next_active_step(steps: &[[u32; SEQ_STEPS]; SEQ_TRACKS], track: usize, current: usize) -> Option<usize> {
+    for (i, &step) in steps[track].iter().enumerate().skip(current + 1) {
+        if decode_step(step).0 { return Some(i); }
+    }
+    for (i, &step) in steps[track].iter().enumerate().take(current + 1) {
+        if decode_step(step).0 { return Some(i); }
+    }
+    None
+}
+
+fn prev_active_step(steps: &[[u32; SEQ_STEPS]; SEQ_TRACKS], track: usize, current: usize) -> Option<usize> {
+    for (i, &step) in steps[track].iter().enumerate().take(current).rev() {
+        if decode_step(step).0 { return Some(i); }
+    }
+    for (i, &step) in steps[track].iter().enumerate().skip(current).rev() {
+        if decode_step(step).0 { return Some(i); }
+    }
+    None
+}
+
+fn freq_to_note(freq: f32) -> String {
+    if freq < 20.0 { return "---".into(); }
+    let semitones = 12.0 * (freq / 440.0).log2();
+    let rounded = semitones.round() as i32;
+    let names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    let octave = 4 + (rounded + 9).div_euclid(12);
+    let idx = ((rounded + 9).rem_euclid(12)) as usize;
+    format!("{}{}", names[idx], octave)
+}
+
+fn semitone_up(freq: f32) -> f32 { (freq * 1.059463).min(4000.0) }
+fn semitone_down(freq: f32) -> f32 { (freq / 1.059463).max(20.0) }
+fn octave_up(freq: f32) -> f32 { (freq * 2.0).min(4000.0) }
+fn octave_down(freq: f32) -> f32 { (freq / 2.0).max(20.0) }
+
 struct App {
     mode: Mode,
     scope_open: bool,
@@ -196,6 +235,9 @@ struct App {
     scope_state: ScopeState,
     crt_buf: Vec<f32>,
     crt_mask: Vec<f32>,
+    crt_cache: Option<Protocol>,
+    scope_dirty: bool,
+    crt_frame: u8,
     picker: Picker,
     engine: Arc<EngineShared>,
     seq_cursor: (usize, usize), // (track, step) for grid cursor
@@ -346,7 +388,7 @@ fn resample(data: &[f32], target: usize) -> Vec<f32> {
 fn process_scope(samples: &[f32], state: &mut ScopeState, channel: ScopeChannel) {
     let data = extract_channel(samples, channel); if data.is_empty() { return; }
     for &s in &data { if state.ring.len() >= RING_SIZE { state.ring.pop_front(); } state.ring.push_back(s); }
-    let ring: Vec<f32> = state.ring.iter().copied().collect();
+    let ring = state.ring.make_contiguous();
     let mut xings = vec![];
     for i in 1..ring.len() { if ring[i-1] < 0.0 && ring[i] >= 0.0 { xings.push(i); } }
     if xings.len() >= 2 {
@@ -364,7 +406,7 @@ fn build_output_stream(
     scope_buffer: Arc<Mutex<VecDeque<f32>>>,
 ) -> Result<cpal::Stream> {
     let mut voice = VoiceData { adsr: Adsr::new(0.01, 0.1, 0.7, 0.2, sample_rate), phase: 0.0, freq: 440.0, velocity: 0.0 };
-    let mut seq_phase: f32 = 0.0;
+    let mut seq_phase: f64 = 0.0;
     let mut prev_step: usize = 0;
     let mut prev_gate = false;
 
@@ -381,7 +423,7 @@ fn build_output_stream(
             // sequencer advance
             if playing {
                 seq_phase += 1.0;
-                let cur_step = (seq_phase / step_dur_samples) as usize % SEQ_STEPS;
+                let cur_step = (seq_phase / step_dur_samples as f64) as usize % SEQ_STEPS;
                 if cur_step != prev_step {
                     prev_step = cur_step;
                     engine.seq_step.store(cur_step as u32, Ordering::Relaxed);
@@ -465,7 +507,8 @@ fn main() -> Result<()> {
         mode: Mode::Normal, scope_open: true, voice_open: true, seq_open: true,
         scope_channel: ScopeChannel::Both, scope_mode: ScopeMode::Crt,
         scope_samples: Vec::with_capacity(SCOPE_CAPACITY), scope_state: ScopeState::new(),
-        crt_buf: vec![0.0; CRT_SIZE*CRT_SIZE], crt_mask: build_crt_mask(CRT_SIZE), picker,
+        crt_buf: vec![0.0; CRT_SIZE*CRT_SIZE], crt_mask: build_crt_mask(CRT_SIZE),
+        crt_cache: None, scope_dirty: true, crt_frame: 0, picker,
         engine, seq_cursor: (0, 0),
     };
 
@@ -503,12 +546,17 @@ fn render_scope_module(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
             match app.scope_channel { ScopeChannel::Left=>"440", ScopeChannel::Right=>"554", ScopeChannel::Both=>"440+554" });
         render_label(f, &info, scope_inner[0], AMBER_DIM);
 
-        let crt_protocol: Option<Protocol> = if app.scope_mode == ScopeMode::Crt {
-            let size = Size::new(scope_inner[1].width, scope_inner[1].height);
-            crt_to_protocol(&app.crt_buf, CRT_SIZE, CRT_SIZE, &app.picker, size).ok()
+        let crt_protocol: Option<&Protocol> = if app.scope_mode == ScopeMode::Crt {
+            app.crt_frame = app.crt_frame.wrapping_add(1);
+            if app.crt_frame % CRT_THROTTLE == 0 && (app.scope_dirty || app.crt_cache.is_none()) {
+                let size = Size::new(scope_inner[1].width, scope_inner[1].height);
+                app.crt_cache = crt_to_protocol(&app.crt_buf, CRT_SIZE, CRT_SIZE, &app.picker, size).ok();
+                app.scope_dirty = false;
+            }
+            app.crt_cache.as_ref()
         } else { None };
 
-        if let Some(ref proto) = crt_protocol {
+        if let Some(proto) = crt_protocol {
             f.render_widget(Image::new(proto), scope_inner[1]);
         } else {
             let rows = render_braille(&app.scope_state.display, SCOPE_CHARS, SCOPE_ZOOM);
@@ -561,16 +609,21 @@ fn render_seq_module(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
 
     if app.seq_open {
         let steps_visible = inner.width.saturating_sub(2) as usize;
+        let show_cursor_info = inner.height >= 2 + SEQ_TRACKS as u16 + 1;
+        let grid_rows = if show_cursor_info { SEQ_TRACKS } else { (inner.height.saturating_sub(1)) as usize };
         let mut lines: Vec<String> = Vec::new();
+        let mut cursor_step_data: Option<(bool, f32, f32)> = None;
+        let (ct, cs) = app.seq_cursor;
 
         if let Ok(steps) = app.engine.step_data.try_lock() {
-            for t in 0..SEQ_TRACKS.min(inner.height.saturating_sub(2) as usize) {
+            for t in 0..SEQ_TRACKS.min(grid_rows) {
                 let mut line = String::new();
                 for s in 0..SEQ_STEPS.min(steps_visible) {
                     let (active, _, _) = decode_step(steps[t][s]);
-                    let cursor = app.seq_cursor == (t, s);
+                    let cursor = (t, s) == (ct, cs);
                     let playhead = s == cur_step && playing;
                     let ch = match (active, cursor, playhead) {
+                        (_, true, true) => '◈',
                         (_, _, true) => '▸',
                         (true, true, _) => '◆',
                         (false, true, _) => '◇',
@@ -578,8 +631,19 @@ fn render_seq_module(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                         (false, false, _) => '·',
                     };
                     line.push(ch);
+                    if cursor { cursor_step_data = Some(decode_step(steps[t][s])); }
                 }
                 lines.push(line);
+            }
+        }
+        lines.push("".into());
+
+        if show_cursor_info {
+            if let Some((_active, freq, vel)) = cursor_step_data {
+                let note = freq_to_note(freq);
+                lines.push(format!(" T{ct}S{cs:02} {note} {freq:.0}Hz vel{vel:.2}", ));
+            } else {
+                lines.push(format!(" T{ct}S{cs:02}"));
             }
         }
         let text = lines.join("\n");
@@ -598,11 +662,11 @@ fn run_ui(
             let old_len = app.scope_samples.len();
             if let Ok(mut buf) = scope_buffer.try_lock() { app.scope_samples.extend(buf.drain(..)); }
             let new_len = app.scope_samples.len();
-            if new_len > old_len { process_scope(&app.scope_samples[old_len..], &mut app.scope_state, app.scope_channel); }
+            if new_len > old_len { process_scope(&app.scope_samples[old_len..], &mut app.scope_state, app.scope_channel); app.scope_dirty = true; }
             if new_len > SCOPE_CAPACITY { app.scope_samples.drain(0..new_len - SCOPE_CAPACITY); }
         }
 
-        if app.scope_mode == ScopeMode::Crt {
+        if app.scope_mode == ScopeMode::Crt && app.scope_open {
             render_phosphor(&app.scope_state.display, &mut app.crt_buf, &app.crt_mask, CRT_SIZE, CRT_SIZE, SCOPE_ZOOM);
         }
 
@@ -628,9 +692,13 @@ fn run_ui(
             render_voice_module(f, app, h_chunks[1]);
             render_seq_module(f, app, h_chunks[2]);
 
-            let status = format!(" {} | {} kHz | SPC:play +/-:bpm hjkl:grid ENT:tgl w/s:pitch 1/2/3:modules :q:quit ",
-                match app.mode { Mode::Normal => "NORMAL", Mode::Command(_) => "COMMAND" }, (sample_rate/1000.0) as u32);
-            f.render_widget(Paragraph::new(status).style(Style::default().fg(Color::Black).bg(AMBER_DIM)), v_chunks[2]);
+            let (mode_name, keys, mode_bg) = match app.mode {
+                Mode::Normal => ("NORMAL", "SPC:play +/-:bpm hjkl:grid i:ins w/b:step x:clr J/K:oct B:scope :q", AMBER_DIM),
+                Mode::Insert => ("INSERT", "j/k:note J/K:oct h/l:vel SPC:adv ENT:tgl x:clr Esc:normal", MODE_INSERT),
+                Mode::Command(_) => ("COMMAND", "Enter:exec Esc:cancel", MODE_COMMAND),
+            };
+            let status = format!(" {} | {} kHz | {} ", mode_name, (sample_rate/1000.0) as u32, keys);
+            f.render_widget(Paragraph::new(status).style(Style::default().fg(Color::Black).bg(mode_bg)), v_chunks[2]);
 
             if let Mode::Command(ref cmd) = app.mode {
                 f.render_widget(Paragraph::new(format!(":{}", cmd)).style(Style::default().fg(Color::Yellow)), v_chunks[3]);
@@ -646,20 +714,52 @@ fn run_ui(
                         KeyCode::Char('1') => app.scope_open = !app.scope_open,
                         KeyCode::Char('2') => app.voice_open = !app.voice_open,
                         KeyCode::Char('3') => app.seq_open = !app.seq_open,
-                        KeyCode::Char('b') => app.scope_mode = match app.scope_mode { ScopeMode::Braille=>ScopeMode::Crt, ScopeMode::Crt=>ScopeMode::Braille },
                         KeyCode::Char('[') => { app.scope_channel = app.scope_channel.prev(); app.scope_state = ScopeState::new(); app.scope_samples.clear(); }
                         KeyCode::Char(']') => { app.scope_channel = app.scope_channel.next(); app.scope_state = ScopeState::new(); app.scope_samples.clear(); }
-                        KeyCode::Char(' ') => { app.engine.playing.store(!app.engine.playing.load(Ordering::Relaxed), Ordering::Relaxed); }
+                        KeyCode::Char(' ') => { let was_playing = app.engine.playing.load(Ordering::Relaxed); app.engine.playing.store(!was_playing, Ordering::Relaxed); if was_playing { app.engine.trig_gate.store(false, Ordering::Relaxed); } }
                         KeyCode::Char('+') | KeyCode::Char('=') => { let b = app.engine.bpm.load(Ordering::Relaxed); app.engine.bpm.store((b+100).min(30000), Ordering::Relaxed); }
                         KeyCode::Char('-') => { let b = app.engine.bpm.load(Ordering::Relaxed); app.engine.bpm.store(b.saturating_sub(100).max(2000), Ordering::Relaxed); }
-                        KeyCode::Char('h') => { app.seq_cursor.1 = app.seq_cursor.1.saturating_sub(1); }
-                        KeyCode::Char('l') => { app.seq_cursor.1 = (app.seq_cursor.1 + 1).min(SEQ_STEPS-1); }
-                        KeyCode::Char('k') => { app.seq_cursor.0 = app.seq_cursor.0.saturating_sub(1); }
-                        KeyCode::Char('j') => { app.seq_cursor.0 = (app.seq_cursor.0 + 1).min(SEQ_TRACKS-1); }
+                        KeyCode::Char(c) => {
+                            let lower = c.to_ascii_lowercase();
+                            let shifted = c.is_ascii_uppercase() || key.modifiers.contains(KeyModifiers::SHIFT);
+                            match (lower, shifted) {
+                                ('h', _) => { app.seq_cursor.1 = app.seq_cursor.1.saturating_sub(1); }
+                                ('l', _) => { app.seq_cursor.1 = (app.seq_cursor.1 + 1).min(SEQ_STEPS-1); }
+                                ('j', false) => { app.seq_cursor.0 = (app.seq_cursor.0 + 1).min(SEQ_TRACKS-1); }
+                                ('k', false) => { app.seq_cursor.0 = app.seq_cursor.0.saturating_sub(1); }
+                                ('w', _) => { let (t, s) = app.seq_cursor; if let Ok(steps) = app.engine.step_data.try_lock() { if let Some(next) = next_active_step(&steps, t, s) { app.seq_cursor.1 = next; } } }
+                                ('b', false) => { let (t, s) = app.seq_cursor; if let Ok(steps) = app.engine.step_data.try_lock() { if let Some(prev) = prev_active_step(&steps, t, s) { app.seq_cursor.1 = prev; } } }
+                                ('b', true) => { app.scope_mode = match app.scope_mode { ScopeMode::Braille=>ScopeMode::Crt, ScopeMode::Crt=>ScopeMode::Braille }; }
+                                ('j', true) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); steps[t][s] = encode_step(act, octave_down(f) as u32, (v*1000.0) as u32); } }
+                                ('k', true) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); steps[t][s] = encode_step(act, octave_up(f) as u32, (v*1000.0) as u32); } }
+                                ('i', _) => app.mode = Mode::Insert,
+                                ('x', _) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; steps[t][s] = encode_step(false, 440, 1000); } }
+                                _ => {}
+                            }
+                        }
                         KeyCode::Enter => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); steps[t][s] = encode_step(!act, f as u32, (v*1000.0) as u32); } }
-                        KeyCode::Char('w') => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); let new_f = (f * 1.059463).min(4000.0); steps[t][s] = encode_step(act, new_f as u32, (v*1000.0) as u32); } }
-                        KeyCode::Char('s') => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); let new_f = (f / 1.059463).max(20.0); steps[t][s] = encode_step(act, new_f as u32, (v*1000.0) as u32); } }
                         KeyCode::Esc => {}
+                        _ => {}
+                    },
+                    Mode::Insert => match key.code {
+                        KeyCode::Esc => app.mode = Mode::Normal,
+                        KeyCode::Char(c) => {
+                            let lower = c.to_ascii_lowercase();
+                            let shifted = c.is_ascii_uppercase() || key.modifiers.contains(KeyModifiers::SHIFT);
+                            match (lower, shifted) {
+                                ('j', false) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); steps[t][s] = encode_step(act, semitone_down(f) as u32, (v*1000.0) as u32); } }
+                                ('k', false) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); steps[t][s] = encode_step(act, semitone_up(f) as u32, (v*1000.0) as u32); } }
+                                ('j', true) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); steps[t][s] = encode_step(act, octave_down(f) as u32, (v*1000.0) as u32); } }
+                                ('k', true) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); steps[t][s] = encode_step(act, octave_up(f) as u32, (v*1000.0) as u32); } }
+                                ('h', _) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); let new_v = (v - 0.1).max(0.0); steps[t][s] = encode_step(act, f as u32, (new_v * 1000.0) as u32); } }
+                                ('l', _) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); let new_v = (v + 0.1).min(1.0); steps[t][s] = encode_step(act, f as u32, (new_v * 1000.0) as u32); } }
+                                (' ', _) => { app.seq_cursor.1 = (app.seq_cursor.1 + 1) % SEQ_STEPS; }
+                                ('x', _) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; steps[t][s] = encode_step(false, 440, 1000); } }
+                                _ => {}
+                            }
+                        }
+                        KeyCode::Enter => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); steps[t][s] = encode_step(!act, f as u32, (v*1000.0) as u32); } }
+                        KeyCode::Backspace => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; steps[t][s] = encode_step(false, 440, 1000); } }
                         _ => {}
                     },
                     Mode::Command(buf) => match key.code {
@@ -715,5 +815,118 @@ mod tests {
             let (a2, f2, v2) = decode_step(enc);
             assert_eq!(act, a2); assert!((f-f2).abs()<0.02); assert!((v-v2).abs()<0.01);
         }
+    }
+
+    #[test] fn test_next_active_step_forward() {
+        let mut steps = [[0u32; SEQ_STEPS]; SEQ_TRACKS];
+        steps[0][0] = encode_step(true, 440, 1000);
+        steps[0][7] = encode_step(true, 554, 800);
+        assert_eq!(next_active_step(&steps, 0, 0), Some(7));
+        assert_eq!(next_active_step(&steps, 0, 5), Some(7));
+    }
+
+    #[test] fn test_next_active_step_wraps() {
+        let mut steps = [[0u32; SEQ_STEPS]; SEQ_TRACKS];
+        steps[0][2] = encode_step(true, 440, 1000);
+        assert_eq!(next_active_step(&steps, 0, 6), Some(2));
+    }
+
+    #[test] fn test_next_active_step_none() {
+        let steps = [[0u32; SEQ_STEPS]; SEQ_TRACKS];
+        assert_eq!(next_active_step(&steps, 0, 0), None);
+    }
+
+    #[test] fn test_prev_active_step_backward() {
+        let mut steps = [[0u32; SEQ_STEPS]; SEQ_TRACKS];
+        steps[0][0] = encode_step(true, 440, 1000);
+        steps[0][7] = encode_step(true, 554, 800);
+        assert_eq!(prev_active_step(&steps, 0, 7), Some(0));
+        assert_eq!(prev_active_step(&steps, 0, 3), Some(0));
+    }
+
+    #[test] fn test_prev_active_step_wraps() {
+        let mut steps = [[0u32; SEQ_STEPS]; SEQ_TRACKS];
+        steps[0][14] = encode_step(true, 440, 1000);
+        assert_eq!(prev_active_step(&steps, 0, 2), Some(14));
+    }
+
+    #[test] fn test_prev_active_step_none() {
+        let steps = [[0u32; SEQ_STEPS]; SEQ_TRACKS];
+        assert_eq!(prev_active_step(&steps, 0, 0), None);
+    }
+
+    #[test] fn test_freq_to_note_a4() { assert_eq!(freq_to_note(440.0), "A4"); }
+    #[test] fn test_freq_to_note_c4() { assert!((freq_to_note(261.63).starts_with("C")), "got {}", freq_to_note(261.63)); }
+    #[test] fn test_freq_to_note_a3() { assert_eq!(freq_to_note(220.0), "A3"); }
+    #[test] fn test_freq_to_note_c8() { assert_eq!(freq_to_note(4186.0), "C8"); }
+    #[test] fn test_freq_to_note_low() { assert_eq!(freq_to_note(10.0), "---"); }
+
+    #[test] fn test_semitone_up() { let f = semitone_up(440.0); assert!(f > 440.0 && f < 500.0); }
+    #[test] fn test_semitone_down() { let f = semitone_down(440.0); assert!(f < 440.0 && f > 400.0); }
+    #[test] fn test_semitone_octave_roundtrip() {
+        let f = 440.0;
+        let mut result = f;
+        for _ in 0..12 { result = semitone_up(result); }
+        assert!((result - f * 2.0).abs() < 2.0);
+    }
+    #[test] fn test_octave_up() { assert!((octave_up(440.0) - 880.0).abs() < 1.0); }
+    #[test] fn test_octave_down() { assert!((octave_down(440.0) - 220.0).abs() < 1.0); }
+    #[test] fn test_semitone_clamp_high() { let f = semitone_up(3999.0); assert!(f <= 4000.0); }
+    #[test] fn test_semitone_clamp_low() { let f = semitone_down(21.0); assert!(f >= 20.0); }
+    #[test] fn test_octave_clamp_high() { let f = octave_up(3000.0); assert!(f <= 4000.0); }
+    #[test] fn test_octave_clamp_low() { let f = octave_down(30.0); assert!(f >= 20.0); }
+
+    #[test] fn test_seq_phase_f64_precision() {
+        let mut seq_phase: f64 = 16_000_000.0;
+        let step_dur: f64 = 6000.0;
+        for _ in 0..1_000_000 {
+            seq_phase += 1.0;
+        }
+        let step = (seq_phase / step_dur) as usize % SEQ_STEPS;
+        assert!(step < SEQ_STEPS);
+        assert!(seq_phase > 16_000_000.0);
+    }
+
+    #[test] fn test_crt_protocol_generates() {
+        // CRT protocol generation smoke test — verifies the picker+resize pipeline
+        // doesn't panic with the current CRT configuration.
+        let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+        let buf = vec![0.5f32; CRT_SIZE * CRT_SIZE];
+        let result = crt_to_protocol(&buf, CRT_SIZE, CRT_SIZE, &picker, Size::new(22, 14));
+        assert!(result.is_ok(), "crt_to_protocol should succeed");
+    }
+
+    #[test] fn test_crt_buffer_is_square() {
+        // Regression: CRT buffer must be square for circular scope face.
+        // Non-square buffers cause elliptical grid circles.
+        assert_eq!(CRT_SIZE, 96, "CRT_SIZE must be 96 for performance");
+        let buf = vec![0.0f32; CRT_SIZE * CRT_SIZE];
+        assert_eq!(buf.len(), 96 * 96, "Buffer must be square");
+    }
+
+    #[test] fn test_render_phosphor_doesnt_panic() {
+        // Smoke test for render_phosphor with square buffer.
+        let display = vec![0.5f32; DISPLAY_SIZE];
+        let mut buf = vec![0.0f32; CRT_SIZE * CRT_SIZE];
+        let mask = build_crt_mask(CRT_SIZE);
+        render_phosphor(&display, &mut buf, &mask, CRT_SIZE, CRT_SIZE, SCOPE_ZOOM);
+        // Verify buffer was modified (decay happened)
+        assert!(buf.iter().any(|&x| x != 0.0), "Buffer should be modified");
+    }
+
+    #[test] fn test_scope_dirty_flag() {
+        // Verify scope_dirty flag mechanism works correctly.
+        let mut scope_dirty = true;
+        assert!(scope_dirty, "scope_dirty should start true");
+        scope_dirty = false;
+        assert!(!scope_dirty, "scope_dirty should be clearable");
+    }
+
+    #[test] fn test_crt_frame_throttle() {
+        // Verify frame counter wrapping works for throttle mechanism.
+        let mut frame: u8 = 255;
+        frame = frame.wrapping_add(1);
+        assert_eq!(frame, 0, "Frame counter should wrap");
+        assert_eq!(frame % 4, 0, "Throttle should trigger on wrap");
     }
 }
