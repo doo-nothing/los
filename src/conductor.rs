@@ -130,12 +130,10 @@ pub fn run_create(attach: bool) -> Result<()> {
     let session = &layout.session_name;
 
     if tmux::session_exists(session) {
-        if attach {
+        if attach && unsafe { libc::isatty(libc::STDOUT_FILENO) != 0 } {
             eprintln!("los: session '{session}' already exists, attaching...");
-            if let Err(e) = tmux::cmd(["attach-session", "-t", session]) {
-                eprintln!("los: could not attach: {e}");
-                eprintln!("los: use `tmux attach -t {session}` to connect");
-            }
+            let _ = tmux::cmd(["attach-session", "-t", session]);
+            eprintln!("los: session '{session}' detached. Use `tmux attach -t {session}` to reconnect.");
         } else {
             eprintln!("los: session '{session}' already exists");
         }
@@ -145,19 +143,12 @@ pub fn run_create(attach: bool) -> Result<()> {
     let bin = los_bin();
     create_session(&layout, &bin)?;
 
-    if attach {
-        match tmux::cmd(["attach-session", "-t", session]) {
-            Ok(_) => {
-                eprintln!(
-                    "los: session '{session}' detached. Reattach with `tmux attach -t {session}`, \
-                     or clean up with `tmux kill-session -t {session}`."
-                );
-            }
-            Err(e) => {
-                eprintln!("los: could not attach: {e}");
-                eprintln!("los: session '{session}' is ready. Use `tmux attach -t {session}` to connect.");
-            }
-        }
+    if attach && unsafe { libc::isatty(libc::STDOUT_FILENO) != 0 } {
+        let _ = tmux::cmd(["attach-session", "-t", session]);
+        eprintln!(
+            "los: session '{session}' detached. Reattach with `tmux attach -t {session}`, \
+             or clean up with `tmux kill-session -t {session}`."
+        );
     } else {
         eprintln!("los: use `tmux attach -t {session}` to connect");
     }
