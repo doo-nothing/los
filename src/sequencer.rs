@@ -137,8 +137,11 @@ fn handle_command(line: &str, steps: &mut [Step], bpm: &mut f64, playing: &mut b
 }
 
 fn display_grid(steps: &[Step], current: usize, note: Option<u8>, bpm: f64, playing: bool, selected: usize) {
+    // Clear the pane and move cursor home to avoid scrolling
+    let _ = io::stdout().write(b"\x1b[2J\x1b[H");
+
     // Build the step display line
-    let mut line = String::from("\r");
+    let mut line = String::new();
     for i in 0..NUM_STEPS {
         if i == selected && i == current {
             line.push_str(">[");
@@ -163,9 +166,8 @@ fn display_grid(steps: &[Step], current: usize, note: Option<u8>, bpm: f64, play
 
     line.push_str(&format!("{}  {}  {} BPM  step {}", note_str, play_char, bpm as u32, current));
 
-    // Write the line, clear any wrapped residue, then flush stdout
+    // Write the line and flush stdout
     let _ = io::stdout().write(line.as_bytes());
-    let _ = io::stdout().write(b"\x1b[J");
     let _ = io::stdout().flush();
 }
 

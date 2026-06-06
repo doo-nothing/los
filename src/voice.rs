@@ -66,7 +66,7 @@ impl Adsr {
 
     fn trigger(&mut self) {
         self.state = 1;
-        self.level = 0.0;
+        // Don't reset level to 0 — legato transition avoids DC pop
     }
 
     fn release(&mut self) {
@@ -159,7 +159,7 @@ pub fn run(_frequency: f32, instance: usize) -> Result<()> {
     };
 
     // Open (or create) the transport for clock-based pacing
-    let transport = match ShmTransport::open() {
+    let _transport = match ShmTransport::open() {
         Ok(t) => t,
         Err(_) => ShmTransport::create(sample_rate as u32)?,
     };
@@ -172,7 +172,6 @@ pub fn run(_frequency: f32, instance: usize) -> Result<()> {
 
     let mut osc = Oscillator::new(Waveform::Sine);
     let mut adsr = Adsr::new(sample_rate as f32);
-    let mut filter = Svf::new(1000.0, 0.3);
     let mut current_freq = midi_to_freq(60); // C4 default
 
     let mut block = vec![0.0f32; slot_len];
@@ -200,41 +199,26 @@ pub fn run(_frequency: f32, instance: usize) -> Result<()> {
             }
         }
 
-        // Read transport clock to pace ourselves
-        let mixer_clock = transport.clock();
-        let voice_clock = ringbuf.write_index() * slot_frames as u64;
-
-        // If we're more than 4 blocks ahead, sleep
-        let ahead_frames = voice_clock.saturating_sub(mixer_clock);
-        if ahead_frames > (4 * slot_frames) as u64 {
-            let slack = ahead_frames - (2 * slot_frames) as u64;
-            let slack_us = slack * 1_000_000 / sample_rate as u64;
-            std::thread::sleep(Duration::from_micros(slack_us.min(10_000)));
-            continue;
-        }
-
         // Generate one block of audio
         for frame in 0..slot_frames {
             let env = adsr.tick();
             let raw = osc.tick(current_freq, sample_rate);
-            let flt = filter.process(raw as f64, sample_rate) as f32;
-            let amp = flt * env;
+            let amp = raw * env;
             block[frame * channels] = amp;
             block[frame * channels + 1] = amp;
         }
 
-        // Write to ringbuffer
+        // Write to ringbuffer — backpressure via short sleep when full
         loop {
             match ringbuf.write(&block) {
                 Ok(()) => break,
                 Err(_) => {
-                    // Full — yield and retry
-                    std::thread::yield_now();
+                    std::thread::sleep(Duration::from_micros(100));
                 }
             }
         }
 
-        // Pace to real-time
+        // Pace to real-time rate so the ringbuffer doesn't grow unbounded
         let elapsed = tick.elapsed();
         if elapsed < slot_dur {
             std::thread::sleep(slot_dur - elapsed);

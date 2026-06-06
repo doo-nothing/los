@@ -65,7 +65,10 @@ fn render_scope(samples: &[f32], channels: usize, width: usize) {
         return;
     }
 
-    let mut line = String::from("\r");
+    // Clear the pane and move cursor home to avoid scrolling
+    let _ = io::stdout().write(b"\x1b[2J\x1b[H");
+
+    let mut line = String::new();
 
     for col in 0..width {
         // Map column to sample index
@@ -76,7 +79,7 @@ fn render_scope(samples: &[f32], channels: usize, width: usize) {
         line.push(BARS[level.min(8)]);
     }
 
-    line.push_str("  [q=quit]\x1b[J");
+    line.push_str("  [q=quit]");
 
     let _ = io::stdout().write(line.as_bytes());
     let _ = io::stdout().flush();

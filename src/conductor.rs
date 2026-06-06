@@ -29,9 +29,9 @@ fn create_session(layout: &Layout, los_bin: &str) -> Result<()> {
     tmux::cmd(["new-session", "-d", "-s", session, "-n", "main"])
         .context("creating tmux session")?;
 
-    // Set a moderate initial size so splits don't fail.
-    // The actual terminal size will apply when the user attaches.
-    tmux::cmd(["resize-window", "-t", &format!("{session}:0"), "-x", "120", "-y", "40"])
+    // Set an initial size large enough for all splits.
+    // When the user attaches, tmux resizes to the client's terminal.
+    tmux::cmd(["resize-window", "-t", &format!("{session}:0"), "-x", "80", "-y", "40"])
         .ok();
 
     // Split vertically: each split creates a pane below the current one.

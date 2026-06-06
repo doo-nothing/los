@@ -18,9 +18,14 @@ pub fn run() -> Result<()> {
     let slot_len = ringbuf.slot_len();
     let sample_rate = 48000u32;
 
-    // Create (or open) the transport SHM with the sample clock
-    let mut transport = ShmTransport::create(sample_rate)
-        .context("creating transport SHM")?;
+    // Open (or create) the transport SHM with the sample clock.
+    // Uses open() first to avoid overwriting the clock if the voice
+    // already created it.
+    let mut transport = match ShmTransport::open() {
+        Ok(t) => t,
+        Err(_) => ShmTransport::create(sample_rate)
+            .context("creating transport SHM")?,
+    };
 
     // Find an audio device
     let host = cpal::default_host();
