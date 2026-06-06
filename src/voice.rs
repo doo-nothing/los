@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
-use crate::shm::{AudioRingbuf, ShmTransport};
+use crate::shm::{AudioRingbuf, EventRingbuf, ShmTransport};
 
 // ── oscillator ──────────────────────────────────────────────────────────────
 
@@ -136,9 +136,15 @@ impl Svf {
     }
 }
 
+// ── helpers ─────────────────────────────────────────────────────────────────
+
+fn midi_to_freq(note: u8) -> f64 {
+    440.0 * 2.0_f64.powf((note as f64 - 69.0) / 12.0)
+}
+
 // ── voice ──────────────────────────────────────────────────────────────────
 
-pub fn run(frequency: f32, instance: usize) -> Result<()> {
+pub fn run(_frequency: f32, instance: usize) -> Result<()> {
     let shm_name = "/los_mix_in";
     let sample_rate = 48000.0;
     let channels = 2usize;
@@ -158,25 +164,41 @@ pub fn run(frequency: f32, instance: usize) -> Result<()> {
         Err(_) => ShmTransport::create(sample_rate as u32)?,
     };
 
+    // Open (or create) the event ringbuffer for sequencer events
+    let mut events = match EventRingbuf::open() {
+        Ok(e) => Some(e),
+        Err(_) => None,
+    };
+
     let mut osc = Oscillator::new(Waveform::Sine);
     let mut adsr = Adsr::new(sample_rate as f32);
     let mut filter = Svf::new(1000.0, 0.3);
-
-    let freq = frequency as f64;
-
-    // Trigger the envelope once for continuous tone
-    adsr.trigger();
+    let mut current_freq = midi_to_freq(60); // C4 default
 
     let mut block = vec![0.0f32; slot_len];
     let slot_dur = Duration::from_nanos(slot_frames as u64 * 1_000_000_000 / sample_rate as u64);
 
     eprintln!(
-        "los voice {}: {} Hz, {} ch, {} frames/slot",
-        instance, frequency, channels, slot_frames,
+        "los voice {}: {} ch, {} frames/slot",
+        instance, channels, slot_frames,
     );
 
     loop {
         let tick = Instant::now();
+
+        // Drain pending events
+        if let Some(ref mut evbuf) = events {
+            while let Some(event) = evbuf.read_event() {
+                match event.event_type {
+                    0 => {
+                        adsr.trigger();
+                        current_freq = midi_to_freq(event.note);
+                    }
+                    1 => adsr.release(),
+                    _ => {}
+                }
+            }
+        }
 
         // Read transport clock to pace ourselves
         let mixer_clock = transport.clock();
@@ -194,7 +216,7 @@ pub fn run(frequency: f32, instance: usize) -> Result<()> {
         // Generate one block of audio
         for frame in 0..slot_frames {
             let env = adsr.tick();
-            let raw = osc.tick(freq, sample_rate);
+            let raw = osc.tick(current_freq, sample_rate);
             let flt = filter.process(raw as f64, sample_rate) as f32;
             let amp = flt * env;
             block[frame * channels] = amp;

@@ -423,11 +423,225 @@ impl ShmTransport {
     }
 }
 
+// ── AudioEvent ──────────────────────────────────────────────────────────────
+
+/// A single event message (32 bytes fixed size) in shared memory.
+#[repr(C)]
+#[derive(Default, Clone, Copy, Debug)]
+pub struct AudioEvent {
+    pub event_type: u8,  // 0 = note_on, 1 = note_off
+    pub note: u8,        // MIDI note 0–127
+    pub velocity: u8,    // 0–127
+    _pad: [u8; 1],
+    pub step: u32,       // step index that triggered this
+    _reserved: [u8; 24],
+}
+
+const _: [(); 1] = [(); (core::mem::size_of::<AudioEvent>() == 32) as usize];
+
+impl AudioEvent {
+    pub fn note_on(note: u8, velocity: u8, step: u32) -> Self {
+        Self {
+            event_type: 0,
+            note,
+            velocity,
+            step,
+            ..Default::default()
+        }
+    }
+
+    pub fn note_off(note: u8, step: u32) -> Self {
+        Self {
+            event_type: 1,
+            note,
+            step,
+            ..Default::default()
+        }
+    }
+
+    pub fn is_note_on(&self) -> bool {
+        self.event_type == 0
+    }
+
+    pub fn is_note_off(&self) -> bool {
+        self.event_type == 1
+    }
+}
+
 // ── EventRingbuf ───────────────────────────────────────────────────────────
 
-/// A fixed-size event buffer in shared memory.
-/// Each event is a fixed-size struct (32 bytes).
+const EVENT_SIZE: usize = 32;
+
+/// Lock-free SPSC ringbuffer for fixed-size events backed by POSIX SHM.
+///
+/// Layout:
+///   [0..8)    write_index : u64
+///   [8..16)   read_index  : u64
+///   [16..64)  reserved
+///   [64..)    event data  (EVENT_SIZE bytes each)
 pub struct EventRingbuf {
-    // For Phase 1, this is a placeholder.
-    // Event routing will be implemented fully in Phase 3 (sequencer).
+    fd: i32,
+    ptr: *mut u8,
+    num_slots: u32,
+    total_size: usize,
+    owned: bool,
+}
+
+unsafe impl Send for EventRingbuf {}
+
+impl Drop for EventRingbuf {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe { libc::munmap(self.ptr as *mut libc::c_void, self.total_size) };
+        }
+        if self.fd >= 0 {
+            unsafe { libc::close(self.fd) };
+        }
+        if self.owned {
+            let cname = CString::new(Self::name()).unwrap();
+            unsafe { libc::shm_unlink(cname.as_ptr()) };
+        }
+    }
+}
+
+impl EventRingbuf {
+    fn name() -> &'static str {
+        "/los_events"
+    }
+
+    fn write_idx_ptr(&self) -> *mut u64 {
+        self.ptr as *mut u64
+    }
+
+    fn read_idx_ptr(&self) -> *mut u64 {
+        unsafe { self.ptr.add(8) as *mut u64 }
+    }
+
+    fn slot_ptr(&self, index: u64) -> *mut u8 {
+        let slot = index as usize % self.num_slots as usize;
+        let offset = DATA_OFFSET + slot * EVENT_SIZE;
+        unsafe { self.ptr.add(offset) }
+    }
+
+    pub fn create() -> Result<Self> {
+        let num_slots = 256u32;
+        let data_bytes = num_slots as usize * EVENT_SIZE;
+        let total_size = DATA_OFFSET + data_bytes;
+        let cname = CString::new(Self::name()).unwrap();
+
+        let fd = unsafe {
+            let fd = libc::shm_open(cname.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o644);
+            if fd < 0 {
+                anyhow::bail!("shm_open({}) failed: {}", Self::name(), std::io::Error::last_os_error());
+            }
+            let r = libc::ftruncate(fd, total_size as libc::off_t);
+            if r < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() != Some(libc::EINVAL) {
+                    libc::close(fd);
+                    libc::shm_unlink(cname.as_ptr());
+                    anyhow::bail!("ftruncate({}) failed: {}", Self::name(), err);
+                }
+            }
+            fd
+        };
+
+        let ptr = unsafe {
+            let p = libc::mmap(
+                ptr::null_mut(),
+                total_size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            );
+            if p == libc::MAP_FAILED {
+                libc::close(fd);
+                libc::shm_unlink(cname.as_ptr());
+                anyhow::bail!("mmap({}) failed: {}", Self::name(), std::io::Error::last_os_error());
+            }
+            p as *mut u8
+        };
+
+        unsafe {
+            ptr::write_unaligned(ptr as *mut u64, 0);
+            ptr::write_unaligned(ptr.add(8) as *mut u64, 0);
+        }
+
+        Ok(Self { fd, ptr, num_slots, total_size, owned: true })
+    }
+
+    pub fn open() -> Result<Self> {
+        let num_slots = 256u32;
+        let data_bytes = num_slots as usize * EVENT_SIZE;
+        let total_size = DATA_OFFSET + data_bytes;
+        let cname = CString::new(Self::name()).unwrap();
+
+        let fd = unsafe {
+            let fd = libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0);
+            if fd < 0 {
+                anyhow::bail!("shm_open({}) failed: {}", Self::name(), std::io::Error::last_os_error());
+            }
+            fd
+        };
+
+        let ptr = unsafe {
+            let p = libc::mmap(
+                ptr::null_mut(),
+                total_size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            );
+            if p == libc::MAP_FAILED {
+                libc::close(fd);
+                anyhow::bail!("mmap({}) failed: {}", Self::name(), std::io::Error::last_os_error());
+            }
+            p as *mut u8
+        };
+
+        Ok(Self { fd, ptr, num_slots, total_size, owned: false })
+    }
+
+    pub fn write_event(&mut self, event: &AudioEvent) -> Result<()> {
+        let w = atomic_load_acquire(self.write_idx_ptr());
+        let r = atomic_load_acquire(self.read_idx_ptr());
+
+        if w - r >= self.num_slots as u64 {
+            anyhow::bail!("event buffer full");
+        }
+
+        let dest = self.slot_ptr(w);
+        unsafe {
+            ptr::copy_nonoverlapping(
+                event as *const AudioEvent as *const u8,
+                dest,
+                EVENT_SIZE,
+            );
+        }
+        atomic_store_release(self.write_idx_ptr(), w + 1);
+        Ok(())
+    }
+
+    pub fn read_event(&mut self) -> Option<AudioEvent> {
+        let w = atomic_load_acquire(self.write_idx_ptr());
+        let r = atomic_load_acquire(self.read_idx_ptr());
+
+        if w <= r {
+            return None;
+        }
+
+        let src = self.slot_ptr(r);
+        let mut event = AudioEvent::default();
+        unsafe {
+            ptr::copy_nonoverlapping(
+                src,
+                &mut event as *mut AudioEvent as *mut u8,
+                EVENT_SIZE,
+            );
+        }
+        atomic_store_release(self.read_idx_ptr(), r + 1);
+        Some(event)
+    }
 }

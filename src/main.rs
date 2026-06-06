@@ -49,8 +49,8 @@ fn main() -> Result<()> {
         }
         Some("mixer") => los::mixer::run(),
         Some("sequencer") => {
-            println!("los sequencer: not implemented (Phase 3)");
-            Ok(())
+            let instance = positional.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+            los::sequencer::run(instance)
         }
         Some("tone") => {
             let freq = positional.get(1).and_then(|s| s.parse::<f32>().ok()).unwrap_or(440.0);
