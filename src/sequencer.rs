@@ -163,8 +163,9 @@ fn display_grid(steps: &[Step], current: usize, note: Option<u8>, bpm: f64, play
 
     line.push_str(&format!("{}  {}  {} BPM  step {}", note_str, play_char, bpm as u32, current));
 
-    // Write the line, then flush stdout
+    // Write the line, clear any wrapped residue, then flush stdout
     let _ = io::stdout().write(line.as_bytes());
+    let _ = io::stdout().write(b"\x1b[J");
     let _ = io::stdout().flush();
 }
 

@@ -1,4 +1,5 @@
 use std::io::{self, BufRead, Write};
+use std::os::unix::process::CommandExt;
 
 use anyhow::{Context, Result};
 
@@ -24,25 +25,23 @@ fn create_session(layout: &Layout, los_bin: &str) -> Result<()> {
         anyhow::bail!("no modules defined in layout");
     }
 
-    // Create a detached session with one pane
+    // Create a detached session with one pane.
     tmux::cmd(["new-session", "-d", "-s", session, "-n", "main"])
         .context("creating tmux session")?;
 
-    // Enlarge the window so all splits have room (400 cols × 100 rows)
-    tmux::cmd(["resize-window", "-t", &format!("{session}:0"), "-x", "400", "-y", "100"])
+    // Set a moderate initial size so splits don't fail.
+    // The actual terminal size will apply when the user attaches.
+    tmux::cmd(["resize-window", "-t", &format!("{session}:0"), "-x", "120", "-y", "40"])
         .ok();
 
-    // Split into the required number of panes.
-    // Split is horizontal and always targets the first pane.
-    // Each split halves the first pane again; after all splits, `tiled`
-    // rearranges everything evenly.
+    // Split vertically: each split creates a pane below the current one.
     for _ in 1..total {
-        tmux::cmd(["split-window", "-h", "-t", &format!("{session}:0")])
+        tmux::cmd(["split-window", "-v", "-t", &format!("{session}:0")])
             .context("splitting window")?;
     }
 
-    // Rearrange into an even tiled layout
-    tmux::cmd(["select-layout", "-t", &format!("{session}:0"), "tiled"])?;
+    // Even vertical layout gives each pane full width and equal height.
+    tmux::cmd(["select-layout", "-t", &format!("{session}:0"), "even-vertical"])?;
 
     // Discover panes sorted by pane_index
     let pane_output = tmux::cmd([
@@ -73,90 +72,59 @@ fn create_session(layout: &Layout, los_bin: &str) -> Result<()> {
         }
     }
 
-    // Spawn each module in its pane (first pane = conductor)
+    // Show pane titles in the pane border so the user can see what's what.
+    tmux::cmd(["set-window-option", "-t", &format!("{session}:0"), "pane-border-status", "top"]).ok();
+
+    // Label and spawn each module in its pane
     for (pane_idx, (kind, instance)) in assignments.iter().enumerate() {
         if pane_idx >= panes.len() {
             break;
         }
         let (_, pane_id) = &panes[pane_idx];
 
-        // Check if this module type has a custom command in the layout
+        // Set pane title (shown in the top border)
+        let label = if *instance > 0 {
+            format!("{kind}#{}", *instance + 1)
+        } else {
+            kind.clone()
+        };
+        tmux::cmd(["select-pane", "-t", pane_id, "-T", &label]).ok();
+
+        // Custom command from layout, or default
         let custom_cmd = layout.modules.iter().find(|m| m.kind == *kind).and_then(|m| m.command.as_ref());
         let cmd = match custom_cmd {
             Some(custom) => custom.clone(),
-            None => format!("{} {} {}", los_bin, kind, instance + 1),
+            None => format!("clear; {} {} {}", los_bin, kind, instance + 1),
         };
 
         tmux::cmd(["send-keys", "-t", pane_id, &cmd, "Enter"])
             .with_context(|| format!("spawning {kind} #{instance} in {pane_id}"))?;
     }
 
-    // Bind global keys targeting the conductor pane (first pane)
-    let conductor_target = match panes.first() {
-        Some((_, id)) => id.clone(),
-        None => "%0".into(),
+    // Resolve module pane IDs by looking up the kind in assignments
+    let find_pane = |kind: &str| -> Option<String> {
+        assignments.iter().position(|(k, _)| k == kind).and_then(|i| {
+            panes.get(i).map(|(_, id)| id.clone())
+        })
     };
 
-    let binds = [
-        ("p", "play"),
-        ("s", "stop"),
-        ("r", "record"),
-        ("q", "quit"),
-    ];
+    // Bind keys: send single-letter commands to specific module panes.
+    //   p — toggle sequencer play
+    //   s — stop sequencer
+    //   r — (future: toggle recording)
+    //   q — quit on conductor (which will exit)
+    let conductor_target = panes.first().map(|(_, id)| id.clone()).unwrap_or("%0".into());
+    let sequencer_target = find_pane("sequencer").unwrap_or_else(|| conductor_target.clone());
 
-    for (key, cmd_text) in &binds {
-        tmux::cmd([
-            "bind-key",
-            "-T",
-            "prefix",
-            key,
-            "send-keys",
-            "-t",
-            &conductor_target,
-            cmd_text,
-            "Enter",
-        ])
-        .with_context(|| format!("binding prefix-{key}"))?;
-    }
+    tmux::cmd(["bind-key", "-T", "prefix", "p", "send-keys", "-t", &sequencer_target, "p", "Enter"])
+        .context("binding prefix-p")?;
+    tmux::cmd(["bind-key", "-T", "prefix", "s", "send-keys", "-t", &sequencer_target, "s", "Enter"])
+        .context("binding prefix-s")?;
+    tmux::cmd(["bind-key", "-T", "prefix", "q", "send-keys", "-t", &conductor_target, "quit", "Enter"])
+        .context("binding prefix-q")?;
 
     eprintln!("los: created session '{session}' with {total} panes");
     Ok(())
-}
-
-fn terminal_can_attach() -> bool {
-    unsafe {
-        let fd = libc::open(c"/dev/tty".as_ptr(), libc::O_RDWR);
-        if fd < 0 {
-            return false;
-        }
-        let ok = libc::isatty(fd) != 0;
-        libc::close(fd);
-        ok
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn open_terminal_and_attach(session: &str) {
-    let script = format!(
-        r#"tell application "Terminal" to do script "tmux attach -t {session}""#
-    );
-    let _ = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(&script)
-        .output();
-}
-
-#[cfg(not(target_os = "macos"))]
-fn open_terminal_and_attach(_session: &str) {}
-
-fn try_connect(session: &str) -> bool {
-    if std::env::var("TMUX").is_ok() {
-        tmux::cmd(["switch-client", "-t", session]).is_ok()
-    } else if terminal_can_attach() {
-        tmux::cmd(["attach-session", "-t", session]).is_ok()
-    } else {
-        false
-    }
 }
 
 pub fn run_create(attach: bool) -> Result<()> {
@@ -164,7 +132,6 @@ pub fn run_create(attach: bool) -> Result<()> {
 
     let layout = Layout::load()?;
     let session = &layout.session_name;
-
     let exists = tmux::session_exists(session);
 
     if !exists {
@@ -172,26 +139,54 @@ pub fn run_create(attach: bool) -> Result<()> {
         create_session(&layout, &bin)?;
     }
 
-    if attach {
-        if try_connect(session) {
-            let verb = if std::env::var("TMUX").is_ok() { "switched" } else { "attached" };
-            eprintln!("los: {verb} to session '{session}'.");
-            eprintln!("los: use `tmux attach -t {session}` to reconnect.");
-        } else {
-            open_terminal_and_attach(session);
-            if exists {
-                eprintln!("los: session '{session}' already exists. Use `tmux attach -t {session}` to connect.");
-            } else {
-                eprintln!("los: session '{session}' created. Use `tmux attach -t {session}` to connect.");
-            }
-        }
-    } else {
+    if !attach {
         if exists {
             eprintln!("los: session '{session}' already exists");
         } else {
             eprintln!("los: session '{session}' created. Use `tmux attach -t {session}` to connect.");
         }
+        return Ok(());
     }
+
+    // Try to put the user in the session.
+    // Inside tmux: switch-client (instant, non-blocking).
+    // Outside tmux: exec tmux attach-session (takes over the terminal).
+    if std::env::var("TMUX").is_ok() {
+        if tmux::cmd(["switch-client", "-t", session]).is_ok() {
+            eprintln!("los: switched to session '{session}'.");
+            return Ok(());
+        }
+        eprintln!("los: use `tmux switch-client -t {session}` to connect.");
+        return Ok(());
+    }
+
+    // Outside tmux: exec attach-session. This replaces the process.
+    let err = std::process::Command::new("tmux")
+        .args(["attach-session", "-t", session])
+        .exec();
+    // If we get here, exec failed.
+    let msg = if exists {
+        format!("los: session '{session}' already exists")
+    } else {
+        format!("los: session '{session}' created")
+    };
+    eprintln!("{msg}. Could not attach: {err}");
+
+    // macOS fallback: open a new Terminal window
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "tell application \"Terminal\" to do script \"tmux attach -t {session}\""
+        );
+        let _ = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .output();
+        eprintln!("los: opened a new Terminal window for session '{session}'.");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    eprintln!("los: run `tmux attach -t {session}` in a terminal to connect.");
 
     Ok(())
 }

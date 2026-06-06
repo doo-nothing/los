@@ -76,7 +76,7 @@ fn render_scope(samples: &[f32], channels: usize, width: usize) {
         line.push(BARS[level.min(8)]);
     }
 
-    line.push_str("  [q=quit]");
+    line.push_str("  [q=quit]\x1b[J");
 
     let _ = io::stdout().write(line.as_bytes());
     let _ = io::stdout().flush();
