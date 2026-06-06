@@ -38,6 +38,7 @@ const MODULE_WF_ROWS: u16 = 12;
 const MODULE_HEIGHT_OPEN: u16 = MODULE_WF_ROWS + 4;
 const MODULE_HEIGHT_CLOSED: u16 = 1;
 const SEQ_STEPS: usize = 16;
+const MAX_STEPS: usize = 64;
 const SEQ_TRACKS: usize = 4;
 
 const AMBER: Color = Color::Rgb(255, 175, 50);
@@ -159,7 +160,8 @@ struct EngineShared {
     env_value: AtomicU32,
     adsr_phase: AtomicU32,  // 0=idle 1=attack 2=decay 3=sustain 4=release
     seq_step: AtomicU32,
-    step_data: Mutex<[[u32; SEQ_STEPS]; SEQ_TRACKS]>, // each step: bit31=active, bits 30-16=note*100, bits 15-0=vel*1000
+    step_data: Mutex<[[u32; MAX_STEPS]; SEQ_TRACKS]>, // each step: bit31=active, bits 30-16=note*100, bits 15-0=vel*1000
+    track_len: Mutex<[usize; SEQ_TRACKS]>,
     voice_shape: AtomicU32, // 0-1000 → 0.0-1.0 wave shape (sine→saw→square)
     voice_sub: AtomicU32,   // 0-1000 → 0.0-1.0 sub oscillator level
     voice_fm: AtomicU32,    // 0-1000 → 0.0-1.0 FM amount (modulation input)
@@ -168,7 +170,7 @@ struct EngineShared {
 
 impl EngineShared {
     fn new() -> Self {
-        let mut steps = [[0u32; SEQ_STEPS]; SEQ_TRACKS];
+        let mut steps = [[0u32; MAX_STEPS]; SEQ_TRACKS];
         // default: a simple pattern on track 0
         steps[0][0] = encode_step(true, 440, 1000);
         steps[0][4] = encode_step(true, 554, 800);
@@ -184,6 +186,7 @@ impl EngineShared {
             adsr_phase: AtomicU32::new(0),
             seq_step: AtomicU32::new(0),
             step_data: Mutex::new(steps),
+            track_len: Mutex::new([SEQ_STEPS; SEQ_TRACKS]),
             voice_shape: AtomicU32::new(0),
             voice_sub: AtomicU32::new(0),
             voice_fm: AtomicU32::new(0),
@@ -203,24 +206,31 @@ fn decode_step(encoded: u32) -> (bool, f32, f32) {
     (active, freq, vel)
 }
 
-fn next_active_step(steps: &[[u32; SEQ_STEPS]; SEQ_TRACKS], track: usize, current: usize) -> Option<usize> {
-    for (i, &step) in steps[track].iter().enumerate().skip(current + 1) {
-        if decode_step(step).0 { return Some(i); }
-    }
-    for (i, &step) in steps[track].iter().enumerate().take(current + 1) {
-        if decode_step(step).0 { return Some(i); }
-    }
-    None
+fn next_active_step(steps: &[[u32; MAX_STEPS]; SEQ_TRACKS], track: usize, current: usize, track_len: usize) -> Option<usize> {
+    (current + 1..track_len).chain(0..=current).find(|&i| decode_step(steps[track][i]).0)
 }
 
-fn prev_active_step(steps: &[[u32; SEQ_STEPS]; SEQ_TRACKS], track: usize, current: usize) -> Option<usize> {
-    for (i, &step) in steps[track].iter().enumerate().take(current).rev() {
-        if decode_step(step).0 { return Some(i); }
+fn prev_active_step(steps: &[[u32; MAX_STEPS]; SEQ_TRACKS], track: usize, current: usize, track_len: usize) -> Option<usize> {
+    (0..current).rev().chain((current..track_len).rev()).find(|&i| decode_step(steps[track][i]).0)
+}
+
+/// Bjorklund's algorithm: distribute `pulses` ones evenly across `steps` positions.
+/// Returns a Vec of bool where `true` = pulse. This is the Euclidean rhythm.
+fn euclidean(pulses: usize, steps: usize) -> Vec<bool> {
+    if pulses == 0 { return vec![false; steps]; }
+    if pulses >= steps { return vec![true; steps]; }
+    let mut pattern = Vec::with_capacity(steps);
+    let mut bucket = 0usize;
+    for _ in 0..steps {
+        bucket += pulses;
+        if bucket >= steps {
+            bucket -= steps;
+            pattern.push(true);
+        } else {
+            pattern.push(false);
+        }
     }
-    for (i, &step) in steps[track].iter().enumerate().skip(current).rev() {
-        if decode_step(step).0 { return Some(i); }
-    }
-    None
+    pattern
 }
 
 fn freq_to_note(freq: f32) -> String {
@@ -512,6 +522,7 @@ fn build_output_stream(
     let mut seq_phase: f64 = 0.0;
     let mut prev_step: usize = 0;
     let mut prev_gate = false;
+    let mut cached_len: usize = SEQ_STEPS;
 
     let stream = device.build_output_stream(config, move |data: &mut [f32], _info| {
         let active = running.load(Ordering::Relaxed);
@@ -526,14 +537,15 @@ fn build_output_stream(
             // sequencer advance
             if playing {
                 seq_phase += 1.0;
-                let cur_step = (seq_phase / step_dur_samples as f64) as usize % SEQ_STEPS;
+                let cur_step = (seq_phase / step_dur_samples as f64) as usize % cached_len;
                 if cur_step != prev_step {
                     prev_step = cur_step;
                     engine.seq_step.store(cur_step as u32, Ordering::Relaxed);
-                    if cur_step < SEQ_STEPS
-                        && let Ok(steps) = engine.step_data.try_lock() {
-                            let track_data = steps[0]; // track 0 drives the voice
-                            let enc = track_data[cur_step];
+                    if let Ok(steps) = engine.step_data.try_lock()
+                        && let Ok(tl) = engine.track_len.try_lock() {
+                            cached_len = tl[0].max(1);
+                            let track_data = steps[0];
+                            let enc = track_data[cur_step.min(MAX_STEPS - 1)];
                             let (active, freq, vel) = decode_step(enc);
                             if active {
                                 engine.trig_freq.store(freq as u32, Ordering::Relaxed);
@@ -812,59 +824,67 @@ fn render_voice_module(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
 }
 
 fn render_seq_module(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let toggle = if app.seq_open { "▾" } else { "▸" };
     let bpm = app.engine.bpm.load(Ordering::Relaxed) as f32 / 100.0;
     let cur_step = app.engine.seq_step.load(Ordering::Relaxed) as usize;
     let playing = app.engine.playing.load(Ordering::Relaxed);
     let play_icon = if playing { "▶" } else { "⏸" };
 
-    let title = format!(" ● seq {play_icon} {bpm:.0}bpm {toggle} ");
-    let block = module_block(&title, if app.seq_open { PANEL_LABEL } else { PANEL_BORDER });
+    let title = format!(" ● seq {play_icon} {bpm:.0}bpm ▾ ");
+    let block = module_block(&title, PANEL_LABEL);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-        if app.seq_open {
-            let steps_visible = inner.width.saturating_sub(2) as usize;
-            let show_cursor_info = inner.height > 2 + SEQ_TRACKS as u16;
-            let grid_rows = if show_cursor_info { SEQ_TRACKS } else { (inner.height.saturating_sub(1)) as usize };
-            #[allow(clippy::type_complexity)]
-            let mut lines: Vec<Line<'_>> = Vec::new();
-            let mut cursor_step_data: Option<(bool, f32, f32)> = None;
-            let (ct, cs) = app.seq_cursor;
+    let steps_visible = inner.width.saturating_sub(2) as usize;
+    let (ct, cs) = app.seq_cursor;
+    let track_len = app.engine.track_len.lock().map(|tl| tl[ct]).unwrap_or(SEQ_STEPS);
 
-            if let Ok(steps) = app.engine.step_data.try_lock() {
-                for t in 0..SEQ_TRACKS.min(grid_rows) {
-                    let mut spans: Vec<Span<'_>> = Vec::new();
-                    for s in 0..SEQ_STEPS.min(steps_visible) {
-                        let (active, _, _) = decode_step(steps[t][s]);
-                        let cursor = (t, s) == (ct, cs);
-                        let playhead = s == cur_step && playing;
-                        let (ch, fg) = match (active, cursor, playhead) {
-                            (_, true, true) => ('◈', CURSOR_FG),
-                            (_, _, true) => ('▸', AMBER),
-                            (true, true, _) => ('◆', CURSOR_FG),
-                            (false, true, _) => ('◇', CURSOR_FG),
-                            (true, false, _) => ('■', AMBER),
-                            (false, false, _) => ('·', AMBER),
-                        };
-                        spans.push(Span::styled(ch.to_string(), Style::default().fg(fg)));
-                        if cursor { cursor_step_data = Some(decode_step(steps[t][s])); }
-                    }
-                    lines.push(Line::from(spans));
-                }
-            }
-            lines.push(Line::from(""));
+    let mut lines: Vec<Line<'_>> = Vec::new();
+    let mut cursor_step_data: Option<(bool, f32, f32)> = None;
 
-        if show_cursor_info {
-            if let Some((_active, freq, vel)) = cursor_step_data {
-                let note = freq_to_note(freq);
-                lines.push(Line::from(format!(" T{ct}S{cs:02} {note} {freq:.0}Hz vel{vel:.2}")));
-            } else {
-                lines.push(Line::from(format!(" T{ct}S{cs:02}")));
+    if let Ok(steps) = app.engine.step_data.try_lock() {
+        for t in 0..SEQ_TRACKS.min(inner.height as usize - 2) {
+            let tl = app.engine.track_len.lock().map(|tl| tl[t]).unwrap_or(SEQ_STEPS);
+            let mut spans: Vec<Span<'_>> = Vec::new();
+            let max_s = tl.min(steps_visible);
+            for s in 0..max_s {
+                let (active, _, _) = decode_step(steps[t][s]);
+                let cursor = (t, s) == (ct, cs);
+                let playhead = s == cur_step && playing;
+                let (ch, fg) = match (active, cursor, playhead) {
+                    (_, true, true) => ('◈', CURSOR_FG),
+                    (_, _, true) => ('▸', AMBER),
+                    (true, true, _) => ('◆', CURSOR_FG),
+                    (false, true, _) => ('◇', CURSOR_FG),
+                    (true, false, _) => ('■', AMBER),
+                    (false, false, _) => ('·', AMBER),
+                };
+                spans.push(Span::styled(ch.to_string(), Style::default().fg(fg)));
+                if cursor { cursor_step_data = Some(decode_step(steps[t][s])); }
             }
+            // show remaining length markers if steps_visible > tl
+            if max_s < steps_visible {
+                spans.push(Span::styled(
+                    "·".repeat(steps_visible - max_s),
+                    Style::default().fg(PANEL_BORDER),
+                ));
+            }
+            // track label
+            let track_label = format!(" T{t}:{}", tl);
+            spans.push(Span::styled(track_label, Style::default().fg(PANEL_LABEL)));
+            lines.push(Line::from(spans));
         }
-        f.render_widget(Paragraph::new(lines).style(Style::default().fg(AMBER)), inner);
     }
+
+    if inner.height as usize > SEQ_TRACKS + 1 {
+        if let Some((_active, freq, vel)) = cursor_step_data {
+            let note = freq_to_note(freq);
+            lines.push(Line::from(format!(" T{ct}S{cs:02} {note} {freq:.0}Hz vel{vel:.2}  len:{track_len}", track_len = track_len)));
+        } else {
+            lines.push(Line::from(format!(" T{ct}S{cs:02}  len:{}", track_len)));
+        }
+    }
+
+    f.render_widget(Paragraph::new(lines).style(Style::default().fg(AMBER)), inner);
 }
 
 fn run_ui(
@@ -888,11 +908,15 @@ fn run_ui(
 
         terminal.draw(|f| {
             let area = f.area();
-            let any_open = app.scope_open || app.voice_open || app.seq_open;
+            let any_open = app.scope_open || app.voice_open;
             let v_chunks = Layout::default().direction(Direction::Vertical)
-                .constraints([Constraint::Length(6),
+                .constraints([
+                    Constraint::Length(4),
                     Constraint::Length(if any_open { MODULE_HEIGHT_OPEN } else { MODULE_HEIGHT_CLOSED }),
-                    Constraint::Length(1), Constraint::Length(1)]).split(area);
+                    Constraint::Fill(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                ]).split(area);
 
             let logo_block = Block::default().borders(Borders::ALL).border_type(BorderType::Plain)
                 .title(" los · terminal instrument · v0.1 ").border_style(Style::default().fg(PANEL_BORDER));
@@ -901,30 +925,30 @@ fn run_ui(
             f.render_widget(Paragraph::new(LOGO).alignment(Alignment::Center), logo_inner);
 
             let h_chunks = Layout::default().direction(Direction::Horizontal)
-                .constraints([Constraint::Length(MODULE_WIDTH), Constraint::Length(MODULE_WIDTH), Constraint::Length(MODULE_WIDTH), Constraint::Fill(1)])
+                .constraints([Constraint::Length(MODULE_WIDTH), Constraint::Length(MODULE_WIDTH), Constraint::Fill(1)])
                 .split(v_chunks[1]);
 
             render_scope_module(f, app, h_chunks[0]);
             render_voice_module(f, app, h_chunks[1]);
-            render_seq_module(f, app, h_chunks[2]);
+            render_seq_module(f, app, v_chunks[2]);
 
             let (mode_name, keys, mode_bg) = match app.mode {
                 Mode::Normal => {
                     let k = if app.focused_module == Some(1) {
                         "STO: j/k:adjust h/l:param w/b:output 0/$:min/max Esc:unfocus"
                     } else {
-                        "1/2/3:focus SPC:play +/-:bpm hjkl:grid i:ins w/b:step x:clr J/K:oct B:scope :q"
+                        "1/2/3:focus SPC:play +/-:bpm hjkl:grid i:ins w/b:step x:clr J/K:oct B:scope #l:len #p:euclid :q"
                     };
                     ("NORMAL", k, AMBER_DIM)
                 }
-                Mode::Insert => ("INSERT", "j/k:note J/K:oct h/l:vel SPC:adv ENT:tgl x:clr Esc:normal", MODE_INSERT),
+                Mode::Insert => ("INSERT", "j/k:note J/K:oct h/l:cursor H/L:vel w/b:step SPC:adv ENT:tgl x:clr Esc:normal", MODE_INSERT),
                 Mode::Command(_) => ("COMMAND", "Enter:exec Esc:cancel", MODE_COMMAND),
             };
             let status = format!(" {} | {} kHz | {} ", mode_name, (sample_rate/1000.0) as u32, keys);
-            f.render_widget(Paragraph::new(status).style(Style::default().fg(Color::Black).bg(mode_bg)), v_chunks[2]);
+            f.render_widget(Paragraph::new(status).style(Style::default().fg(Color::Black).bg(mode_bg)), v_chunks[3]);
 
             if let Mode::Command(ref cmd) = app.mode {
-                f.render_widget(Paragraph::new(format!(":{}", cmd)).style(Style::default().fg(Color::Yellow)), v_chunks[3]);
+                f.render_widget(Paragraph::new(format!(":{}", cmd)).style(Style::default().fg(Color::Yellow)), v_chunks[4]);
             }
         })?;
 
@@ -987,23 +1011,48 @@ fn run_ui(
                             }
 
                             let count = app.pending_count.max(1) as usize;
+                            let had_count = app.pending_count > 0;
                             app.pending_count = 0;
                             let was_pg = app.pending_g;
                             app.pending_g = false;
 
+                            let track_len = app.engine.track_len.lock().map(|tl| tl[app.seq_cursor.0]).unwrap_or(SEQ_STEPS);
+
                             match (lower, shifted) {
-                                ('h', _) => { app.seq_cursor.1 = app.seq_cursor.1.saturating_sub(count); }
-                                ('l', _) => { app.seq_cursor.1 = (app.seq_cursor.1 + count).min(SEQ_STEPS-1); }
+                                ('h', _) => { app.seq_cursor.1 = app.seq_cursor.1.saturating_sub(count.min(track_len.saturating_sub(1))); }
+                                ('l', _) if had_count => {
+                                    let len = count.min(MAX_STEPS);
+                                    if let Ok(mut tl) = app.engine.track_len.lock() {
+                                        tl[app.seq_cursor.0] = len;
+                                    }
+                                    app.seq_cursor.1 = app.seq_cursor.1.min(len.saturating_sub(1));
+                                }
+                                ('l', _) => { app.seq_cursor.1 = (app.seq_cursor.1 + 1).min(track_len.saturating_sub(1)); }
+                                ('p', _) if had_count => {
+                                    let pulses = count.min(track_len);
+                                    let pattern = euclidean(pulses, track_len);
+                                    if let Ok(mut steps) = app.engine.step_data.try_lock() {
+                                        let t = app.seq_cursor.0;
+                                        for s in 0..track_len.min(MAX_STEPS) {
+                                            let (_, f, v) = decode_step(steps[t][s]);
+                                            steps[t][s] = if s < pattern.len() && pattern[s] {
+                                                encode_step(true, f as u32, (v*1000.0) as u32)
+                                            } else {
+                                                encode_step(false, f as u32, (v*1000.0) as u32)
+                                            };
+                                        }
+                                    }
+                                }
                                 ('j', false) => { app.seq_cursor.0 = (app.seq_cursor.0 + count).min(SEQ_TRACKS-1); }
                                 ('k', false) => { app.seq_cursor.0 = app.seq_cursor.0.saturating_sub(count); }
-                                ('w', _) => { let (t, s) = app.seq_cursor; if let Ok(steps) = app.engine.step_data.try_lock() { let mut cur = s; for _ in 0..count { if let Some(n) = next_active_step(&steps, t, cur) { cur = n; } else { break; } } app.seq_cursor.1 = cur; } }
-                                ('b', false) => { let (t, s) = app.seq_cursor; if let Ok(steps) = app.engine.step_data.try_lock() { let mut cur = s; for _ in 0..count { if let Some(n) = prev_active_step(&steps, t, cur) { cur = n; } else { break; } } app.seq_cursor.1 = cur; } }
+                                ('w', _) => { let (t, s) = app.seq_cursor; if let Ok(steps) = app.engine.step_data.try_lock() { let mut cur = s; for _ in 0..count { if let Some(n) = next_active_step(&steps, t, cur, track_len) { cur = n; } else { break; } } app.seq_cursor.1 = cur; } }
+                                ('b', false) => { let (t, s) = app.seq_cursor; if let Ok(steps) = app.engine.step_data.try_lock() { let mut cur = s; for _ in 0..count { if let Some(n) = prev_active_step(&steps, t, cur, track_len) { cur = n; } else { break; } } app.seq_cursor.1 = cur; } }
                                 ('b', true) => { app.scope_mode = match (app.scope_mode, app.phosphor_renderer.is_some()) { (ScopeMode::Braille, _) => ScopeMode::Crt, (ScopeMode::Crt, true) => ScopeMode::Phosphor, (ScopeMode::Crt, false) => ScopeMode::HalfBlock, (ScopeMode::Phosphor, _) => ScopeMode::HalfBlock, (ScopeMode::HalfBlock, _) => ScopeMode::Braille, }; app.crt_cache = None; }
                                 ('j', true) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); steps[t][s] = encode_step(act, octave_down(f) as u32, (v*1000.0) as u32); } }
                                 ('k', true) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); steps[t][s] = encode_step(act, octave_up(f) as u32, (v*1000.0) as u32); } }
                                 ('g', false) => { if was_pg { app.seq_cursor.0 = 0; } else { app.pending_g = true; } }
                                 ('g', true) => { app.seq_cursor.0 = SEQ_TRACKS - 1; }
-                                ('$', _) => { app.seq_cursor.1 = SEQ_STEPS - 1; }
+                                ('$', _) => { app.seq_cursor.1 = track_len.saturating_sub(1); }
                                 ('i', _) => app.mode = Mode::Insert,
                                 ('x', _) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; steps[t][s] = encode_step(false, 440, 1000); } }
                                 _ => {}
@@ -1018,18 +1067,21 @@ fn run_ui(
                         KeyCode::Char(c) => {
                             let lower = c.to_ascii_lowercase();
                             let shifted = c.is_ascii_uppercase() || key.modifiers.contains(KeyModifiers::SHIFT);
+                            let track_len = app.engine.track_len.lock().map(|tl| tl[app.seq_cursor.0]).unwrap_or(SEQ_STEPS);
                             match (lower, shifted) {
                                 ('j', false) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); steps[t][s] = encode_step(act, semitone_down(f) as u32, (v*1000.0) as u32); } }
                                 ('k', false) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); steps[t][s] = encode_step(act, semitone_up(f) as u32, (v*1000.0) as u32); } }
                                 ('j', true) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); steps[t][s] = encode_step(act, octave_down(f) as u32, (v*1000.0) as u32); } }
                                 ('k', true) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); steps[t][s] = encode_step(act, octave_up(f) as u32, (v*1000.0) as u32); } }
-                                ('h', _) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); let new_v = (v - 0.1).max(0.0); steps[t][s] = encode_step(act, f as u32, (new_v * 1000.0) as u32); } }
-                                ('l', _) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); let new_v = (v + 0.1).min(1.0); steps[t][s] = encode_step(act, f as u32, (new_v * 1000.0) as u32); } }
+                                ('h', false) => { app.seq_cursor.1 = app.seq_cursor.1.saturating_sub(1); }
+                                ('l', false) => { app.seq_cursor.1 = (app.seq_cursor.1 + 1).min(track_len.saturating_sub(1)); }
+                                ('h', true) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); let new_v = (v - 0.1).max(0.0); steps[t][s] = encode_step(act, f as u32, (new_v * 1000.0) as u32); } }
+                                ('l', true) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); let new_v = (v + 0.1).min(1.0); steps[t][s] = encode_step(act, f as u32, (new_v * 1000.0) as u32); } }
                                 ('0', _) => { app.seq_cursor.1 = 0; }
-                                ('$', _) => { app.seq_cursor.1 = SEQ_STEPS - 1; }
-                                ('w', _) => { let (t, s) = app.seq_cursor; if let Ok(steps) = app.engine.step_data.try_lock() && let Some(next) = next_active_step(&steps, t, s) { app.seq_cursor.1 = next; } }
-                                ('b', _) => { let (t, s) = app.seq_cursor; if let Ok(steps) = app.engine.step_data.try_lock() && let Some(prev) = prev_active_step(&steps, t, s) { app.seq_cursor.1 = prev; } }
-                                (' ', _) => { app.seq_cursor.1 = (app.seq_cursor.1 + 1) % SEQ_STEPS; }
+                                ('$', _) => { app.seq_cursor.1 = track_len.saturating_sub(1); }
+                                ('w', _) => { let (t, s) = app.seq_cursor; if let Ok(steps) = app.engine.step_data.try_lock() && let Some(next) = next_active_step(&steps, t, s, track_len) { app.seq_cursor.1 = next; } }
+                                ('b', _) => { let (t, s) = app.seq_cursor; if let Ok(steps) = app.engine.step_data.try_lock() && let Some(prev) = prev_active_step(&steps, t, s, track_len) { app.seq_cursor.1 = prev; } }
+                                (' ', _) => { app.seq_cursor.1 = (app.seq_cursor.1 + 1) % track_len.max(1); }
                                 ('x', _) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; steps[t][s] = encode_step(false, 440, 1000); } }
                                 _ => {}
                             }
@@ -1093,41 +1145,41 @@ mod tests {
     }
 
     #[test] fn test_next_active_step_forward() {
-        let mut steps = [[0u32; SEQ_STEPS]; SEQ_TRACKS];
+        let mut steps = [[0u32; MAX_STEPS]; SEQ_TRACKS];
         steps[0][0] = encode_step(true, 440, 1000);
         steps[0][7] = encode_step(true, 554, 800);
-        assert_eq!(next_active_step(&steps, 0, 0), Some(7));
-        assert_eq!(next_active_step(&steps, 0, 5), Some(7));
+        assert_eq!(next_active_step(&steps, 0, 0, SEQ_STEPS), Some(7));
+        assert_eq!(next_active_step(&steps, 0, 5, SEQ_STEPS), Some(7));
     }
 
     #[test] fn test_next_active_step_wraps() {
-        let mut steps = [[0u32; SEQ_STEPS]; SEQ_TRACKS];
+        let mut steps = [[0u32; MAX_STEPS]; SEQ_TRACKS];
         steps[0][2] = encode_step(true, 440, 1000);
-        assert_eq!(next_active_step(&steps, 0, 6), Some(2));
+        assert_eq!(next_active_step(&steps, 0, 6, SEQ_STEPS), Some(2));
     }
 
     #[test] fn test_next_active_step_none() {
-        let steps = [[0u32; SEQ_STEPS]; SEQ_TRACKS];
-        assert_eq!(next_active_step(&steps, 0, 0), None);
+        let steps = [[0u32; MAX_STEPS]; SEQ_TRACKS];
+        assert_eq!(next_active_step(&steps, 0, 0, SEQ_STEPS), None);
     }
 
     #[test] fn test_prev_active_step_backward() {
-        let mut steps = [[0u32; SEQ_STEPS]; SEQ_TRACKS];
+        let mut steps = [[0u32; MAX_STEPS]; SEQ_TRACKS];
         steps[0][0] = encode_step(true, 440, 1000);
         steps[0][7] = encode_step(true, 554, 800);
-        assert_eq!(prev_active_step(&steps, 0, 7), Some(0));
-        assert_eq!(prev_active_step(&steps, 0, 3), Some(0));
+        assert_eq!(prev_active_step(&steps, 0, 7, SEQ_STEPS), Some(0));
+        assert_eq!(prev_active_step(&steps, 0, 3, SEQ_STEPS), Some(0));
     }
 
     #[test] fn test_prev_active_step_wraps() {
-        let mut steps = [[0u32; SEQ_STEPS]; SEQ_TRACKS];
+        let mut steps = [[0u32; MAX_STEPS]; SEQ_TRACKS];
         steps[0][14] = encode_step(true, 440, 1000);
-        assert_eq!(prev_active_step(&steps, 0, 2), Some(14));
+        assert_eq!(prev_active_step(&steps, 0, 2, SEQ_STEPS), Some(14));
     }
 
     #[test] fn test_prev_active_step_none() {
-        let steps = [[0u32; SEQ_STEPS]; SEQ_TRACKS];
-        assert_eq!(prev_active_step(&steps, 0, 0), None);
+        let steps = [[0u32; MAX_STEPS]; SEQ_TRACKS];
+        assert_eq!(prev_active_step(&steps, 0, 0, SEQ_STEPS), None);
     }
 
     #[test] fn test_freq_to_note_a4() { assert_eq!(freq_to_note(440.0), "A4"); }
