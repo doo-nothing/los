@@ -123,48 +123,74 @@ fn create_session(layout: &Layout, los_bin: &str) -> Result<()> {
     Ok(())
 }
 
+fn terminal_can_attach() -> bool {
+    unsafe {
+        let fd = libc::open(c"/dev/tty".as_ptr(), libc::O_RDWR);
+        if fd < 0 {
+            return false;
+        }
+        let ok = libc::isatty(fd) != 0;
+        libc::close(fd);
+        ok
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn open_terminal_and_attach(session: &str) {
+    let script = format!(
+        r#"tell application "Terminal" to do script "tmux attach -t {session}""#
+    );
+    let _ = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .output();
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_terminal_and_attach(_session: &str) {}
+
+fn try_connect(session: &str) -> bool {
+    if std::env::var("TMUX").is_ok() {
+        tmux::cmd(["switch-client", "-t", session]).is_ok()
+    } else if terminal_can_attach() {
+        tmux::cmd(["attach-session", "-t", session]).is_ok()
+    } else {
+        false
+    }
+}
+
 pub fn run_create(attach: bool) -> Result<()> {
     tmux::check_available()?;
 
     let layout = Layout::load()?;
     let session = &layout.session_name;
 
-    if tmux::session_exists(session) {
-        if attach {
-            if std::env::var("TMUX").is_ok() {
-                eprintln!("los: switching to session '{session}'...");
-                let _ = tmux::cmd(["switch-client", "-t", session]);
-            } else if unsafe { libc::isatty(libc::STDOUT_FILENO) != 0 } {
-                eprintln!("los: session '{session}' already exists, attaching...");
-                let _ = tmux::cmd(["attach-session", "-t", session]);
-                eprintln!("los: session '{session}' detached.");
-            } else {
-                eprintln!("los: session '{session}' already exists");
-            }
-        } else {
-            eprintln!("los: session '{session}' already exists");
-        }
-        return Ok(());
+    let exists = tmux::session_exists(session);
+
+    if !exists {
+        let bin = los_bin();
+        create_session(&layout, &bin)?;
     }
 
-    let bin = los_bin();
-    create_session(&layout, &bin)?;
-
     if attach {
-        if std::env::var("TMUX").is_ok() {
-            eprintln!("los: switching to session '{session}'...");
-            let _ = tmux::cmd(["switch-client", "-t", session]);
-        } else if unsafe { libc::isatty(libc::STDOUT_FILENO) != 0 } {
-            let _ = tmux::cmd(["attach-session", "-t", session]);
-            eprintln!(
-                "los: session '{session}' detached. Reattach with `tmux attach -t {session}`, \
-                 or clean up with `tmux kill-session -t {session}`."
-            );
+        if try_connect(session) {
+            let verb = if std::env::var("TMUX").is_ok() { "switched" } else { "attached" };
+            eprintln!("los: {verb} to session '{session}'.");
+            eprintln!("los: use `tmux attach -t {session}` to reconnect.");
+        } else {
+            open_terminal_and_attach(session);
+            if exists {
+                eprintln!("los: session '{session}' already exists. Use `tmux attach -t {session}` to connect.");
+            } else {
+                eprintln!("los: session '{session}' created. Use `tmux attach -t {session}` to connect.");
+            }
+        }
+    } else {
+        if exists {
+            eprintln!("los: session '{session}' already exists");
         } else {
             eprintln!("los: session '{session}' created. Use `tmux attach -t {session}` to connect.");
         }
-    } else {
-        eprintln!("los: session '{session}' created. Use `tmux attach -t {session}` to connect.");
     }
 
     Ok(())
