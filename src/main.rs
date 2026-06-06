@@ -246,7 +246,9 @@ struct App {
     crt_frame: u8,
     picker: Picker,
     engine: Arc<EngineShared>,
-    seq_cursor: (usize, usize), // (track, step) for grid cursor
+    seq_cursor: (usize, usize),
+    pending_count: u32,
+    pending_g: bool,
     phosphor_renderer: Option<PhosphorHeadless>,
     phosphor_error: Option<String>,
 }
@@ -610,7 +612,7 @@ fn main() -> Result<()> {
         scope_samples: Vec::with_capacity(SCOPE_CAPACITY), scope_state: ScopeState::new(),
         crt_buf: vec![0.0; CRT_SIZE*CRT_SIZE], crt_mask: build_crt_mask(CRT_SIZE),
         crt_cache: None, scope_dirty: true, crt_frame: 0, picker,
-        engine, seq_cursor: (0, 0), phosphor_renderer, phosphor_error,
+        engine, seq_cursor: (0, 0), pending_count: 0, pending_g: false, phosphor_renderer, phosphor_error,
     };
 
     let result = run_ui(&mut terminal, &scope_buf, sr, &mut app);
@@ -872,24 +874,43 @@ fn run_ui(
                         KeyCode::Char(c) => {
                             let lower = c.to_ascii_lowercase();
                             let shifted = c.is_ascii_uppercase() || key.modifiers.contains(KeyModifiers::SHIFT);
+
+                            if c.is_ascii_digit() {
+                                let d = c as u32 - '0' as u32;
+                                if d == 0 && app.pending_count == 0 {
+                                    app.seq_cursor.1 = 0;
+                                } else {
+                                    app.pending_count = if app.pending_count > 0 { app.pending_count * 10 + d } else { d };
+                                }
+                                continue;
+                            }
+
+                            let count = app.pending_count.max(1) as usize;
+                            app.pending_count = 0;
+                            let was_pg = app.pending_g;
+                            app.pending_g = false;
+
                             match (lower, shifted) {
-                                ('h', _) => { app.seq_cursor.1 = app.seq_cursor.1.saturating_sub(1); }
-                                ('l', _) => { app.seq_cursor.1 = (app.seq_cursor.1 + 1).min(SEQ_STEPS-1); }
-                                ('j', false) => { app.seq_cursor.0 = (app.seq_cursor.0 + 1).min(SEQ_TRACKS-1); }
-                                ('k', false) => { app.seq_cursor.0 = app.seq_cursor.0.saturating_sub(1); }
-                                ('w', _) => { let (t, s) = app.seq_cursor; if let Ok(steps) = app.engine.step_data.try_lock() && let Some(next) = next_active_step(&steps, t, s) { app.seq_cursor.1 = next; } }
-                                ('b', false) => { let (t, s) = app.seq_cursor; if let Ok(steps) = app.engine.step_data.try_lock() && let Some(prev) = prev_active_step(&steps, t, s) { app.seq_cursor.1 = prev; } }
+                                ('h', _) => { app.seq_cursor.1 = app.seq_cursor.1.saturating_sub(count); }
+                                ('l', _) => { app.seq_cursor.1 = (app.seq_cursor.1 + count).min(SEQ_STEPS-1); }
+                                ('j', false) => { app.seq_cursor.0 = (app.seq_cursor.0 + count).min(SEQ_TRACKS-1); }
+                                ('k', false) => { app.seq_cursor.0 = app.seq_cursor.0.saturating_sub(count); }
+                                ('w', _) => { let (t, s) = app.seq_cursor; if let Ok(steps) = app.engine.step_data.try_lock() { let mut cur = s; for _ in 0..count { if let Some(n) = next_active_step(&steps, t, cur) { cur = n; } else { break; } } app.seq_cursor.1 = cur; } }
+                                ('b', false) => { let (t, s) = app.seq_cursor; if let Ok(steps) = app.engine.step_data.try_lock() { let mut cur = s; for _ in 0..count { if let Some(n) = prev_active_step(&steps, t, cur) { cur = n; } else { break; } } app.seq_cursor.1 = cur; } }
                                 ('b', true) => { app.scope_mode = match (app.scope_mode, app.phosphor_renderer.is_some()) { (ScopeMode::Braille, _) => ScopeMode::Crt, (ScopeMode::Crt, true) => ScopeMode::Phosphor, (ScopeMode::Crt, false) => ScopeMode::HalfBlock, (ScopeMode::Phosphor, _) => ScopeMode::HalfBlock, (ScopeMode::HalfBlock, _) => ScopeMode::Braille, }; app.crt_cache = None; }
                                 ('j', true) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); steps[t][s] = encode_step(act, octave_down(f) as u32, (v*1000.0) as u32); } }
                                 ('k', true) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); steps[t][s] = encode_step(act, octave_up(f) as u32, (v*1000.0) as u32); } }
+                                ('g', false) => { if was_pg { app.seq_cursor.0 = 0; } else { app.pending_g = true; } }
+                                ('g', true) => { app.seq_cursor.0 = SEQ_TRACKS - 1; }
+                                ('$', _) => { app.seq_cursor.1 = SEQ_STEPS - 1; }
                                 ('i', _) => app.mode = Mode::Insert,
                                 ('x', _) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; steps[t][s] = encode_step(false, 440, 1000); } }
                                 _ => {}
                             }
                         }
                         KeyCode::Enter => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); steps[t][s] = encode_step(!act, f as u32, (v*1000.0) as u32); } }
-                        KeyCode::Esc => {}
-                        _ => {}
+                        KeyCode::Esc => { app.pending_g = false; app.pending_count = 0; }
+                        _ => { app.pending_g = false; app.pending_count = 0; }
                     },
                     Mode::Insert => match key.code {
                         KeyCode::Esc => app.mode = Mode::Normal,
@@ -903,6 +924,10 @@ fn run_ui(
                                 ('k', true) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); steps[t][s] = encode_step(act, octave_up(f) as u32, (v*1000.0) as u32); } }
                                 ('h', _) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); let new_v = (v - 0.1).max(0.0); steps[t][s] = encode_step(act, f as u32, (new_v * 1000.0) as u32); } }
                                 ('l', _) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; let (act, f, v) = decode_step(steps[t][s]); let new_v = (v + 0.1).min(1.0); steps[t][s] = encode_step(act, f as u32, (new_v * 1000.0) as u32); } }
+                                ('0', _) => { app.seq_cursor.1 = 0; }
+                                ('$', _) => { app.seq_cursor.1 = SEQ_STEPS - 1; }
+                                ('w', _) => { let (t, s) = app.seq_cursor; if let Ok(steps) = app.engine.step_data.try_lock() && let Some(next) = next_active_step(&steps, t, s) { app.seq_cursor.1 = next; } }
+                                ('b', _) => { let (t, s) = app.seq_cursor; if let Ok(steps) = app.engine.step_data.try_lock() && let Some(prev) = prev_active_step(&steps, t, s) { app.seq_cursor.1 = prev; } }
                                 (' ', _) => { app.seq_cursor.1 = (app.seq_cursor.1 + 1) % SEQ_STEPS; }
                                 ('x', _) => { if let Ok(mut steps) = app.engine.step_data.try_lock() { let (t,s) = app.seq_cursor; steps[t][s] = encode_step(false, 440, 1000); } }
                                 _ => {}
