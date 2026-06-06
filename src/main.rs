@@ -58,8 +58,8 @@ fn main() -> Result<()> {
             los::tone::run(freq, instance)
         }
         Some("scope") => {
-            println!("los scope: not implemented (Phase 4)");
-            Ok(())
+            let instance = positional.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+            los::scope::run(instance)
         }
         Some(other) => {
             eprintln!("los: unknown subcommand '{other}'");

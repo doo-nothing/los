@@ -281,6 +281,20 @@ impl AudioRingbuf {
     pub fn write_index(&self) -> u64 {
         atomic_load_acquire(self.write_idx_ptr())
     }
+
+    /// Non-destructively read the most recently written slot.
+    /// Returns `Ok(false)` if no slots have been written yet.
+    pub fn peek_latest(&self, data: &mut [f32]) -> Result<bool> {
+        let w = atomic_load_acquire(self.write_idx_ptr());
+        if w == 0 {
+            return Ok(false);
+        }
+        let src = self.slot_ptr(w - 1);
+        unsafe {
+            ptr::copy_nonoverlapping(src, data.as_mut_ptr(), self.slot_len);
+        }
+        Ok(true)
+    }
 }
 
 // ── ShmTransport ────────────────────────────────────────────────────────────
