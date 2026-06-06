@@ -11,86 +11,36 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{canvas::Canvas, Block, Borders, Paragraph},
+    style::{Color, Style},
+    symbols::Marker,
+    widgets::{Axis, Chart, Dataset, GraphType, Paragraph},
     Terminal,
 };
 
 use crate::shm::AudioRingbuf;
 
-#[derive(Clone, Copy, PartialEq)]
-enum RenderMode {
-    Braille,
-    HalfBlock,
-    Bars,
-    Dots,
-}
-
-impl RenderMode {
-    fn name(&self) -> &'static str {
-        match self {
-            RenderMode::Braille => "Braille",
-            RenderMode::HalfBlock => "HalfBlock",
-            RenderMode::Bars => "Bars",
-            RenderMode::Dots => "Dots",
-        }
-    }
-
-    fn next(&self) -> Self {
-        match self {
-            RenderMode::Braille => RenderMode::HalfBlock,
-            RenderMode::HalfBlock => RenderMode::Bars,
-            RenderMode::Bars => RenderMode::Dots,
-            RenderMode::Dots => RenderMode::Braille,
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum ChannelMode {
-    Left,
-    Right,
-    Stereo,
-}
-
-impl ChannelMode {
-    fn name(&self) -> &'static str {
-        match self {
-            ChannelMode::Left => "Left",
-            ChannelMode::Right => "Right",
-            ChannelMode::Stereo => "Stereo",
-        }
-    }
-
-    fn next(&self) -> Self {
-        match self {
-            ChannelMode::Left => ChannelMode::Right,
-            ChannelMode::Right => ChannelMode::Stereo,
-            ChannelMode::Stereo => ChannelMode::Left,
-        }
-    }
-}
+const BUFFER_SIZE: usize = 512;
+const SHM_NAME: &str = "/los_mix_in";
 
 #[derive(Clone)]
 struct ScopeState {
-    samples: Vec<f32>,
-    channels: usize,
-    mode: RenderMode,
-    channel_mode: ChannelMode,
+    buffer: Vec<f32>,
+    mode: usize,
+    channel: usize,
     zoom: f32,
     gain: f32,
+    trigger_level: f32,
 }
 
 impl Default for ScopeState {
     fn default() -> Self {
         Self {
-            samples: vec![0.0; 1024],
-            channels: 2,
-            mode: RenderMode::Braille,
-            channel_mode: ChannelMode::Stereo,
+            buffer: vec![0.0; BUFFER_SIZE],
+            mode: 0,
+            channel: 2,
             zoom: 1.0,
             gain: 1.0,
+            trigger_level: 0.0,
         }
     }
 }
@@ -99,231 +49,45 @@ fn scope_thread(
     state: Arc<Mutex<ScopeState>>,
     shutdown: std::sync::mpsc::Receiver<()>,
 ) -> Result<()> {
-    let ringbuf = match AudioRingbuf::open("/los_mix_in") {
-        Ok(rb) => rb,
-        Err(_) => AudioRingbuf::create("/los_mix_in")
-            .map_err(|e| anyhow::anyhow!("creating audio ringbuffer: {}", e))?,
-    };
+    let ringbuf = AudioRingbuf::open(SHM_NAME)
+        .map_err(|e| anyhow::anyhow!("Failed to open audio ringbuffer: {}", e))?;
 
-    let channels = ringbuf.channels() as usize;
     let slot_len = ringbuf.slot_len();
-    let mut slot = vec![0.0f32; slot_len];
+    let mut local_buffer = vec![0.0f32; slot_len];
 
     loop {
         if shutdown.try_recv().is_ok() {
             break;
         }
 
-        if ringbuf.peek_latest(&mut slot).unwrap_or(false) {
+        if let Ok(true) = ringbuf.peek_latest(&mut local_buffer) {
             let mut s = state.lock().unwrap();
-            s.samples = slot.clone();
-            s.channels = channels;
+            
+            let channel = s.channel;
+            let gain = s.gain;
+            
+            s.buffer.clear();
+            for i in (0..slot_len).step_by(2) {
+                let sample = match channel {
+                    0 => local_buffer[i],
+                    1 => local_buffer[i + 1],
+                    _ => (local_buffer[i] + local_buffer[i + 1]) / 2.0,
+                };
+                s.buffer.push(sample * gain);
+            }
+
+            while s.buffer.len() > BUFFER_SIZE {
+                s.buffer.remove(0);
+            }
+            while s.buffer.len() < BUFFER_SIZE {
+                s.buffer.insert(0, 0.0);
+            }
         }
 
-        std::thread::sleep(Duration::from_millis(16)); // ~60 FPS
+        std::thread::sleep(Duration::from_millis(16));
     }
 
     Ok(())
-}
-
-fn draw_braille(f: &mut ratatui::Frame, area: ratatui::layout::Rect, samples: &[f32], channels: usize, channel_mode: ChannelMode, zoom: f32, gain: f32) {
-    let canvas = Canvas::default()
-        .block(Block::default().borders(Borders::ALL).title("Waveform (Braille)"))
-        .x_bounds([-1.0, 1.0])
-        .y_bounds([-1.0, 1.0])
-        .paint(|ctx| {
-            let n = samples.len() / channels;
-            let step = (n as f32 * zoom).min(n as f32) / area.width as f32;
-
-            for x in 0..area.width {
-                let idx = ((x as f32 * step) as usize).min(n - 1);
-
-                match channel_mode {
-                    ChannelMode::Left => {
-                        let sample = samples[idx * channels] * gain;
-                        ctx.print(
-                            ((x as f64 / area.width as f64) * 2.0 - 1.0),
-                            sample as f64,
-                            Span::styled("●", Style::default().fg(Color::Cyan)),
-                        );
-                    }
-                    ChannelMode::Right => {
-                        let sample = samples[idx * channels + 1] * gain;
-                        ctx.print(
-                            ((x as f64 / area.width as f64) * 2.0 - 1.0),
-                            sample as f64,
-                            Span::styled("●", Style::default().fg(Color::Magenta)),
-                        );
-                    }
-                    ChannelMode::Stereo => {
-                        let left = samples[idx * channels] * gain;
-                        let right = samples[idx * channels + 1] * gain;
-                        ctx.print(
-                            ((x as f64 / area.width as f64) * 2.0 - 1.0),
-                            left as f64,
-                            Span::styled("●", Style::default().fg(Color::Cyan)),
-                        );
-                        ctx.print(
-                            ((x as f64 / area.width as f64) * 2.0 - 1.0),
-                            right as f64,
-                            Span::styled("●", Style::default().fg(Color::Magenta)),
-                        );
-                    }
-                }
-            }
-        });
-    f.render_widget(canvas, area);
-}
-
-fn draw_halfblock(f: &mut ratatui::Frame, area: ratatui::layout::Rect, samples: &[f32], channels: usize, channel_mode: ChannelMode, zoom: f32, gain: f32) {
-    let canvas = Canvas::default()
-        .block(Block::default().borders(Borders::ALL).title("Waveform (HalfBlock)"))
-        .x_bounds([-1.0, 1.0])
-        .y_bounds([-1.0, 1.0])
-        .paint(|ctx| {
-            let n = samples.len() / channels;
-            let step = (n as f32 * zoom).min(n as f32) / area.width as f32;
-
-            for x in 0..area.width {
-                let idx = ((x as f32 * step) as usize).min(n - 1);
-
-                match channel_mode {
-                    ChannelMode::Left => {
-                        let sample = samples[idx * channels] * gain;
-                        let ch = if sample > 0.0 { "▀" } else { "▄" };
-                        ctx.print(
-                            ((x as f64 / area.width as f64) * 2.0 - 1.0),
-                            sample.abs() as f64,
-                            Span::styled(ch, Style::default().fg(Color::Green)),
-                        );
-                    }
-                    ChannelMode::Right => {
-                        let sample = samples[idx * channels + 1] * gain;
-                        let ch = if sample > 0.0 { "▀" } else { "▄" };
-                        ctx.print(
-                            ((x as f64 / area.width as f64) * 2.0 - 1.0),
-                            sample.abs() as f64,
-                            Span::styled(ch, Style::default().fg(Color::Yellow)),
-                        );
-                    }
-                    ChannelMode::Stereo => {
-                        let left = samples[idx * channels] * gain;
-                        let right = samples[idx * channels + 1] * gain;
-                        let avg = (left + right) / 2.0;
-                        let ch = if avg > 0.0 { "▀" } else { "▄" };
-                        ctx.print(
-                            ((x as f64 / area.width as f64) * 2.0 - 1.0),
-                            avg.abs() as f64,
-                            Span::styled(ch, Style::default().fg(Color::White)),
-                        );
-                    }
-                }
-            }
-        });
-    f.render_widget(canvas, area);
-}
-
-fn draw_bars(f: &mut ratatui::Frame, area: ratatui::layout::Rect, samples: &[f32], channels: usize, channel_mode: ChannelMode, zoom: f32, gain: f32) {
-    let canvas = Canvas::default()
-        .block(Block::default().borders(Borders::ALL).title("Waveform (Bars)"))
-        .x_bounds([-1.0, 1.0])
-        .y_bounds([-1.0, 1.0])
-        .paint(|ctx| {
-            let n = samples.len() / channels;
-            let step = (n as f32 * zoom).min(n as f32) / area.width as f32;
-
-            for x in 0..area.width {
-                let idx = ((x as f32 * step) as usize).min(n - 1);
-
-                match channel_mode {
-                    ChannelMode::Left => {
-                        let sample = samples[idx * channels] * gain;
-                        let height = sample.abs();
-                        for y in 0..(height * area.height as f32) as usize {
-                            ctx.print(
-                                ((x as f64 / area.width as f64) * 2.0 - 1.0),
-                                ((y as f64 / area.height as f64) * 2.0 - 1.0),
-                                Span::styled("█", Style::default().fg(Color::Blue)),
-                            );
-                        }
-                    }
-                    ChannelMode::Right => {
-                        let sample = samples[idx * channels + 1] * gain;
-                        let height = sample.abs();
-                        for y in 0..(height * area.height as f32) as usize {
-                            ctx.print(
-                                ((x as f64 / area.width as f64) * 2.0 - 1.0),
-                                ((y as f64 / area.height as f64) * 2.0 - 1.0),
-                                Span::styled("█", Style::default().fg(Color::Red)),
-                            );
-                        }
-                    }
-                    ChannelMode::Stereo => {
-                        let left = samples[idx * channels] * gain;
-                        let right = samples[idx * channels + 1] * gain;
-                        let avg = (left + right) / 2.0;
-                        let height = avg.abs();
-                        for y in 0..(height * area.height as f32) as usize {
-                            ctx.print(
-                                ((x as f64 / area.width as f64) * 2.0 - 1.0),
-                                ((y as f64 / area.height as f64) * 2.0 - 1.0),
-                                Span::styled("█", Style::default().fg(Color::White)),
-                            );
-                        }
-                    }
-                }
-            }
-        });
-    f.render_widget(canvas, area);
-}
-
-fn draw_dots(f: &mut ratatui::Frame, area: ratatui::layout::Rect, samples: &[f32], channels: usize, channel_mode: ChannelMode, zoom: f32, gain: f32) {
-    let canvas = Canvas::default()
-        .block(Block::default().borders(Borders::ALL).title("Waveform (Dots)"))
-        .x_bounds([-1.0, 1.0])
-        .y_bounds([-1.0, 1.0])
-        .paint(|ctx| {
-            let n = samples.len() / channels;
-            let step = (n as f32 * zoom).min(n as f32) / area.width as f32;
-
-            for x in 0..area.width {
-                let idx = ((x as f32 * step) as usize).min(n - 1);
-
-                match channel_mode {
-                    ChannelMode::Left => {
-                        let sample = samples[idx * channels] * gain;
-                        ctx.print(
-                            ((x as f64 / area.width as f64) * 2.0 - 1.0),
-                            sample as f64,
-                            Span::styled("·", Style::default().fg(Color::Cyan)),
-                        );
-                    }
-                    ChannelMode::Right => {
-                        let sample = samples[idx * channels + 1] * gain;
-                        ctx.print(
-                            ((x as f64 / area.width as f64) * 2.0 - 1.0),
-                            sample as f64,
-                            Span::styled("·", Style::default().fg(Color::Magenta)),
-                        );
-                    }
-                    ChannelMode::Stereo => {
-                        let left = samples[idx * channels] * gain;
-                        let right = samples[idx * channels + 1] * gain;
-                        ctx.print(
-                            ((x as f64 / area.width as f64) * 2.0 - 1.0),
-                            left as f64,
-                            Span::styled("·", Style::default().fg(Color::Cyan)),
-                        );
-                        ctx.print(
-                            ((x as f64 / area.width as f64) * 2.0 - 1.0),
-                            right as f64,
-                            Span::styled("·", Style::default().fg(Color::Magenta)),
-                        );
-                    }
-                }
-            }
-        });
-    f.render_widget(canvas, area);
 }
 
 fn draw_ui(
@@ -331,48 +95,97 @@ fn draw_ui(
     state: &ScopeState,
 ) -> Result<()> {
     terminal.draw(|f| {
+        let area = f.area();
+        
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .margin(1)
-            .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(3)])
-            .split(f.area());
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .split(area);
 
-        // Title
-        let title = Paragraph::new("LOS Scope")
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-            .block(Block::default().borders(Borders::ALL));
-        f.render_widget(title, chunks[0]);
+        let mode_str = match state.mode {
+            0 => "Braille",
+            1 => "HalfBlock",
+            2 => "Bars",
+            _ => "Dots",
+        };
+        let channel_str = match state.channel {
+            0 => "L",
+            1 => "R",
+            _ => "S",
+        };
+        let status = format!(
+            "Mode: {} | Ch: {} | Zoom: {:.1}x | Gain: {:.1}x | Trig: {:.2}",
+            mode_str, channel_str, state.zoom, state.gain, state.trigger_level
+        );
+        let status_widget = Paragraph::new(status).style(Style::default().fg(Color::Cyan));
+        f.render_widget(status_widget, chunks[0]);
 
-        // Waveform
-        match state.mode {
-            RenderMode::Braille => draw_braille(f, chunks[1], &state.samples, state.channels, state.channel_mode, state.zoom, state.gain),
-            RenderMode::HalfBlock => draw_halfblock(f, chunks[1], &state.samples, state.channels, state.channel_mode, state.zoom, state.gain),
-            RenderMode::Bars => draw_bars(f, chunks[1], &state.samples, state.channels, state.channel_mode, state.zoom, state.gain),
-            RenderMode::Dots => draw_dots(f, chunks[1], &state.samples, state.channels, state.channel_mode, state.zoom, state.gain),
-        }
+        let data: Vec<(f64, f64)> = state
+            .buffer
+            .iter()
+            .enumerate()
+            .map(|(i, &s)| (i as f64, s as f64))
+            .collect();
 
-        // Controls
-        let controls = vec![Line::from(vec![
-            Span::raw("Mode: "),
-            Span::styled(state.mode.name(), Style::default().fg(Color::Yellow)),
-            Span::raw("  Channel: "),
-            Span::styled(state.channel_mode.name(), Style::default().fg(Color::Green)),
-            Span::raw("  Zoom: "),
-            Span::styled(format!("{:.1}x", state.zoom), Style::default().fg(Color::Cyan)),
-            Span::raw("  Gain: "),
-            Span::styled(format!("{:.1}x", state.gain), Style::default().fg(Color::Magenta)),
-            Span::raw("  [m]ode [c]hannel [+]zoom [-]zoom [g]ain [q]uit"),
-        ])];
-        let controls_widget = Paragraph::new(controls)
-            .block(Block::default().borders(Borders::ALL).title("Controls"));
-        f.render_widget(controls_widget, chunks[2]);
+        let marker = match state.mode {
+            0 => Marker::Braille,
+            1 => Marker::HalfBlock,
+            2 => Marker::Block,
+            _ => Marker::Dot,
+        };
+
+        let x_max = (state.buffer.len() as f64 / state.zoom as f64).min(state.buffer.len() as f64);
+
+        let datasets = vec![Dataset::default()
+            .marker(marker)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::Green))
+            .data(&data)];
+
+        let chart = Chart::new(datasets)
+            .x_axis(
+                Axis::default()
+                    .bounds([0.0, x_max])
+                    .labels(vec![
+                        ratatui::text::Line::from("0"),
+                        ratatui::text::Line::from(format!("{:.0}", x_max)),
+                    ]),
+            )
+            .y_axis(
+                Axis::default()
+                    .bounds([-1.0, 1.0])
+                    .labels(vec![
+                        ratatui::text::Line::from("-1"),
+                        ratatui::text::Line::from("0"),
+                        ratatui::text::Line::from("1"),
+                    ]),
+            );
+
+        f.render_widget(chart, chunks[1]);
     })?;
 
     Ok(())
 }
 
 pub fn run(_instance: usize) -> Result<()> {
-    enable_raw_mode()?;
+    // Initialize terminal with retry logic (handles tmux PTY race)
+    let mut last_err = String::new();
+    for attempt in 0..20 {
+        match enable_raw_mode() {
+            Ok(()) => break,
+            Err(e) => {
+                last_err = format!("{}", e);
+                if attempt < 19 {
+                    std::thread::sleep(Duration::from_millis(200));
+                } else {
+                    return Err(anyhow::anyhow!("Failed to enable raw mode after 20 attempts: {}", last_err));
+                }
+            }
+        }
+    }
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
@@ -399,11 +212,11 @@ pub fn run(_instance: usize) -> Result<()> {
                     KeyCode::Char('q') | KeyCode::Esc => break,
                     KeyCode::Char('m') => {
                         let mut s = state.lock().unwrap();
-                        s.mode = s.mode.next();
+                        s.mode = (s.mode + 1) % 4;
                     }
                     KeyCode::Char('c') => {
                         let mut s = state.lock().unwrap();
-                        s.channel_mode = s.channel_mode.next();
+                        s.channel = (s.channel + 1) % 3;
                     }
                     KeyCode::Char('+') | KeyCode::Char('=') => {
                         let mut s = state.lock().unwrap();
@@ -415,7 +228,19 @@ pub fn run(_instance: usize) -> Result<()> {
                     }
                     KeyCode::Char('g') => {
                         let mut s = state.lock().unwrap();
-                        s.gain = if s.gain < 5.0 { s.gain + 0.5 } else { 1.0 };
+                        s.gain = (s.gain + 0.5).min(10.0);
+                    }
+                    KeyCode::Char('G') => {
+                        let mut s = state.lock().unwrap();
+                        s.gain = (s.gain - 0.5).max(0.1);
+                    }
+                    KeyCode::Char('t') => {
+                        let mut s = state.lock().unwrap();
+                        s.trigger_level = (s.trigger_level + 0.1).min(1.0);
+                    }
+                    KeyCode::Char('T') => {
+                        let mut s = state.lock().unwrap();
+                        s.trigger_level = (s.trigger_level - 0.1).max(-1.0);
                     }
                     _ => {}
                 }

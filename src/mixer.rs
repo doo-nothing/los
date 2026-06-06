@@ -10,18 +10,18 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    layout::Rect,
+    style::{Color, Style},
+    widgets::Paragraph,
     Terminal,
 };
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-use crate::shm::AudioRingbuf;
+use crate::shm::{AudioRingbuf, ShmTransport};
 
 const NUM_TRACKS: usize = 4;
+const SHM_NAME: &str = "/los_mix_in";
 
 #[derive(Clone)]
 struct TrackState {
@@ -47,20 +47,20 @@ impl Default for TrackState {
 #[derive(Clone)]
 struct MixerState {
     tracks: Vec<TrackState>,
-    master_level: f32,
+    master: f32,
     master_meter: f32,
-    selected_track: usize,
-    selected_param: usize, // 0=level, 1=pan, 2=mute, 3=solo
+    selected: usize,
+    param: usize,
 }
 
 impl Default for MixerState {
     fn default() -> Self {
         Self {
             tracks: vec![TrackState::default(); NUM_TRACKS],
-            master_level: 0.8,
+            master: 0.8,
             master_meter: 0.0,
-            selected_track: 0,
-            selected_param: 0,
+            selected: 0,
+            param: 0,
         }
     }
 }
@@ -69,83 +69,70 @@ fn mixer_thread(
     state: Arc<Mutex<MixerState>>,
     shutdown: std::sync::mpsc::Receiver<()>,
 ) -> Result<()> {
-    let ringbuf_name = "/los_mix_in";
+    let mut ringbuf = AudioRingbuf::open(SHM_NAME)
+        .map_err(|e| anyhow::anyhow!("Failed to open audio ringbuffer: {}", e))?;
 
-    let ringbuf = AudioRingbuf::open(ringbuf_name)
-        .map_err(|e| anyhow::anyhow!("could not open SHM ringbuffer '{}': {}", ringbuf_name, e))?;
-
-    let channels = ringbuf.channels() as usize;
-    let slot_len = ringbuf.slot_len();
-    let sample_rate = 48000u32;
+    let mut transport = ShmTransport::open()
+        .or_else(|_| ShmTransport::create(48000))?;
 
     let host = cpal::default_host();
     let device = host
         .default_output_device()
-        .ok_or_else(|| anyhow::anyhow!("no audio output device found"))?;
+        .ok_or_else(|| anyhow::anyhow!("No output device"))?;
 
-    let config = cpal::StreamConfig {
-        channels: channels as u16,
-        sample_rate: cpal::SampleRate(sample_rate),
-        buffer_size: cpal::BufferSize::Fixed(ringbuf.slot_frames()),
-    };
+    let config = device
+        .default_output_config()
+        .map_err(|e| anyhow::anyhow!("Failed to get output config: {}", e))?;
 
-    let ringbuf = Arc::new(std::sync::Mutex::new(ringbuf));
-    let state_clone = Arc::clone(&state);
+    let channels = config.channels() as usize;
+    let slot_len = ringbuf.slot_len();
+    let mut buffer = vec![0.0f32; slot_len];
 
     let stream = device
         .build_output_stream(
-            &config,
+            &config.into(),
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                let mut buf = ringbuf.lock().unwrap();
-                let mut s = state_clone.lock().unwrap();
-
-                let mut written = 0;
+                let mut s = state.lock().unwrap();
                 let mut peak = 0.0f32;
 
-                while written + slot_len <= data.len() {
-                    match buf.read(&mut data[written..written + slot_len]) {
-                        Ok(true) => {
-                            // Apply track levels and panning
-                            for i in (written..written + slot_len).step_by(channels) {
-                                let left = data[i];
-                                let right = data[i + 1];
+                for frame in data.chunks_mut(channels) {
+                    let mut mixed = [0.0f32; 2];
 
-                                // Simple stereo mix (for now, just apply master level)
-                                let mixed_left = left * s.master_level;
-                                let mixed_right = right * s.master_level;
-
-                                data[i] = mixed_left;
-                                data[i + 1] = mixed_right;
-
-                                peak = peak.max(mixed_left.abs()).max(mixed_right.abs());
-                            }
-                            written += slot_len;
+                    if let Ok(true) = ringbuf.read(&mut buffer) {
+                        for (i, sample) in buffer.iter().enumerate().take(2) {
+                            mixed[i] = *sample;
                         }
-                        Ok(false) => break,
-                        Err(_) => break,
                     }
-                }
 
-                if written < data.len() {
-                    for sample in data[written..].iter_mut() {
-                        *sample = 0.0;
+                    for sample in mixed.iter_mut() {
+                        *sample *= s.master;
+                        peak = peak.max(sample.abs());
+                    }
+
+                    for (i, sample) in frame.iter_mut().enumerate() {
+                        *sample = mixed[i % 2];
                     }
                 }
 
                 s.master_meter = peak;
+                
+                // Advance transport clock by the number of frames processed
+                transport.add_clock_frames((data.len() / channels) as u64);
             },
-            |err| eprintln!("mixer audio error: {}", err),
+            move |err| {
+                eprintln!("Audio error: {}", err);
+            },
             None,
         )
-        .map_err(|e| anyhow::anyhow!("building audio output stream: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to build output stream: {}", e))?;
 
-    stream.play().map_err(|e| anyhow::anyhow!("starting audio stream: {}", e))?;
+    stream.play().map_err(|e| anyhow::anyhow!("Failed to play stream: {}", e))?;
 
     loop {
         if shutdown.try_recv().is_ok() {
             break;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(10));
     }
 
     Ok(())
@@ -156,145 +143,78 @@ fn draw_ui(
     state: &MixerState,
 ) -> Result<()> {
     terminal.draw(|f| {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .margin(1)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Length(3 + NUM_TRACKS as u16 * 4),
-                Constraint::Length(3),
-                Constraint::Min(0),
-            ])
-            .split(f.area());
+        let area = f.area();
+        let track_width = area.width / (NUM_TRACKS as u16 + 1);
 
-        // Title
-        let title = Paragraph::new("LOS Mixer")
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-            .block(Block::default().borders(Borders::ALL));
-        f.render_widget(title, chunks[0]);
+        for i in 0..NUM_TRACKS {
+            let track = &state.tracks[i];
+            let is_selected = state.selected == i;
+            
+            let x = i as u16 * track_width;
+            let rect = Rect::new(x, 0, track_width, area.height);
 
-        // Tracks
-        let track_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(vec![Constraint::Length(4); NUM_TRACKS])
-            .split(chunks[1]);
-
-        for (i, track) in state.tracks.iter().enumerate() {
-            let is_selected = i == state.selected_track;
-            let track_title = format!("Track {}", i + 1);
-
-            let level_style = if is_selected && state.selected_param == 0 {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            };
-
-            let pan_style = if is_selected && state.selected_param == 1 {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            };
-
-            let mute_style = if track.mute {
-                Style::default().fg(Color::Red)
-            } else {
-                Style::default().fg(Color::Green)
-            };
-
-            let solo_style = if track.solo {
+            let style = if is_selected {
                 Style::default().fg(Color::Yellow)
             } else {
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(Color::White)
             };
 
-            let track_content = vec![
-                Line::from(vec![
-                    Span::raw("Level: "),
-                    Span::styled(format!("{:.0}%", track.level * 100.0), level_style),
-                ]),
-                Line::from(vec![
-                    Span::raw("Pan: "),
-                    Span::styled(
-                        if track.pan == 0.0 {
-                            "C".to_string()
-                        } else if track.pan < 0.0 {
-                            format!("L{:.0}", -track.pan * 100.0)
-                        } else {
-                            format!("R{:.0}", track.pan * 100.0)
-                        },
-                        pan_style,
-                    ),
-                ]),
-                Line::from(vec![
-                    Span::raw("Mute: "),
-                    Span::styled(if track.mute { "M" } else { "-" }, mute_style),
-                    Span::raw("  Solo: "),
-                    Span::styled(if track.solo { "S" } else { "-" }, solo_style),
-                ]),
-                Line::from(vec![
-                    Span::raw("Meter: "),
-                    Span::styled(
-                        "█".repeat((track.meter * 20.0) as usize),
-                        Style::default().fg(Color::Green),
-                    ),
-                ]),
-            ];
+            let mute_str = if track.mute { "M" } else { " " };
+            let solo_str = if track.solo { "S" } else { " " };
 
-            let track_widget = Paragraph::new(track_content)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(track_title)
-                        .border_style(if is_selected {
-                            Style::default().fg(Color::Yellow)
-                        } else {
-                            Style::default().fg(Color::White)
-                        }),
-                );
-            f.render_widget(track_widget, track_chunks[i]);
+            let track_text = format!(
+                "T{} [{}{}] \nL:{:.0}%\nP:{:+.0}\n\n{:.0}%",
+                i + 1,
+                mute_str,
+                solo_str,
+                track.level * 100.0,
+                track.pan * 100.0,
+                track.meter * 100.0
+            );
+
+            let track_widget = Paragraph::new(track_text).style(style);
+            f.render_widget(track_widget, rect);
         }
 
-        // Master
-        let master_content = vec![Line::from(vec![
-            Span::raw("Master Level: "),
-            Span::styled(
-                format!("{:.0}%", state.master_level * 100.0),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  Meter: "),
-            Span::styled(
-                "█".repeat((state.master_meter * 20.0) as usize),
-                Style::default().fg(Color::Green),
-            ),
-        ])];
-        let master_widget = Paragraph::new(master_content)
-            .block(Block::default().borders(Borders::ALL).title("Master"));
-        f.render_widget(master_widget, chunks[2]);
+        let master_x = NUM_TRACKS as u16 * track_width;
+        let master_rect = Rect::new(master_x, 0, track_width, area.height);
+        let is_master_selected = state.selected == NUM_TRACKS;
+        
+        let master_style = if is_master_selected {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
 
-        // Help
-        let help_text = vec![
-            Line::from("Navigation:"),
-            Line::from("  j/k or ↑/↓ : Select track"),
-            Line::from("  h/l or ←/→ : Select parameter"),
-            Line::from(""),
-            Line::from("Editing:"),
-            Line::from("  ↑/↓        : Adjust level/master"),
-            Line::from("  ←/→        : Adjust pan"),
-            Line::from("  m          : Toggle mute"),
-            Line::from("  s          : Toggle solo"),
-            Line::from("  q          : Quit"),
-        ];
-        let help = Paragraph::new(help_text)
-            .style(Style::default().fg(Color::Gray))
-            .block(Block::default().borders(Borders::ALL).title("Help"));
-        f.render_widget(help, chunks[3]);
+        let master_text = format!(
+            "MASTER\n\n{:.0}%\n\n{:.0}%",
+            state.master * 100.0,
+            state.master_meter * 100.0
+        );
+
+        let master_widget = Paragraph::new(master_text).style(master_style);
+        f.render_widget(master_widget, master_rect);
     })?;
 
     Ok(())
 }
 
 pub fn run() -> Result<()> {
-    enable_raw_mode()?;
+    // Initialize terminal with retry logic (handles tmux PTY race)
+    let mut last_err = String::new();
+    for attempt in 0..20 {
+        match enable_raw_mode() {
+            Ok(()) => break,
+            Err(e) => {
+                last_err = format!("{}", e);
+                if attempt < 19 {
+                    std::thread::sleep(Duration::from_millis(200));
+                } else {
+                    return Err(anyhow::anyhow!("Failed to enable raw mode after 20 attempts: {}", last_err));
+                }
+            }
+        }
+    }
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
@@ -319,71 +239,61 @@ pub fn run() -> Result<()> {
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
-                    KeyCode::Char('j') | KeyCode::Down => {
+                    KeyCode::Char('h') | KeyCode::Left => {
                         let mut s = state.lock().unwrap();
-                        if s.selected_param == 0 {
-                            // Adjusting master level
-                            s.master_level = (s.master_level - 0.05).max(0.0);
-                        } else {
-                            s.selected_track = (s.selected_track + 1) % NUM_TRACKS;
-                        }
-                    }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        let mut s = state.lock().unwrap();
-                        if s.selected_param == 0 {
-                            // Adjusting master level
-                            s.master_level = (s.master_level + 0.05).min(1.0);
-                        } else {
-                            s.selected_track = if s.selected_track == 0 {
-                                NUM_TRACKS - 1
-                            } else {
-                                s.selected_track - 1
-                            };
-                        }
+                        s.selected = if s.selected == 0 { NUM_TRACKS } else { s.selected - 1 };
                     }
                     KeyCode::Char('l') | KeyCode::Right => {
                         let mut s = state.lock().unwrap();
-                        let track = s.selected_track;
-                        if s.selected_param == 0 {
-                            // Adjusting level
-                            s.tracks[track].level =
-                                (s.tracks[track].level + 0.05).min(1.0);
-                        } else if s.selected_param == 1 {
-                            // Adjusting pan
-                            s.tracks[track].pan =
-                                (s.tracks[track].pan + 0.1).min(1.0);
+                        s.selected = (s.selected + 1) % (NUM_TRACKS + 1);
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        let mut s = state.lock().unwrap();
+                        s.param = (s.param + 1) % 4;
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        let mut s = state.lock().unwrap();
+                        s.param = if s.param == 0 { 3 } else { s.param - 1 };
+                    }
+                    KeyCode::Char('+') | KeyCode::Char('=') => {
+                        let mut s = state.lock().unwrap();
+                        let sel = s.selected;
+                        if sel < NUM_TRACKS {
+                            match s.param {
+                                0 => s.tracks[sel].level = (s.tracks[sel].level + 0.05).min(1.0),
+                                1 => s.tracks[sel].pan = (s.tracks[sel].pan + 0.1).min(1.0),
+                                _ => {}
+                            }
                         } else {
-                            s.selected_param = (s.selected_param + 1) % 4;
+                            s.master = (s.master + 0.05).min(1.0);
                         }
                     }
-                    KeyCode::Char('h') | KeyCode::Left => {
+                    KeyCode::Char('-') => {
                         let mut s = state.lock().unwrap();
-                        let track = s.selected_track;
-                        if s.selected_param == 0 {
-                            // Adjusting level
-                            s.tracks[track].level =
-                                (s.tracks[track].level - 0.05).max(0.0);
-                        } else if s.selected_param == 1 {
-                            // Adjusting pan
-                            s.tracks[track].pan =
-                                (s.tracks[track].pan - 0.1).max(-1.0);
+                        let sel = s.selected;
+                        if sel < NUM_TRACKS {
+                            match s.param {
+                                0 => s.tracks[sel].level = (s.tracks[sel].level - 0.05).max(0.0),
+                                1 => s.tracks[sel].pan = (s.tracks[sel].pan - 0.1).max(-1.0),
+                                _ => {}
+                            }
                         } else {
-                            s.selected_param = if s.selected_param == 0 {
-                                3
-                            } else {
-                                s.selected_param - 1
-                            };
+                            s.master = (s.master - 0.05).max(0.0);
                         }
                     }
                     KeyCode::Char('m') => {
                         let mut s = state.lock().unwrap();
-                        let track = s.selected_track;
-                        s.tracks[track].mute = !s.tracks[track].mute;
+                        let sel = s.selected;
+                        if sel < NUM_TRACKS {
+                            s.tracks[sel].mute = !s.tracks[sel].mute;
+                        }
                     }
                     KeyCode::Char('s') => {
                         let mut s = state.lock().unwrap();
-                        let track = s.selected_track;
-                        s.tracks[track].solo = !s.tracks[track].solo;
+                        let sel = s.selected;
+                        if sel < NUM_TRACKS {
+                            s.tracks[sel].solo = !s.tracks[sel].solo;
+                        }
                     }
                     _ => {}
                 }

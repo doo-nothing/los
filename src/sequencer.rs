@@ -2,7 +2,7 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
@@ -10,10 +10,10 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table},
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Style},
+    text::Span,
+    widgets::{Block, Borders, Paragraph},
     Terminal,
 };
 
@@ -25,6 +25,13 @@ const NUM_STEPS: usize = 16;
 struct Step {
     active: bool,
     note: u8,
+    velocity: u8,
+}
+
+impl Default for Step {
+    fn default() -> Self {
+        Self { active: false, note: 60, velocity: 100 }
+    }
 }
 
 #[derive(Clone)]
@@ -39,7 +46,7 @@ struct SequencerState {
 
 impl Default for SequencerState {
     fn default() -> Self {
-        let mut steps = vec![Step { active: false, note: 60 }; NUM_STEPS];
+        let mut steps = vec![Step::default(); NUM_STEPS];
         for i in (0..NUM_STEPS).step_by(4) {
             steps[i].active = true;
         }
@@ -100,7 +107,8 @@ fn sequencer_thread(
                 }
                 if s.steps[current_step].active {
                     let note = s.steps[current_step].note;
-                    let _ = events.write_event(&AudioEvent::note_on(note, 100, current_step as u32));
+                    let vel = s.steps[current_step].velocity;
+                    let _ = events.write_event(&AudioEvent::note_on(note, vel, current_step as u32));
                     s.last_note = Some(note);
                 } else {
                     s.last_note = None;
@@ -126,132 +134,175 @@ fn draw_ui(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &SequencerState,
     input_mode: &str,
+    input_buffer: &str,
 ) -> Result<()> {
     terminal.draw(|f| {
+        let area = f.area();
+        
+        // Minimal layout: grid + status line
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .margin(1)
             .constraints([
-                Constraint::Length(3),
-                Constraint::Length(5),
-                Constraint::Length(3),
-                Constraint::Min(0),
+                Constraint::Length(1),  // Status line
+                Constraint::Length(3),  // Step grid
+                Constraint::Length(1),  // Note display
+                Constraint::Min(0),     // Empty space
             ])
-            .split(f.area());
+            .split(area);
 
-        // Title
-        let title = Paragraph::new("LOS Sequencer")
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-            .block(Block::default().borders(Borders::ALL));
-        f.render_widget(title, chunks[0]);
+        // Status line
+        let play_str = if state.playing { "▶" } else { "■" };
+        let status = format!(
+            "{} {} BPM | Step {}/{} | Sel {} | {}",
+            play_str, state.bpm as u32, state.current_step, NUM_STEPS, state.selected, input_mode
+        );
+        let status_widget = Paragraph::new(status)
+            .style(Style::default().fg(Color::Cyan));
+        f.render_widget(status_widget, chunks[0]);
 
-        // Step grid
-        let rows: Vec<Row> = (0..NUM_STEPS)
-            .map(|i| {
-                let step = &state.steps[i];
-                let is_current = i == state.current_step;
-                let is_selected = i == state.selected;
+        // Step grid - horizontal layout
+        let step_width = area.width as usize / NUM_STEPS;
+        let step_width = step_width.max(3).min(8);
+        
+        for i in 0..NUM_STEPS {
+            let step = &state.steps[i];
+            let is_current = i == state.current_step;
+            let is_selected = i == state.selected;
 
-                let marker = if is_current && is_selected {
-                    ">*"
-                } else if is_current {
-                    ">"
-                } else if is_selected {
-                    "*"
-                } else {
-                    " "
-                };
+            let x = (i * step_width) as u16;
+            let rect = Rect::new(x, chunks[1].y, step_width as u16, 3);
 
-                let active_str = if step.active { "X" } else { " " };
-                let note_str = midi_note_name(step.note);
+            let (bg, fg, marker) = if is_current && is_selected {
+                (Color::Yellow, Color::Black, "▶")
+            } else if is_current {
+                (Color::Green, Color::Black, "▶")
+            } else if is_selected {
+                (Color::Blue, Color::White, "*")
+            } else if step.active {
+                (Color::DarkGray, Color::White, " ")
+            } else {
+                (Color::Reset, Color::DarkGray, " ")
+            };
 
-                let style = if is_current && is_selected {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-                } else if is_current {
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
-                } else if is_selected {
-                    Style::default().fg(Color::Yellow)
-                } else if step.active {
-                    Style::default().fg(Color::White)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
+            let step_text = format!(
+                "{}{}\n{}\n{}",
+                marker,
+                i,
+                if step.active { "●" } else { "○" },
+                midi_note_name(step.note)
+            );
 
-                Row::new(vec![
-                    Cell::from(marker).style(style),
-                    Cell::from(format!("{:2}", i)).style(style),
-                    Cell::from(format!("[{}]", active_str)).style(style),
-                    Cell::from(note_str).style(style),
-                ])
-            })
-            .collect();
+            let step_widget = Paragraph::new(step_text)
+                .style(Style::default().fg(fg).bg(bg))
+                .block(Block::default().borders(Borders::NONE));
+            f.render_widget(step_widget, rect);
+        }
 
-        let table = Table::new(
-            rows,
-            &[
-                Constraint::Length(2),
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Length(4),
-            ],
-        )
-        .header(
-            Row::new(vec!["", "#", "On", "Note"])
-                .style(Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)),
-        )
-        .block(Block::default().borders(Borders::ALL).title("Steps"));
-        f.render_widget(table, chunks[1]);
-
-        // Transport info
-        let play_str = if state.playing { "► Playing" } else { "■ Stopped" };
-        let transport_text = vec![Line::from(vec![
-            Span::raw("BPM: "),
-            Span::styled(format!("{:.0}", state.bpm), Style::default().fg(Color::Yellow)),
-            Span::raw("  "),
-            Span::styled(play_str, Style::default().fg(Color::Green)),
-            Span::raw("  Step: "),
-            Span::styled(format!("{}", state.current_step), Style::default().fg(Color::Cyan)),
-        ])];
-        let transport = Paragraph::new(transport_text)
-            .block(Block::default().borders(Borders::ALL).title("Transport"));
-        f.render_widget(transport, chunks[2]);
-
-        // Help
-        let help_text = vec![
-            Line::from("Navigation:"),
-            Line::from("  h/l or ←/→ : Move left/right"),
-            Line::from("  0/$        : First/last step"),
-            Line::from("  w/b        : Next/prev active step"),
-            Line::from("  gg         : Go to first step"),
-            Line::from(""),
-            Line::from("Editing:"),
-            Line::from("  space      : Toggle step"),
-            Line::from("  n<note>    : Set note (e.g., n60)"),
-            Line::from("  t<bpm>     : Set BPM (e.g., t120)"),
-            Line::from("  e<pulses>  : Euclidean fill"),
-            Line::from(""),
-            Line::from("Transport:"),
-            Line::from("  p          : Play/pause"),
-            Line::from("  s          : Stop"),
-            Line::from("  q          : Quit"),
-            Line::from(""),
-            Line::from(format!("Mode: {}", input_mode)),
-        ];
-        let help = Paragraph::new(help_text)
-            .style(Style::default().fg(Color::Gray))
-            .block(Block::default().borders(Borders::ALL).title("Help"));
-        f.render_widget(help, chunks[3]);
+        // Note display for selected step
+        let sel_step = &state.steps[state.selected];
+        let note_info = format!(
+            "Step {}: {} | Note: {} ({}) | Vel: {} | {}",
+            state.selected,
+            if sel_step.active { "ON" } else { "OFF" },
+            sel_step.note,
+            midi_note_name(sel_step.note),
+            sel_step.velocity,
+            if !input_buffer.is_empty() { format!("Input: {}", input_buffer) } else { String::new() }
+        );
+        let note_widget = Paragraph::new(note_info)
+            .style(Style::default().fg(Color::Yellow));
+        f.render_widget(note_widget, chunks[2]);
     })?;
 
     Ok(())
 }
 
 pub fn run(_instance: usize) -> Result<()> {
-    enable_raw_mode()?;
+    // Log to file for debugging
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    let mut log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/los-sequencer.log")
+        .ok();
+    
+    if let Some(ref mut f) = log {
+        writeln!(f, "Sequencer starting at {:?}", std::time::SystemTime::now()).ok();
+        // Log TTY status for debugging
+        unsafe {
+            writeln!(f, "isatty(stdin)={} isatty(stdout)={}", 
+                libc::isatty(libc::STDIN_FILENO), 
+                libc::isatty(libc::STDOUT_FILENO)).ok();
+            // Try /dev/tty
+            let tty_path = std::ffi::CString::new("/dev/tty").unwrap();
+            let dev = libc::open(tty_path.as_ptr(), libc::O_RDWR);
+            if dev >= 0 {
+                writeln!(f, "/dev/tty opened, isatty={}", libc::isatty(dev)).ok();
+                libc::close(dev);
+            } else {
+                writeln!(f, "/dev/tty failed: {}", std::io::Error::last_os_error()).ok();
+            }
+        }
+    }
+    
+    // Initialize terminal with retry logic (handles tmux PTY race)
+    let mut last_err = String::new();
+    for attempt in 0..20 {
+        match enable_raw_mode() {
+            Ok(()) => {
+                if let Some(ref mut f) = log {
+                    writeln!(f, "Raw mode enabled on attempt {}", attempt + 1).ok();
+                }
+                break;
+            }
+            Err(e) => {
+                last_err = format!("{}", e);
+                if let Some(ref mut f) = log {
+                    writeln!(f, "Attempt {} failed: {}", attempt + 1, e).ok();
+                }
+                if attempt < 19 {
+                    std::thread::sleep(Duration::from_millis(200));
+                } else {
+                    if let Some(ref mut f) = log {
+                        writeln!(f, "All 20 attempts failed, giving up").ok();
+                    }
+                    return Err(anyhow::anyhow!("Failed to enable raw mode after 20 attempts: {}", last_err));
+                }
+            }
+        }
+    }
+    
+    if let Some(ref mut f) = log {
+        writeln!(f, "Raw mode enabled").ok();
+    }
+    
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    if let Err(e) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
+        if let Some(ref mut f) = log {
+            writeln!(f, "Failed to enter alternate screen: {}", e).ok();
+        }
+        return Err(anyhow::anyhow!("Failed to enter alternate screen: {}", e));
+    }
+    
+    if let Some(ref mut f) = log {
+        writeln!(f, "Alternate screen entered").ok();
+    }
+    
     let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = match Terminal::new(backend) {
+        Ok(t) => t,
+        Err(e) => {
+            if let Some(ref mut f) = log {
+                writeln!(f, "Failed to create terminal: {}", e).ok();
+            }
+            return Err(anyhow::anyhow!("Failed to create terminal: {}", e));
+        }
+    };
+    
+    if let Some(ref mut f) = log {
+        writeln!(f, "Terminal created, starting main loop").ok();
+    }
 
     let state = Arc::new(Mutex::new(SequencerState::default()));
     let state_clone = Arc::clone(&state);
@@ -265,17 +316,22 @@ pub fn run(_instance: usize) -> Result<()> {
     });
 
     let mut input_mode = String::from("normal");
-    let mut pending_g = false;
     let mut input_buffer = String::new();
+    let mut pending_g = false;
 
     loop {
         let current_state = state.lock().unwrap().clone();
-        draw_ui(&mut terminal, &current_state, &input_mode)?;
+        draw_ui(&mut terminal, &current_state, &input_mode, &input_buffer)?;
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc if input_mode == "normal" => break,
+                    KeyCode::Char(' ') if input_mode == "normal" => {
+                        let mut s = state.lock().unwrap();
+                        let sel = s.selected;
+                        s.steps[sel].active = !s.steps[sel].active;
+                    }
                     KeyCode::Char('p') if input_mode == "normal" => {
                         let mut s = state.lock().unwrap();
                         s.playing = !s.playing;
@@ -283,11 +339,6 @@ pub fn run(_instance: usize) -> Result<()> {
                     KeyCode::Char('s') if input_mode == "normal" => {
                         let mut s = state.lock().unwrap();
                         s.playing = false;
-                    }
-                    KeyCode::Char(' ') if input_mode == "normal" => {
-                        let mut s = state.lock().unwrap();
-                        let sel = s.selected;
-                        s.steps[sel].active = !s.steps[sel].active;
                     }
                     KeyCode::Char('l') | KeyCode::Right if input_mode == "normal" => {
                         let mut s = state.lock().unwrap();
@@ -349,59 +400,15 @@ pub fn run(_instance: usize) -> Result<()> {
                     KeyCode::Char(c) if input_mode != "normal" => {
                         if c.is_ascii_digit() || c == '.' {
                             input_buffer.push(c);
-                        } else if c == '\n' || c == '\r' {
-                            // Apply input
-                            let mut s = state.lock().unwrap();
-                            match input_mode.as_str() {
-                                "note" => {
-                                    if let Ok(note) = input_buffer.parse::<u8>() {
-                                        let sel = s.selected;
-                                        s.steps[sel].note = note.clamp(0, 127);
-                                    }
-                                }
-                                "bpm" => {
-                                    if let Ok(bpm) = input_buffer.parse::<f64>() {
-                                        s.bpm = bpm.clamp(20.0, 300.0);
-                                    }
-                                }
-                                "euclidean" => {
-                                    if let Ok(pulses) = input_buffer.parse::<usize>() {
-                                        let pulses = pulses.min(NUM_STEPS);
-                                        // Euclidean rhythm algorithm
-                                        let mut pattern = vec![false; NUM_STEPS];
-                                        if pulses > 0 {
-                                            let mut bucket = 0usize;
-                                            for i in 0..NUM_STEPS {
-                                                bucket += pulses;
-                                                if bucket >= NUM_STEPS {
-                                                    bucket -= NUM_STEPS;
-                                                    pattern[i] = true;
-                                                }
-                                            }
-                                        }
-                                        for (i, step) in s.steps.iter_mut().enumerate() {
-                                            step.active = pattern[i];
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                            input_mode = String::from("normal");
-                            input_buffer.clear();
-                        } else if c == '\x1b' {
-                            // Escape cancels input
-                            input_mode = String::from("normal");
-                            input_buffer.clear();
                         }
                     }
                     KeyCode::Enter if input_mode != "normal" => {
-                        // Apply input
                         let mut s = state.lock().unwrap();
                         match input_mode.as_str() {
                             "note" => {
                                 if let Ok(note) = input_buffer.parse::<u8>() {
-                                        let sel = s.selected;
-                                        s.steps[sel].note = note.clamp(0, 127);
+                                    let sel = s.selected;
+                                    s.steps[sel].note = note.clamp(0, 127);
                                 }
                             }
                             "bpm" => {
@@ -430,6 +437,10 @@ pub fn run(_instance: usize) -> Result<()> {
                             }
                             _ => {}
                         }
+                        input_mode = String::from("normal");
+                        input_buffer.clear();
+                    }
+                    KeyCode::Esc if input_mode != "normal" => {
                         input_mode = String::from("normal");
                         input_buffer.clear();
                     }
