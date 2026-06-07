@@ -2,6 +2,7 @@ use std::io;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+#[allow(dead_code)]
 fn shell_escape(s: &str) -> String {
     // Simple escaping: wrap in single quotes, escape embedded single quotes
     if s.contains('\'') {
@@ -266,6 +267,78 @@ pub fn load_session(state_path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Reload module panes and layout from a saved state file without
+/// killing the conductor (which lives in the "conductor" window).
+fn reload_modules_from_state(state_path: &std::path::Path) -> Result<()> {
+    // Read the state file
+    let st = state::from_toml_file::<state::SessionState>(state_path)?;
+
+    // Kill the existing modules window (all module panes), keeping conductor
+    let _ = tmux_cmd(&["kill-window", "-t", "los:modules"]);
+
+    // Write module state files from the loaded session
+    let module_windows: Vec<&state::WindowState> = st.windows.iter()
+        .filter(|w| w.name != "conductor")
+        .collect();
+
+    for win in &module_windows {
+        for pane in &win.panes {
+            if let Some(ref inline) = pane.patch_inline {
+                let path = state::module_state_path(&pane.module, pane.instance);
+                let toml_str = toml::to_string_pretty(inline)
+                    .context("serializing module params")?;
+                state::write_state_file(&path, &toml_str)?;
+            }
+        }
+    }
+
+    // Build module list for spawning with real labels
+    let all_panes: Vec<(String, String)> = module_windows.iter()
+        .flat_map(|w| w.panes.iter())
+        .map(|p| {
+            let label = p.module.chars().next().unwrap().to_uppercase().to_string() + &p.module[1..];
+            (p.module.clone(), label)
+        })
+        .collect();
+    let all_panes_ref: Vec<(&str, &str)> = all_panes.iter()
+        .map(|(m, l)| (m.as_str(), l.as_str()))
+        .collect();
+
+    if !all_panes_ref.is_empty() {
+        spawn_session_panes(&all_panes_ref)?;
+    }
+
+    // Count actual panes after spawning and clamp active_pane
+    let actual_pane_count = list_session_panes("los", "modules")?.len();
+    let clamped_active = |saved: usize| -> usize {
+        saved.min(actual_pane_count.saturating_sub(1))
+    };
+
+    // Apply saved layout if present, fall back to tiled on failure
+    let mut layout_applied = false;
+    for win in &st.windows {
+        if win.name == "modules" && !win.layout.is_empty() {
+            match tmux_cmd(&["select-layout", "-t", "los:modules", &win.layout]) {
+                Ok(_) => layout_applied = true,
+                Err(e) => eprintln!("[reload] layout failed ({}), falling back to tiled", e),
+            }
+        }
+    }
+    if !layout_applied {
+        tmux_cmd_ok(&["select-layout", "-t", "los:modules", "tiled"]);
+    }
+
+    // Restore active pane
+    for win in &st.windows {
+        if win.name == "modules" {
+            let pane_idx = clamped_active(win.active_pane);
+            tmux_cmd_ok(&["select-pane", "-t", &format!("los:modules.{}", pane_idx)]);
+        }
+    }
+
+    Ok(())
+}
+
 // ── conductor TUI ───────────────────────────────────────────────────────────
 
 pub fn run_conductor() -> Result<()> {
@@ -437,31 +510,12 @@ pub fn run_conductor() -> Result<()> {
                         
                     }
                     KeyCode::Char('l') if selected < entries.len() => {
-                        // Full session reload: spawn a detached process that will
-                        // recreate the tmux session after this conductor exits.
+                        // Full module reload while keeping the conductor alive.
                         let path = state::states_dir().join(&entries[selected]);
-                        let path_str = path.to_string_lossy().to_string();
-
-                        // Write reload marker so the helper knows what to load
-                        let marker = state::tmp_dir().join(".reload_request");
-                        let _ = std::fs::write(&marker, &path_str);
-
-                        // Spawn a detached shell that waits for the old tmux session
-                        // to die, then runs `los load <path>` to create the new one.
-                        let script = format!(
-                            "while tmux has-session -t los 2>/dev/null; do sleep 0.2; done; {} load {}",
-                            exe_path().unwrap_or_else(|_| "los".into()),
-                            shell_escape(&path_str)
-                        );
-                        let _ = Command::new("sh")
-                            .args(["-c", &script])
-                            .stdin(Stdio::null())
-                            .stdout(Stdio::null())
-                            .stderr(Stdio::null())
-                            .spawn();
-
-                        // Exit the conductor so tmux session can be killed/recreated
-                        return Ok(());
+                        if let Err(e) = reload_modules_from_state(&path) {
+                            eprintln!("[conductor] reload failed: {}", e);
+                        }
+                        needs_refresh = true;
                     }
                     KeyCode::Char('d') if selected < entries.len() => {
                         // Delete selected state
