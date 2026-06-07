@@ -198,7 +198,7 @@ pub fn load_session(state_path: &str) -> Result<()> {
     Command::new("tmux")
         .args(["select-window", "-t", &format!("los:{}", active_win)])
         .output()?;
-    let pane_idx = st.tmux.active_pane.unwrap_or(0);
+    let pane_idx = st.tmux.active_pane;
     Command::new("tmux")
         .args(["select-pane", "-t", &format!("los:{}.{}", active_win, pane_idx)])
         .output()?;
@@ -365,7 +365,8 @@ pub fn run_conductor() -> Result<()> {
                                     .find(|l| l.starts_with('1'))
                                     .and_then(|l| l.split_whitespace().nth(1))
                                     .and_then(|idx| idx.parse::<i64>().ok())
-                            });
+                            })
+                            .unwrap_or(0);
                         
                         let session_state = state::SessionState {
                             meta: state::Meta {

@@ -114,7 +114,7 @@ pub struct TmuxState {
     #[serde(default = "default_window_size")]
     pub window_size: String,
     #[serde(default)]
-    pub active_pane: Option<i64>,
+    pub active_pane: i64,
 }
 
 fn default_session_name() -> String { "los".into() }
@@ -126,7 +126,7 @@ impl Default for TmuxState {
             session_name: default_session_name(),
             active_window: String::new(),
             window_size: default_window_size(),
-            active_pane: None,
+            active_pane: 0,
         }
     }
 }
