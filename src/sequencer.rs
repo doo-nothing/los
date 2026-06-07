@@ -503,28 +503,25 @@ pub fn run(instance: usize) -> Result<()> {
         if let Some(bpm) = params.bpm { s.bpm = bpm; }
         if let Some(playing) = params.playing { s.playing = playing; }
         if !params.tracks.is_empty() {
-            for (ti, tp) in params.tracks.iter().enumerate() {
-                if ti >= s.tracks.len() {
-                    s.tracks.push(Track {
-                        steps: vec![Step::default(); NUM_STEPS],
-                        length: tp.length.unwrap_or(16),
-                        pulses: tp.pulses.unwrap_or(5),
-                        rotation: tp.rotation.unwrap_or(0),
-                        muted: tp.muted,
-                        mode: tp.mode,
-                    });
-                    s.current_steps.push(0);
-                    s.last_notes.push(None);
+            // Rebuild tracks from saved state exactly — clear defaults first
+            s.tracks.clear();
+            s.current_steps.clear();
+            s.last_notes.clear();
+            for tp in &params.tracks {
+                let mut steps = vec![Step::default(); NUM_STEPS];
+                for (i, step) in tp.steps.iter().enumerate().take(steps.len()) {
+                    steps[i] = Step { active: step.active, note: step.note, velocity: step.velocity, mod_value: step.mod_value };
                 }
-                let trk = &mut s.tracks[ti];
-                if let Some(l) = tp.length { trk.length = l; }
-                if let Some(p) = tp.pulses { trk.pulses = p; }
-                if let Some(r) = tp.rotation { trk.rotation = r; }
-                trk.muted = tp.muted;
-                trk.mode = tp.mode;
-                for (i, step) in tp.steps.iter().enumerate().take(trk.steps.len()) {
-                    trk.steps[i] = Step { active: step.active, note: step.note, velocity: step.velocity, mod_value: step.mod_value };
-                }
+                s.tracks.push(Track {
+                    steps,
+                    length: tp.length.unwrap_or(16),
+                    pulses: tp.pulses.unwrap_or(5),
+                    rotation: tp.rotation.unwrap_or(0),
+                    muted: tp.muted,
+                    mode: tp.mode,
+                });
+                s.current_steps.push(0);
+                s.last_notes.push(None);
             }
         } else {
             // Fallback: load flat fields into first track
@@ -597,14 +594,26 @@ pub fn run(instance: usize) -> Result<()> {
                 if let Some(bpm) = params.bpm { s.bpm = bpm; }
                 if let Some(playing) = params.playing { s.playing = playing; }
                 if !params.tracks.is_empty() {
-                    let ti = 0;
-                    let trk = &mut s.tracks[ti];
-                    if let Some(l) = params.tracks[0].length { trk.length = l; }
-                    if let Some(p) = params.tracks[0].pulses { trk.pulses = p; }
-                    if let Some(r) = params.tracks[0].rotation { trk.rotation = r; }
-                    for (i, step) in params.tracks[0].steps.iter().enumerate().take(trk.steps.len()) {
-                        trk.steps[i] = Step { active: step.active, note: step.note, velocity: step.velocity, mod_value: step.mod_value };
+                    s.tracks.clear();
+                    s.current_steps.clear();
+                    s.last_notes.clear();
+                    for tp in &params.tracks {
+                        let mut steps = vec![Step::default(); NUM_STEPS];
+                        for (i, step) in tp.steps.iter().enumerate().take(steps.len()) {
+                            steps[i] = Step { active: step.active, note: step.note, velocity: step.velocity, mod_value: step.mod_value };
+                        }
+                        s.tracks.push(Track {
+                            steps,
+                            length: tp.length.unwrap_or(16),
+                            pulses: tp.pulses.unwrap_or(5),
+                            rotation: tp.rotation.unwrap_or(0),
+                            muted: tp.muted,
+                            mode: tp.mode,
+                        });
+                        s.current_steps.push(0);
+                        s.last_notes.push(None);
                     }
+                    s.current_track = s.current_track.min(s.tracks.len().saturating_sub(1));
                 }
             }
         }

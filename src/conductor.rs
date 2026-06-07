@@ -45,6 +45,26 @@ fn list_session_panes(session: &str, window: &str) -> Result<Vec<(usize, String)
     Ok(panes)
 }
 
+fn get_window_layout(session: &str, window: &str) -> Result<String> {
+    let output = Command::new("tmux")
+        .args(["display-message", "-p", "-t", &format!("{}:{}", session, window), "#{window_layout}"])
+        .output()?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn get_active_pane_index(session: &str, window: &str) -> Result<usize> {
+    let output = Command::new("tmux")
+        .args(["list-panes", "-t", &format!("{}:{}", session, window), "-F", "#{pane_index} #{pane_active}"])
+        .output()?;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut parts = line.split_whitespace();
+        if let (Some(idx), Some("1")) = (parts.next(), parts.next()) {
+            return idx.parse().context("invalid pane index");
+        }
+    }
+    Ok(0)
+}
+
 fn spawn_session_panes(panes_data: &[(&str, &str)]) -> Result<()> {
     let session = "los";
     let win = "modules";
@@ -179,14 +199,33 @@ pub fn load_session(state_path: &str) -> Result<()> {
     if !all_panes.is_empty() {
         spawn_session_panes(&all_panes)?;
     }
-    
+
+    // Apply saved layout if present
+    for win in &st.windows {
+        if win.name == "modules" && !win.layout.is_empty() {
+            let _ = Command::new("tmux")
+                .args(["select-layout", "-t", "los:modules", &win.layout])
+                .output();
+        }
+    }
+
     // Apply tmux settings from state
     if !st.tmux.window_size.is_empty() {
         let _ = Command::new("tmux")
             .args(["set-option", "-t", "los:modules", "window-size", &st.tmux.window_size])
             .output();
     }
-    
+
+    // Restore active pane
+    for win in &st.windows {
+        if win.name == "modules" {
+            let pane_idx = win.active_pane;
+            let _ = Command::new("tmux")
+                .args(["select-pane", "-t", &format!("los:modules.{}", pane_idx)])
+                .output();
+        }
+    }
+
     // Attach (modules window already active from spawn_session_panes)
     Command::new("tmux")
         .args(["attach-session", "-t", "los"])
@@ -330,6 +369,10 @@ pub fn run_conductor() -> Result<()> {
                             });
                         }
                         
+                        // Capture current tmux layout and active pane
+                        let layout = get_window_layout("los", "modules").unwrap_or_default();
+                        let active_pane = get_active_pane_index("los", "modules").unwrap_or(0);
+
                         // Prompt for filename
                         let now = chrono_or_fallback();
                         let default_name = format!("session-{}", now);
@@ -339,7 +382,7 @@ pub fn run_conductor() -> Result<()> {
                             format!("{}.toml", default_name)
                         };
                         let save_path = state::states_dir().join(&filename);
-                        
+
                         let session_state = state::SessionState {
                             meta: state::Meta {
                                 name: filename.trim_end_matches(".toml").to_string(),
@@ -348,7 +391,8 @@ pub fn run_conductor() -> Result<()> {
                             tmux: state::TmuxState::default(),
                             windows: vec![state::WindowState {
                                 name: "modules".into(),
-                                layout: "tiled".into(),
+                                layout,
+                                active_pane,
                                 panes,
                             }],
                         };

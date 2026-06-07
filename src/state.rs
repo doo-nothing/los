@@ -134,6 +134,8 @@ pub struct WindowState {
     #[serde(default)]
     pub layout: String,
     #[serde(default)]
+    pub active_pane: usize,
+    #[serde(default)]
     pub panes: Vec<PaneState>,
 }
 
