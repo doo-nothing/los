@@ -301,6 +301,7 @@ fn draw_ui(
 pub fn run(instance: usize) -> Result<()> {
     // Initialize terminal with retry logic (handles tmux PTY race)
     state::setup_save_signal();
+    state::setup_reload_signal();
     state::write_pid_file("voice", instance);
     let mut last_err = String::new();
     for attempt in 0..20 {
@@ -363,6 +364,20 @@ pub fn run(instance: usize) -> Result<()> {
             };
             drop(s);
             let _ = state::save_module_state("voice", 0, &params);
+        }
+        
+        // Check for reload-on-signal
+        if state::check_reload_signal() {
+            if let Ok(params) = state::load_module_state::<state::VoiceParams>("voice", instance) {
+                let mut s = state.lock().unwrap();
+                if let Some(v) = params.shape { s.shape = v; }
+                if let Some(v) = params.sub { s.sub = v; }
+                if let Some(v) = params.fm { s.fm = v; }
+                if let Some(v) = params.output { s.output = v; }
+                if let Some(v) = params.freq { s.freq = v; }
+                if let Some(v) = params.gate { s.gate = v; }
+                if let Some(v) = params.level { s.level = v; }
+            }
         }
         
         let current_state = state.lock().unwrap().clone();

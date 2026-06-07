@@ -363,17 +363,34 @@ pub fn run_conductor() -> Result<()> {
                         
                     }
                     KeyCode::Char('l') => {
-                        // Load selected state
+                        // Load selected state: write module state files, send SIGUSR2
                         if selected < entries.len() {
-                            let filename = &entries[selected];
-                            let full_path = state::states_dir().join(filename);
+                            let path = state::states_dir().join(&entries[selected]);
                             
-                            // Print load command and exit (user runs it from terminal)
-                            drop(terminal);
-                            disable_raw_mode()?;
-                            let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
-                            println!("\nTo load '{}', run:\n  los load {}\n", filename, full_path.display());
-                            return Ok(());
+                            // Read the saved state file
+                            if let Ok(st) = state::from_toml_file::<state::SessionState>(&path) {
+                                // Write module state files from the loaded session
+                                for win in &st.windows {
+                                    for pane in &win.panes {
+                                        if let Some(ref inline) = pane.patch_inline {
+                                            let filepath = state::module_state_path(&pane.module, pane.instance);
+                                            let toml_str = toml::to_string_pretty(inline)
+                                                .unwrap_or_default();
+                                            let _ = state::write_state_file(&filepath, &toml_str);
+                                        }
+                                    }
+                                }
+                                
+                                // Send SIGUSR2 to all module processes to trigger reload
+                                let modules = ["sequencer", "voice", "mixer", "scope"];
+                                for mod_name in &modules {
+                                    if let Some(pid) = state::read_pid_file(mod_name, 0) {
+                                        state::send_reload_signal(pid);
+                                    }
+                                }
+                                
+                                needs_refresh = true;
+                            }
                         }
                     }
                     KeyCode::Char('d') => {

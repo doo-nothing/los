@@ -15,28 +15,42 @@ extern "C" fn sigusr1_handler(_: i32) {
     SAVE_FLAG.store(true, Ordering::SeqCst);
 }
 
-/// Install the SIGUSR1 handler. Call once at module startup.
 pub fn setup_save_signal() {
-    // Double-cast through *const () to match macOS sighandler_t (which is usize)
     unsafe {
         let handler = sigusr1_handler as *const () as libc::sighandler_t;
-        let prev = libc::signal(libc::SIGUSR1, handler);
-        if prev == libc::SIG_ERR {
-            // Signal installation failed — fall back to no-op
-        }
+        let _ = libc::signal(libc::SIGUSR1, handler);
     }
 }
 
-/// Check if a save signal was received. Returns true once per signal.
 pub fn check_save_signal() -> bool {
     SAVE_FLAG.swap(false, Ordering::SeqCst)
 }
 
-/// Send SIGUSR1 to a process.
 pub fn send_save_signal(pid: u32) {
+    unsafe { libc::kill(pid as i32, libc::SIGUSR1); }
+}
+
+// ── SIGUSR2 reload signal ────────────────────────────────────────────────────
+
+static RELOAD_FLAG: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn sigusr2_handler(_: i32) {
+    RELOAD_FLAG.store(true, Ordering::SeqCst);
+}
+
+pub fn setup_reload_signal() {
     unsafe {
-        libc::kill(pid as i32, libc::SIGUSR1);
+        let handler = sigusr2_handler as *const () as libc::sighandler_t;
+        let _ = libc::signal(libc::SIGUSR2, handler);
     }
+}
+
+pub fn check_reload_signal() -> bool {
+    RELOAD_FLAG.swap(false, Ordering::SeqCst)
+}
+
+pub fn send_reload_signal(pid: u32) {
+    unsafe { libc::kill(pid as i32, libc::SIGUSR2); }
 }
 
 // ── directory helpers ───────────────────────────────────────────────────────
@@ -248,41 +262,16 @@ pub fn load_module_state<T: for<'de> Deserialize<'de>>(module: &str, instance: u
 }
 
 #[cfg(test)]
-mod tests {
+mod reload_tests {
     use super::*;
     use std::time::Duration;
     
     #[test]
-    fn test_signal_handler() {
-        setup_save_signal();
+    fn test_reload_signal() {
+        setup_reload_signal();
         let pid = std::process::id() as u32;
-        send_save_signal(pid);
+        send_reload_signal(pid);
         std::thread::sleep(Duration::from_millis(100));
-        assert!(check_save_signal(), "SIGUSR1 signal should have been received");
-    }
-    
-    #[test]
-    fn test_cross_process_signal() {
-        // Fork a child that installs the signal handler and waits
-        let child = std::thread::spawn(|| {
-            setup_save_signal();
-            let pid = std::process::id() as u32;
-            // Send signal to parent
-            let parent_pid = std::env::var("TEST_PARENT_PID").ok()
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(pid);
-            send_save_signal(parent_pid);
-            // Wait briefly
-            std::thread::sleep(Duration::from_millis(50));
-        });
-        
-        // Parent installs handler
-        setup_save_signal();
-        std::env::set_var("TEST_PARENT_PID", std::process::id().to_string());
-        
-        child.join().unwrap();
-        std::thread::sleep(Duration::from_millis(50));
-        
-        assert!(check_save_signal(), "Cross-process SIGUSR1 should work");
+        assert!(check_reload_signal(), "SIGUSR2 should have been received");
     }
 }

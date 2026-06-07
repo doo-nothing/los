@@ -199,6 +199,7 @@ fn draw_ui(
 pub fn run(instance: usize) -> Result<()> {
     // Initialize terminal with retry logic (handles tmux PTY race)
     state::setup_save_signal();
+    state::setup_reload_signal();
     state::write_pid_file("scope", instance);
     let mut last_err = String::new();
     for attempt in 0..20 {
@@ -254,6 +255,17 @@ pub fn run(instance: usize) -> Result<()> {
             };
             drop(s);
             let _ = state::save_module_state("scope", instance, &params);
+        }
+        
+        // Check for reload-on-signal
+        if state::check_reload_signal() {
+            if let Ok(params) = state::load_module_state::<state::ScopeParams>("scope", instance) {
+                let mut s = state.lock().unwrap();
+                if let Some(v) = params.mode { s.mode = v; }
+                if let Some(v) = params.channel { s.channel = v; }
+                if let Some(v) = params.zoom { s.zoom = v; }
+                if let Some(v) = params.gain { s.gain = v; }
+            }
         }
         
         let current_state = state.lock().unwrap().clone();

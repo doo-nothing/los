@@ -322,6 +322,7 @@ pub fn run(instance: usize) -> Result<()> {
     
     // Setup SIGUSR1 handler for save-on-signal
     state::setup_save_signal();
+    state::setup_reload_signal();
     state::write_pid_file("sequencer", instance);
     
     let mut last_err = String::new();
@@ -425,6 +426,23 @@ pub fn run(instance: usize) -> Result<()> {
             };
             drop(s);
             let _ = state::save_module_state("sequencer", instance, &params);
+        }
+        
+        // Check for reload-on-signal
+        if state::check_reload_signal() {
+            if let Ok(params) = state::load_module_state::<state::SequencerParams>("sequencer", instance) {
+                let mut s = state.lock().unwrap();
+                if let Some(bpm) = params.bpm { s.bpm = bpm; }
+                if let Some(playing) = params.playing { s.playing = playing; }
+                if let Some(p) = params.euclidean_pulses { s.euclidean_pulses = p; }
+                if let Some(l) = params.euclidean_length { s.euclidean_length = l; }
+                if let Some(r) = params.euclidean_rotation { s.euclidean_rotation = r; }
+                if !params.steps.is_empty() {
+                    for (i, step) in params.steps.iter().enumerate().take(s.steps.len()) {
+                        s.steps[i] = Step { active: step.active, note: step.note, velocity: step.velocity };
+                    }
+                }
+            }
         }
         
         let current_state = state.lock().unwrap().clone();
