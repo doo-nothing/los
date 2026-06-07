@@ -356,11 +356,16 @@ pub fn run_conductor() -> Result<()> {
                         
                         // Capture active pane from modules window
                         let active_pane = Command::new("tmux")
-                            .args(["display-message", "-p", "-t", "los:modules", "#{pane_index}"])
+                            .args(["list-panes", "-t", "los:modules", "-F", "#{pane_active} #{pane_index}"])
                             .output()
                             .ok()
                             .and_then(|o| String::from_utf8(o.stdout).ok())
-                            .and_then(|s| s.trim().parse::<usize>().ok());
+                            .and_then(|s| {
+                                s.lines()
+                                    .find(|l| l.starts_with('1'))
+                                    .and_then(|l| l.split_whitespace().nth(1))
+                                    .and_then(|idx| idx.parse::<usize>().ok())
+                            });
                         
                         let session_state = state::SessionState {
                             meta: state::Meta {
