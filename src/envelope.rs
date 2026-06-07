@@ -122,6 +122,7 @@ struct EnvelopeState {
     params: Vec<ChannelParams>,
     current_channel: usize,
     gate: bool,
+    events_received: u64,
 }
 
 impl Default for EnvelopeState {
@@ -137,6 +138,7 @@ impl Default for EnvelopeState {
             params,
             current_channel: 0,
             gate: false,
+            events_received: 0,
         }
     }
 }
@@ -181,8 +183,10 @@ fn env_thread(
         let mut track_trigger: Option<u8> = None;
         let mut release_track: Option<u8> = None;
 
+        let mut event_count = 0u32;
         if let Some(ref mut ev) = events {
             while let Some(event) = ev.read_event() {
+                event_count += 1;
                 match event.event_type {
                     0 => { // note_on
                         track_trigger = Some(event.source);
@@ -200,6 +204,7 @@ fn env_thread(
         }
 
         let mut s = state.lock().unwrap();
+        s.events_received += event_count as u64;
 
         // Process all channels
         let mut ch_outputs = [0.0f32; NUM_CHANNELS];
@@ -411,10 +416,11 @@ fn draw_ui(
         ];
 
         let mut content_lines = vec![
-            Line::from(format!("Channel {} | Loop: {} | Stage: {:?}",
+            Line::from(format!("Channel {} | Loop: {} | Stage: {:?} | Events: {}",
                 ch + 1,
                 if params.loop_mode { "ON" } else { "OFF" },
                 env_ch.stage,
+                state.events_received,
             )),
             Line::from(""),
         ];
