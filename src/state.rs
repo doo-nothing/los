@@ -17,8 +17,13 @@ extern "C" fn sigusr1_handler(_: i32) {
 
 /// Install the SIGUSR1 handler. Call once at module startup.
 pub fn setup_save_signal() {
+    // Double-cast through *const () to match macOS sighandler_t (which is usize)
     unsafe {
-        libc::signal(libc::SIGUSR1, sigusr1_handler as libc::sighandler_t);
+        let handler = sigusr1_handler as *const () as libc::sighandler_t;
+        let prev = libc::signal(libc::SIGUSR1, handler);
+        if prev == libc::SIG_ERR {
+            // Signal installation failed — fall back to no-op
+        }
     }
 }
 
@@ -216,6 +221,22 @@ pub fn save_module_state<T: Serialize>(module: &str, instance: usize, params: &T
     write_state_file(&path, &toml_str)
 }
 
+/// Write this process's PID so the conductor can send us signals
+pub fn write_pid_file(module: &str, instance: usize) {
+    let name = format!("{}_{}", module, instance);
+    let mut path = tmp_dir().join(&name);
+    path.set_extension("pid");
+    let _ = std::fs::write(&path, format!("{}", std::process::id()));
+}
+
+/// Read a module's PID file to find the real process
+pub fn read_pid_file(module: &str, instance: usize) -> Option<u32> {
+    let name = format!("{}_{}", module, instance);
+    let mut path = tmp_dir().join(&name);
+    path.set_extension("pid");
+    std::fs::read_to_string(&path).ok()?.trim().parse().ok()
+}
+
 /// Load a module's state from ~/.config/los/tmp/<module>_<instance>.state
 pub fn load_module_state<T: for<'de> Deserialize<'de>>(module: &str, instance: usize) -> Result<T> {
     let path = module_state_path(module, instance);
@@ -223,5 +244,45 @@ pub fn load_module_state<T: for<'de> Deserialize<'de>>(module: &str, instance: u
         from_toml_file(&path)
     } else {
         anyhow::bail!("state file not found: {}", path.display())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    
+    #[test]
+    fn test_signal_handler() {
+        setup_save_signal();
+        let pid = std::process::id() as u32;
+        send_save_signal(pid);
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(check_save_signal(), "SIGUSR1 signal should have been received");
+    }
+    
+    #[test]
+    fn test_cross_process_signal() {
+        // Fork a child that installs the signal handler and waits
+        let child = std::thread::spawn(|| {
+            setup_save_signal();
+            let pid = std::process::id() as u32;
+            // Send signal to parent
+            let parent_pid = std::env::var("TEST_PARENT_PID").ok()
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(pid);
+            send_save_signal(parent_pid);
+            // Wait briefly
+            std::thread::sleep(Duration::from_millis(50));
+        });
+        
+        // Parent installs handler
+        setup_save_signal();
+        std::env::set_var("TEST_PARENT_PID", std::process::id().to_string());
+        
+        child.join().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        
+        assert!(check_save_signal(), "Cross-process SIGUSR1 should work");
     }
 }

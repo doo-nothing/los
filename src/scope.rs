@@ -199,6 +199,7 @@ fn draw_ui(
 pub fn run(instance: usize) -> Result<()> {
     // Initialize terminal with retry logic (handles tmux PTY race)
     state::setup_save_signal();
+    state::write_pid_file("scope", instance);
     let mut last_err = String::new();
     for attempt in 0..20 {
         match enable_raw_mode() {

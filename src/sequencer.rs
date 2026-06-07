@@ -322,6 +322,7 @@ pub fn run(instance: usize) -> Result<()> {
     
     // Setup SIGUSR1 handler for save-on-signal
     state::setup_save_signal();
+    state::write_pid_file("sequencer", instance);
     
     let mut last_err = String::new();
     for attempt in 0..20 {

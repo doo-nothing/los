@@ -298,30 +298,28 @@ pub fn run_conductor() -> Result<()> {
                         // Save: send SIGUSR1 to all module processes, then collect
                         let modules = ["sequencer", "voice", "mixer", "scope"];
                         
-                        // Get PIDs of all module panes
-                        if let Ok(output) = Command::new("tmux")
-                            .args(&["list-panes", "-t", "los:modules", "-F", "#{pane_pid}"])
-                            .output()
-                        {
-                            let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
-                                .lines()
-                                .filter_map(|l| l.trim().parse().ok())
-                                .collect();
-                            
-                            // Send SIGUSR1 to all module processes
-                            for pid in &pids {
-                                state::send_save_signal(*pid);
+                        // Read module PIDs from their pid files (written at startup)
+                        let mut pids = Vec::new();
+                        for mod_name in &modules {
+                            if let Some(pid) = state::read_pid_file(mod_name, 0) {
+                                pids.push(pid);
                             }
-                            
-                            // Wait for modules to write their state files
-                            std::thread::sleep(Duration::from_millis(500));
                         }
+                        
+                        // Send SIGUSR1 to all module processes
+                        for pid in &pids {
+                            let _ = state::send_save_signal(*pid);
+                        }
+                        
+                        // Wait for modules to write their state files
+                        std::thread::sleep(Duration::from_millis(500));
                         
                         // Collect module state files from tmp
                         let mut panes = Vec::new();
                         for mod_name in modules.iter() {
                             let path = state::module_state_path(mod_name, 0);
-                            let inline = if path.exists() {
+                            let exists = path.exists();
+                            let inline = if exists {
                                 std::fs::read_to_string(&path)
                                     .ok()
                                     .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
