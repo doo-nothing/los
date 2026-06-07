@@ -208,7 +208,8 @@ fn euclidean_apply(steps: &mut [Step], pulses: usize, length: usize, rotation: u
 fn draw_ui(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &SequencerState,
-    input_mode: &str,
+    mode: &str,
+    submode: &str,
     input_buffer: &str,
     show_help: bool,
 ) -> Result<()> {
@@ -218,21 +219,27 @@ fn draw_ui(
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),  // Track tabs
+                Constraint::Length(1),  // Track bar
                 Constraint::Length(1),  // Status line
                 Constraint::Length(3),  // Step grid
                 Constraint::Length(1),  // Note display
+                Constraint::Length(1),  // Command bar
                 Constraint::Min(0),     // Help or empty
             ])
             .split(area);
 
-        // Track tabs
+        // Track bar: │ 1  │*2  │ 3m │
         let mut tabs = String::new();
         for (i, t) in state.tracks.iter().enumerate() {
-            let sel = if i == state.current_track { "*" } else { " " };
-            let m = if t.muted { "m" } else { "" };
-            tabs.push_str(&format!("│{}{}{}│", sel, i + 1, m));
+            if i == state.current_track {
+                tabs.push_str(&format!("│▶{}", i + 1));
+            } else if t.muted {
+                tabs.push_str(&format!("│ {}m", i + 1));
+            } else {
+                tabs.push_str(&format!("│ {} ", i + 1));
+            }
         }
+        tabs.push('│');
         let tabs_widget = Paragraph::new(tabs)
             .style(Style::default().fg(Color::Cyan));
         f.render_widget(tabs_widget, chunks[0]);
@@ -242,10 +249,9 @@ fn draw_ui(
         let play_str = if state.playing { "▶" } else { "■" };
         let cstep = state.current_steps[state.current_track];
         let status = format!(
-            "{} {} BPM | Step {}/{} | Sel {} | P:{} L:{} R:{} | {}",
+            "{} {} BPM | Step {}/{} | Sel {} | P:{} L:{} R:{}",
             play_str, state.bpm as u32, cstep, len, state.selected,
             state.track().pulses, len, state.track().rotation,
-            input_mode
         );
         let status_widget = Paragraph::new(status)
             .style(Style::default().fg(Color::Cyan));
@@ -301,6 +307,25 @@ fn draw_ui(
         let note_widget = Paragraph::new(note_info)
             .style(Style::default().fg(Color::Yellow));
         f.render_widget(note_widget, chunks[3]);
+
+        // Command bar
+        let mode_style = if mode == "insert" {
+            Style::default().fg(Color::Green).bg(Color::Black)
+        } else {
+            Style::default().fg(Color::Cyan).bg(Color::Black)
+        };
+        let mode_label = if mode == "insert" {
+            if !submode.is_empty() {
+                format!(" INSERT [{}] ", submode)
+            } else {
+                " INSERT ".to_string()
+            }
+        } else {
+            " NORMAL ".to_string()
+        };
+        let cmd_bar = Paragraph::new(mode_label)
+            .style(mode_style);
+        f.render_widget(cmd_bar, chunks[4]);
 
         if show_help {
             let help_text = vec![
@@ -488,7 +513,8 @@ pub fn run(instance: usize) -> Result<()> {
         }
     });
 
-    let mut input_mode = String::from("normal");
+    let mut mode = String::from("normal");
+    let mut submode = String::new();
     let mut input_buffer = String::new();
     let mut pending_g = false;
     let mut pending_d = false;
@@ -544,7 +570,7 @@ pub fn run(instance: usize) -> Result<()> {
         }
         
         let current_state = state.lock().unwrap().clone();
-        draw_ui(&mut terminal, &current_state, &input_mode, &input_buffer, show_help)?;
+        draw_ui(&mut terminal, &current_state, &mode, &submode, &input_buffer, show_help)?;
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
@@ -575,10 +601,15 @@ pub fn run(instance: usize) -> Result<()> {
                     continue;
                 }
                 match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc if input_mode == "normal" => break,
+                                        KeyCode::Char('q') if mode == "normal" => break,
+                    KeyCode::Esc if mode == "insert" => {
+                        mode = String::from("normal");
+                        submode.clear();
+                    }
+                    KeyCode::Esc if mode == "normal" => break,
                     
                     // Digits accumulate into pending_count
-                    KeyCode::Char(c) if input_mode == "normal" && c.is_ascii_digit() => {
+                    KeyCode::Char(c) if mode == "insert" && c.is_ascii_digit() => {
                         if c == '0' && pending_count.is_none() {
                             let mut s = state.lock().unwrap();
                             s.selected = 0;
@@ -660,14 +691,14 @@ pub fn run(instance: usize) -> Result<()> {
                     }
                     
                     // Non-count commands (clear pending_count)
-                    KeyCode::Char('P') if input_mode == "normal" => {
+                    KeyCode::Char('P') if mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
                 let tidx = s.current_track;
                         let (p, l, r) = (s.track_mut().pulses, s.track_mut().length, s.track_mut().rotation);
                         euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
                     }
-                    KeyCode::Char('L') if input_mode == "normal" => {
+                    KeyCode::Char('L') if mode == "insert" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
                 let tidx = s.current_track;
@@ -675,7 +706,7 @@ pub fn run(instance: usize) -> Result<()> {
                         let (p, l, r) = (s.track_mut().pulses, s.track_mut().length, s.track_mut().rotation);
                         euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
                     }
-                    KeyCode::Char('R') if input_mode == "normal" => {
+                    KeyCode::Char('R') if mode == "insert" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
                 let tidx = s.current_track;
@@ -685,25 +716,30 @@ pub fn run(instance: usize) -> Result<()> {
                     }
                     
                     // Clear pending_count on any other action key
-                    KeyCode::Char(' ') if input_mode == "normal" => {
+                    KeyCode::Char(' ') if mode == "insert" => {
                         pending_count = None;
+                        let mut s = state.lock().unwrap();
+                        let tidx = s.current_track;
+                        s.playing = !s.playing;
+                    }
+                    KeyCode::Char(' ') if mode == "normal" => {
                         let mut s = state.lock().unwrap();
                         s.playing = !s.playing;
                     }
-                    KeyCode::Enter if input_mode == "normal" => {
+                    KeyCode::Enter if mode == "insert" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
                         let sel = s.selected;
                         s.track_mut().steps[sel].active = !s.track_mut().steps[sel].active;
                     }
-                    KeyCode::Char('x') if input_mode == "normal" => {
+                    KeyCode::Char('x') if mode == "insert" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
                         let sel = s.selected;
                         s.clipboard = Some(s.track_mut().steps[sel].clone());
                         s.track_mut().steps[sel].active = false;
                     }
-                    KeyCode::Char('p') if input_mode == "normal" => {
+                    KeyCode::Char('p') if mode == "insert" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
                         let sel = s.selected;
@@ -712,59 +748,63 @@ pub fn run(instance: usize) -> Result<()> {
                             s.track_mut().steps[sel].active = true;
                         }
                     }
-                    KeyCode::Char('k') if input_mode == "normal" => {
+                    KeyCode::Char('k') if mode == "insert" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
                         let sel = s.selected;
                         s.track_mut().steps[sel].note = (s.track_mut().steps[sel].note + 1).min(127);
                     }
-                    KeyCode::Char('j') if input_mode == "normal" => {
+                    KeyCode::Char('j') if mode == "insert" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
                         let sel = s.selected;
                         s.track_mut().steps[sel].note = s.track_mut().steps[sel].note.saturating_sub(1).max(0);
                     }
-                    KeyCode::Char('K') if input_mode == "normal" => {
+                    KeyCode::Char('K') if mode == "insert" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
                         let sel = s.selected;
                         s.track_mut().steps[sel].note = (s.track_mut().steps[sel].note + 12).min(127);
                     }
-                    KeyCode::Char('J') if input_mode == "normal" => {
+                    KeyCode::Char('J') if mode == "insert" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
                         let sel = s.selected;
                         s.track_mut().steps[sel].note = s.track_mut().steps[sel].note.saturating_sub(12).max(0);
                     }
-                    KeyCode::Char('s') if input_mode == "normal" => {
+                    KeyCode::Char('s') if mode == "normal" => {
+                        let mut s = state.lock().unwrap();
+                        s.playing = false;
+                    }
+                    KeyCode::Char('s') if mode == "insert" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
                         s.playing = false;
                     }
-                    KeyCode::Char('+') | KeyCode::Char('=') if input_mode == "normal" => {
+                    KeyCode::Char('+') | KeyCode::Char('=') if mode == "insert" => {
                         pending_count = None;
                     }
-                    KeyCode::Char('-') if input_mode == "normal" => {
+                    KeyCode::Char('-') if mode == "insert" => {
                         pending_count = None;
                     }
-                    KeyCode::Char('$') if input_mode == "normal" => {
+                    KeyCode::Char('$') if mode == "insert" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
                         s.selected = s.track_mut().length - 1;
                     }
-                    KeyCode::Char('l') | KeyCode::Right if input_mode == "normal" => {
+                    KeyCode::Char('l') | KeyCode::Right if mode == "insert" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
                         let len = s.track_mut().length;
                         s.selected = (s.selected + 1) % len;
                     }
-                    KeyCode::Char('h') | KeyCode::Left if input_mode == "normal" => {
+                    KeyCode::Char('h') | KeyCode::Left if mode == "insert" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
                         let len = s.track_mut().length;
                         s.selected = s.selected.saturating_sub(1).min(len - 1);
                     }
-                    KeyCode::Char('w') if input_mode == "normal" => {
+                    KeyCode::Char('w') if mode == "insert" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
                         let len = s.track_mut().length;
@@ -776,7 +816,7 @@ pub fn run(instance: usize) -> Result<()> {
                             }
                         }
                     }
-                    KeyCode::Char('b') if input_mode == "normal" => {
+                    KeyCode::Char('b') if mode == "insert" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
                         let len = s.track_mut().length;
@@ -788,7 +828,7 @@ pub fn run(instance: usize) -> Result<()> {
                             }
                         }
                     }
-                    KeyCode::Char('g') if input_mode == "normal" => {
+                    KeyCode::Char('g') if mode == "insert" => {
                         pending_count = None;
                         if pending_g {
                             let mut s = state.lock().unwrap();
@@ -798,18 +838,18 @@ pub fn run(instance: usize) -> Result<()> {
                             pending_g = true;
                         }
                     }
-                    KeyCode::Char('N') if input_mode == "normal" => {
+                    KeyCode::Char('N') if mode == "insert" => {
                         pending_count = None;
-                        input_mode = String::from("note");
+                        submode = String::from("note");
                         input_buffer.clear();
                     }
-                    KeyCode::Char('t') if input_mode == "normal" => {
+                    KeyCode::Char('t') if mode == "insert" => {
                         pending_count = None;
-                        input_mode = String::from("bpm");
+                        submode = String::from("bpm");
                         input_buffer.clear();
                     }
                     // Track switching
-                    KeyCode::Char('[') if input_mode == "normal" => {
+                    KeyCode::Char('[') if mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
                         if s.current_track > 0 {
@@ -817,7 +857,7 @@ pub fn run(instance: usize) -> Result<()> {
                         }
                         s.selected = 0;
                     }
-                    KeyCode::Char(']') if input_mode == "normal" => {
+                    KeyCode::Char(']') if mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
                         if s.current_track + 1 < s.tracks.len() {
@@ -825,7 +865,7 @@ pub fn run(instance: usize) -> Result<()> {
                         }
                         s.selected = 0;
                     }
-                    KeyCode::Char('n') if input_mode == "normal" => {
+                    KeyCode::Char('n') if mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
                         s.tracks.push(Track::new());
@@ -834,7 +874,7 @@ pub fn run(instance: usize) -> Result<()> {
                         s.current_track = s.tracks.len() - 1;
                         s.selected = 0;
                     }
-                    KeyCode::Char('d') if input_mode == "normal" => {
+                    KeyCode::Char('d') if mode == "normal" => {
                         if pending_d {
                             pending_d = false;
                             let mut s = state.lock().unwrap();
@@ -853,7 +893,7 @@ pub fn run(instance: usize) -> Result<()> {
                             pending_y = false;
                         }
                     }
-                    KeyCode::Char('y') if input_mode == "normal" => {
+                    KeyCode::Char('y') if mode == "normal" => {
                         if pending_y {
                             pending_y = false;
                             let mut s = state.lock().unwrap();
@@ -863,7 +903,7 @@ pub fn run(instance: usize) -> Result<()> {
                             pending_d = false;
                         }
                     }
-                    KeyCode::Char('P') if input_mode == "normal" => {
+                    KeyCode::Char('P') if mode == "normal" => {
                         pending_count = None;
                         pending_d = false;
                         pending_y = false;
@@ -878,24 +918,24 @@ pub fn run(instance: usize) -> Result<()> {
                             s.selected = 0;
                         }
                     }
-                    KeyCode::Char('m') if input_mode == "normal" => {
+                    KeyCode::Char('m') if mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
                         let tidx = s.current_track;
                         s.tracks[tidx].muted = !s.tracks[tidx].muted;
                     }
-                    KeyCode::Char('?') if input_mode == "normal" => {
+                    KeyCode::Char('?') if mode == "insert" => {
                         pending_count = None;
                         show_help = !show_help;
                     }
-                    KeyCode::Char(c) if input_mode != "normal" => {
+                    KeyCode::Char(c) if !submode.is_empty() => {
                         if c.is_ascii_digit() || c == '.' {
                             input_buffer.push(c);
                         }
                     }
-                    KeyCode::Enter if input_mode != "normal" => {
+                    KeyCode::Enter if !submode.is_empty() => {
                         let mut s = state.lock().unwrap();
-                        match input_mode.as_str() {
+                        match submode.as_str() {
                             "note" => {
                                 if let Ok(note) = input_buffer.parse::<u8>() {
                                     let sel = s.selected;
@@ -909,11 +949,11 @@ pub fn run(instance: usize) -> Result<()> {
                             }
                             _ => {}
                         }
-                        input_mode = String::from("normal");
+                        submode.clear();
                         input_buffer.clear();
                     }
-                    KeyCode::Esc if input_mode != "normal" => {
-                        input_mode = String::from("normal");
+                    KeyCode::Esc if !submode.is_empty() => {
+                        submode.clear();
                         input_buffer.clear();
                     }
                     
