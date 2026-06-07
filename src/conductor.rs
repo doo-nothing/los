@@ -485,7 +485,7 @@ pub fn run_conductor() -> Result<()> {
                         
                         // Capture current tmux layout and active pane
                         let layout = get_window_layout("los", "modules").unwrap_or_default();
-                        let active_pane = get_active_pane_index("los", "modules").unwrap_or(0);
+                        let active_pane = get_active_pane_index("los", "modules").unwrap_or(1);
 
                         // Prompt for filename
                         let now = chrono_or_fallback();
