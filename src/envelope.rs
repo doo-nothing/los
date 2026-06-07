@@ -215,7 +215,7 @@ fn env_thread(
                     triggers[i]
                 }
             } else {
-                triggers[i]
+                track_trigger.is_some() || triggers[i]
             };
 
             let should_release = if params.trigger_track >= 0 {
@@ -225,7 +225,7 @@ fn env_thread(
                     false
                 }
             } else {
-                false
+                release_track.is_some()
             };
 
             // Apply trigger/release
@@ -468,7 +468,7 @@ fn draw_ui(
                 Line::from(""),
                 Line::from("Actions:"),
                 Line::from("  t          Trigger envelope manually"),
-                Line::from("  @          Cycle track assignment for selected param"),
+                Line::from("  @#         Assign selected param to track # (1-8, 0=off)"),
                 Line::from("  c          Toggle cycle/loop mode"),
                 Line::from("  g          Toggle gate (sustain)"),
                 Line::from(""),
@@ -673,37 +673,20 @@ pub fn run(instance: usize) -> Result<()> {
                         s.channels[ch].eoc_fired = false;
                     }
                     KeyCode::Char('@') => {
-                        let mut s = state.lock().unwrap();
-                        let ch = s.current_channel;
-                        let max_track = crate::NUM_TRACKS as i32 - 1;
-                        let next_track = |cur: i32| -> i32 {
-                            match cur {
-                                -1 if max_track >= 0 => 0,
-                                x if x >= max_track => -1,
-                                x => x + 1,
-                            }
-                        };
-                        match selected {
-                            0 => { s.params[ch].rise_track = next_track(s.params[ch].rise_track); }
-                            1 => { s.params[ch].fall_track = next_track(s.params[ch].fall_track); }
-                            2 => { s.params[ch].shape_track = next_track(s.params[ch].shape_track); }
-                            3 => { s.params[ch].atten_track = next_track(s.params[ch].atten_track); }
-                            4 => { s.params[ch].trigger_track = next_track(s.params[ch].trigger_track); }
-                            _ => {}
-                        }
                         at_pending = true;
                     }
                     KeyCode::Char(d) if at_pending && d.is_ascii_digit() => {
                         let tnum = (d as u8 - b'0') as i32;
-                        if tnum >= 1 && tnum <= crate::NUM_TRACKS as i32 {
+                        let track = if tnum == 0 { -1 } else if tnum <= crate::NUM_TRACKS as i32 { tnum - 1 } else { -2 };
+                        if track != -2 {
                             let mut s = state.lock().unwrap();
                             let ch = s.current_channel;
                             match selected {
-                                0 => { s.params[ch].rise_track = tnum - 1; }
-                                1 => { s.params[ch].fall_track = tnum - 1; }
-                                2 => { s.params[ch].shape_track = tnum - 1; }
-                                3 => { s.params[ch].atten_track = tnum - 1; }
-                                4 => { s.params[ch].trigger_track = tnum - 1; }
+                                0 => { s.params[ch].rise_track = track; }
+                                1 => { s.params[ch].fall_track = track; }
+                                2 => { s.params[ch].shape_track = track; }
+                                3 => { s.params[ch].atten_track = track; }
+                                4 => { s.params[ch].trigger_track = track; }
                                 _ => {}
                             }
                         }

@@ -312,7 +312,7 @@ fn draw_ui(
                 Line::from("  3          Mix"),
                 Line::from(""),
                 Line::from("Track assignment:"),
-                Line::from("  @          Assign selected param to next track"),
+                Line::from("  @#         Assign selected param to track # (1-8, 0=off)"),
                 Line::from(""),
                 Line::from("  ?          Toggle this help"),
                 Line::from("  Close pane: tmux prefix + x"),
@@ -476,33 +476,18 @@ pub fn run(instance: usize) -> Result<()> {
                         }
                     }
                     KeyCode::Char('@') => {
-                        let mut s = state.lock().unwrap();
-                        let max_track = crate::NUM_TRACKS as i32 - 1;
-                        let next_track = |cur: i32| -> i32 {
-                            match cur {
-                                -1 if max_track >= 0 => 0,
-                                x if x >= max_track => -1,
-                                x => x + 1,
-                            }
-                        };
-                        match selected {
-                            0 => { s.shape_track = next_track(s.shape_track); }
-                            1 => { s.sub_track = next_track(s.sub_track); }
-                            2 => { s.fm_track = next_track(s.fm_track); }
-                            3 => { s.level_track = next_track(s.level_track); }
-                            _ => {}
-                        }
                         at_pending = true;
                     }
                     KeyCode::Char(d) if at_pending && d.is_ascii_digit() => {
                         let tnum = (d as u8 - b'0') as i32;
-                        if tnum >= 1 && tnum <= crate::NUM_TRACKS as i32 {
+                        let track = if tnum == 0 { -1 } else if tnum <= crate::NUM_TRACKS as i32 { tnum - 1 } else { -2 };
+                        if track != -2 {
                             let mut s = state.lock().unwrap();
                             match selected {
-                                0 => { s.shape_track = tnum - 1; }
-                                1 => { s.sub_track = tnum - 1; }
-                                2 => { s.fm_track = tnum - 1; }
-                                3 => { s.level_track = tnum - 1; }
+                                0 => { s.shape_track = track; }
+                                1 => { s.sub_track = track; }
+                                2 => { s.fm_track = track; }
+                                3 => { s.level_track = track; }
                                 _ => {}
                             }
                         }
