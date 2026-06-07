@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{self, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{enable_raw_mode, EnterAlternateScreen},
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -231,9 +231,9 @@ pub fn run(instance: usize) -> Result<()> {
     
     let state_clone = Arc::clone(&state);
 
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (_tx, rx) = std::sync::mpsc::channel();
 
-    let scope_handle = std::thread::spawn(move || {
+    let _scope_handle = std::thread::spawn(move || {
         if let Err(e) = scope_thread(state_clone, rx) {
             eprintln!("Scope thread error: {}", e);
         }
@@ -325,17 +325,4 @@ pub fn run(instance: usize) -> Result<()> {
             }
         }
     }
-
-    let _ = tx.send(());
-    scope_handle.join().unwrap();
-
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-
-    Ok(())
 }

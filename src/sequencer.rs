@@ -4,9 +4,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{self, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{enable_raw_mode, EnterAlternateScreen},
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -231,6 +231,7 @@ fn compact_track_row(track: &Track, track_idx: usize, current_track: usize, sele
     row
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_ui(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &SequencerState,
@@ -244,7 +245,7 @@ fn draw_ui(
 ) -> Result<()> {
     terminal.draw(|f| {
         let area = f.area();
-        let track_rows = state.tracks.len().min(6).max(1) as u16;
+        let track_rows = state.tracks.len().clamp(1, 6) as u16;
         
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -488,9 +489,9 @@ pub fn run(instance: usize) -> Result<()> {
     
     let state_clone = Arc::clone(&state);
 
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (_tx, rx) = std::sync::mpsc::channel();
 
-    let seq_handle = std::thread::spawn(move || {
+    let _seq_handle = std::thread::spawn(move || {
         if let Err(e) = sequencer_thread(state_clone, rx) {
             eprintln!("Sequencer thread error: {}", e);
         }
@@ -557,7 +558,7 @@ pub fn run(instance: usize) -> Result<()> {
         
         // Auto-execute gt on timeout (only when digits were collected)
         if let Some(ref target) = gt_target {
-            if gt_last_key.as_ref().map_or(false, |t| t.elapsed() > Duration::from_millis(300)) && !gt_input.is_empty() {
+            if gt_last_key.as_ref().is_some_and(|t| t.elapsed() > Duration::from_millis(300)) && !gt_input.is_empty() {
                 let mut s = state.lock().unwrap();
                 match target.as_str() {
                     "track" => {
@@ -1113,7 +1114,6 @@ pub fn run(instance: usize) -> Result<()> {
                         _ => {
                             pending_count = None;
                             pending_d = false;
-                            pending_g = false;
                             pending_y = false;
                             pending_g = false;
                         }
@@ -1233,17 +1233,4 @@ pub fn run(instance: usize) -> Result<()> {
             }
         }
     }
-
-    let _ = tx.send(());
-    seq_handle.join().unwrap();
-
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-
-    Ok(())
 }
