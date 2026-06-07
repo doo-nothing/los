@@ -215,13 +215,26 @@ fn draw_ui(
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),
-                Constraint::Length(3),
-                Constraint::Length(1),
-                Constraint::Min(0),
+                Constraint::Length(1),  // Track tabs
+                Constraint::Length(1),  // Status line
+                Constraint::Length(3),  // Step grid
+                Constraint::Length(1),  // Note display
+                Constraint::Min(0),     // Help or empty
             ])
             .split(area);
 
+        // Track tabs
+        let mut tabs = String::new();
+        for (i, t) in state.tracks.iter().enumerate() {
+            let sel = if i == state.current_track { "*" } else { " " };
+            let m = if t.muted { "m" } else { "" };
+            tabs.push_str(&format!("│{}{}{}│", sel, i + 1, m));
+        }
+        let tabs_widget = Paragraph::new(tabs)
+            .style(Style::default().fg(Color::Cyan));
+        f.render_widget(tabs_widget, chunks[0]);
+
+        // Status line
         let len = state.track().length;
         let play_str = if state.playing { "▶" } else { "■" };
         let cstep = state.current_steps[state.current_track];
@@ -233,7 +246,7 @@ fn draw_ui(
         );
         let status_widget = Paragraph::new(status)
             .style(Style::default().fg(Color::Cyan));
-        f.render_widget(status_widget, chunks[0]);
+        f.render_widget(status_widget, chunks[1]);
 
         let step_width = area.width as usize / len;
         let step_width = step_width.max(3).min(10);
@@ -244,7 +257,7 @@ fn draw_ui(
             let is_selected = i == state.selected;
 
             let x = (i * step_width) as u16;
-            let rect = Rect::new(x, chunks[1].y, step_width as u16, 3);
+            let rect = Rect::new(x, chunks[2].y, step_width as u16, 3);
 
             let (bg, fg, marker) = if is_current && is_selected {
                 (Color::Yellow, Color::Black, "▶")
@@ -284,7 +297,7 @@ fn draw_ui(
         );
         let note_widget = Paragraph::new(note_info)
             .style(Style::default().fg(Color::Yellow));
-        f.render_widget(note_widget, chunks[2]);
+        f.render_widget(note_widget, chunks[3]);
 
         if show_help {
             let help_text = vec![
@@ -298,13 +311,18 @@ fn draw_ui(
                 Line::from("  b          Previous active step"),
                 Line::from("  gg         Go to step 0"),
                 Line::from(""),
+                Line::from("Tracks:"),
+                Line::from("  n          New track"),
+                Line::from("  [ / ]      Previous/next track"),
+                Line::from("  m          Toggle mute track"),
+                Line::from(""),
                 Line::from("Editing:"),
                 Line::from("  Enter      Toggle step on/off"),
                 Line::from("  x          Delete step (copies to clipboard)"),
                 Line::from("  p          Paste step from clipboard"),
                 Line::from("  k/K        Raise note (semitone/octave)"),
                 Line::from("  j/J        Lower note (semitone/octave)"),
-                Line::from("  n<NUM>     Set note (e.g. n60 for C4)"),
+                Line::from("  N<NUM>     Set note (e.g. N60 for C4)"),
                 Line::from("  t<NUM>     Set BPM (e.g. t140)"),
                 Line::from(""),
                 Line::from("Euclidean:"),
@@ -470,6 +488,8 @@ pub fn run(instance: usize) -> Result<()> {
     let mut input_mode = String::from("normal");
     let mut input_buffer = String::new();
     let mut pending_g = false;
+    let mut pending_d = false;
+    let mut pending_y = false;
     let mut show_help = false;
     let mut pending_count: Option<String> = None;
 
@@ -774,7 +794,7 @@ pub fn run(instance: usize) -> Result<()> {
                             pending_g = true;
                         }
                     }
-                    KeyCode::Char('n') if input_mode == "normal" => {
+                    KeyCode::Char('N') if input_mode == "normal" => {
                         pending_count = None;
                         input_mode = String::from("note");
                         input_buffer.clear();
@@ -783,6 +803,82 @@ pub fn run(instance: usize) -> Result<()> {
                         pending_count = None;
                         input_mode = String::from("bpm");
                         input_buffer.clear();
+                    }
+                    // Track switching
+                    KeyCode::Char('[') if input_mode == "normal" => {
+                        pending_count = None;
+                        let mut s = state.lock().unwrap();
+                        if s.current_track > 0 {
+                            s.current_track -= 1;
+                        }
+                        s.selected = 0;
+                    }
+                    KeyCode::Char(']') if input_mode == "normal" => {
+                        pending_count = None;
+                        let mut s = state.lock().unwrap();
+                        if s.current_track + 1 < s.tracks.len() {
+                            s.current_track += 1;
+                        }
+                        s.selected = 0;
+                    }
+                    KeyCode::Char('n') if input_mode == "normal" => {
+                        pending_count = None;
+                        let mut s = state.lock().unwrap();
+                        s.tracks.push(Track::new());
+                        s.current_steps.push(0);
+                        s.last_notes.push(None);
+                        s.current_track = s.tracks.len() - 1;
+                        s.selected = 0;
+                    }
+                    KeyCode::Char('d') if input_mode == "normal" => {
+                        if pending_d {
+                            pending_d = false;
+                            let mut s = state.lock().unwrap();
+                            if s.tracks.len() > 1 {
+                                let was = s.current_track;
+                                s.track_clipboard = Some(s.tracks.remove(was));
+                                s.current_steps.remove(was);
+                                s.last_notes.remove(was);
+                                if s.current_track >= s.tracks.len() {
+                                    s.current_track = s.tracks.len() - 1;
+                                }
+                                s.selected = 0;
+                            }
+                        } else {
+                            pending_d = true;
+                            pending_y = false;
+                        }
+                    }
+                    KeyCode::Char('y') if input_mode == "normal" => {
+                        if pending_y {
+                            pending_y = false;
+                            let mut s = state.lock().unwrap();
+                            s.track_clipboard = Some(s.tracks[s.current_track].clone());
+                        } else {
+                            pending_y = true;
+                            pending_d = false;
+                        }
+                    }
+                    KeyCode::Char('P') if input_mode == "normal" => {
+                        pending_count = None;
+                        pending_d = false;
+                        pending_y = false;
+                        let clip = state.lock().unwrap().track_clipboard.clone();
+                        if let Some(track) = clip {
+                            let mut s = state.lock().unwrap();
+                            let insert_at = s.current_track + 1;
+                            s.tracks.insert(insert_at, track);
+                            s.current_steps.insert(insert_at, 0);
+                            s.last_notes.insert(insert_at, None);
+                            s.current_track = insert_at;
+                            s.selected = 0;
+                        }
+                    }
+                    KeyCode::Char('m') if input_mode == "normal" => {
+                        pending_count = None;
+                        let mut s = state.lock().unwrap();
+                        let tidx = s.current_track;
+                        s.tracks[tidx].muted = !s.tracks[tidx].muted;
                     }
                     KeyCode::Char('?') if input_mode == "normal" => {
                         pending_count = None;
@@ -820,6 +916,10 @@ pub fn run(instance: usize) -> Result<()> {
                     // Any other key clears pending_count
                     _ if pending_count.is_some() => {
                         pending_count = None;
+                    }
+                    _ if pending_d || pending_y => {
+                        pending_d = false;
+                        pending_y = false;
                     }
                     _ => {}
                 }
