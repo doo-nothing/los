@@ -3,12 +3,20 @@
 ## Overview
 All modules have been converted from raw stdout printing to proper ratatui terminal user interfaces. Each module now runs as an independent TUI application in its own tmux pane.
 
+**Key design principle:** tmux manages panes. Modules do not close themselves on Esc.
+
 ## Modules
 
 ### 1. Conductor (Pane 1)
 - **Status**: ✅ Working
 - **UI**: Simple text-based command interface
-- **Controls**: Awaiting commands from stdin
+- **Controls**:
+  - `j/k`, `↑/↓`: Navigate state list
+  - `s`: Save current session state
+  - `l`: Load selected state (creates new session)
+  - `d`: Delete selected state
+  - `?`: Toggle help
+  - `q`: Quit module
 
 ### 2. Sequencer (Pane 2)
 - **Status**: ✅ Working
@@ -16,19 +24,35 @@ All modules have been converted from raw stdout printing to proper ratatui termi
 - **Features**:
   - Step grid showing active/inactive steps and note names
   - Transport controls (BPM, play/stop status, current step)
-  - Vi-style keybindings for navigation
+  - Single-mode keybindings — all keys work all the time
 - **Controls**:
-  - `h/l` or `←/→`: Navigate steps
-  - `0/$`: Jump to first/last step
-  - `w/b`: Next/prev active step
-  - `gg`: Go to first step
-  - `space`: Toggle step active/inactive
-  - `n<note>`: Set note (e.g., n60)
-  - `t<bpm>`: Set BPM (e.g., t120)
-  - `e<pulses>`: Euclidean fill (e.g., e4 for 4 pulses)
-  - `p`: Play/pause
+  - `h/l`, `←/→`: Navigate steps
+  - `0`: First step
+  - `$`: Last step
+  - `w`: Next active step
+  - `b`: Previous active step
+  - `Enter`: Toggle step on/off
+  - `x`: Cut step (copy + deactivate)
+  - `y`: Yank step (copy)
+  - `p`: Paste step
+  - `k/K`: Raise note (semitone/octave)
+  - `j/J`: Lower note (semitone/octave)
+  - `N<NUM>`: Set note (e.g. `N60` for C4)
+  - `<N>P`: Set pulses and fill (e.g. `5P`)
+  - `<N>L`: Set pattern length (e.g. `16L`)
+  - `<N>R`: Set rotation (e.g. `3R`)
+  - `R`: Rotate by 1
+  - `n`: New track
+  - `d`: Delete current track
+  - `[`/`]`: Previous/next track
+  - `m`: Toggle mute track
+  - `Y`: Yank track (copy)
+  - `P`: Paste track after current
+  - `space`: Play/pause
   - `s`: Stop
-  - `q`: Quit
+  - `t<NUM>`: Set BPM (e.g. `t140`)
+  - `?`: Toggle help
+  - `q`: Quit module
 
 ### 3. Voice (Pane 3)
 - **Status**: ✅ Working
@@ -40,10 +64,11 @@ All modules have been converted from raw stdout printing to proper ratatui termi
   - Output routing (sine, sine+sub, shaped+sub)
   - ADSR envelope visualization
 - **Controls**:
-  - `j/k` or `↑/↓`: Select parameter
-  - `h/l` or `←/→`: Adjust value
-  - `1/2/3`: Set output mode
-  - `q`: Quit
+  - `j/k`, `↑/↓`: Select parameter
+  - `h/l`, `←/→`: Adjust value
+  - `1/2/3`: Set output mode directly
+  - `?`: Toggle help
+  - `q`: Quit module
 
 ### 4. Mixer (Pane 4)
 - **Status**: ✅ Working
@@ -53,11 +78,13 @@ All modules have been converted from raw stdout printing to proper ratatui termi
   - Master level control
   - Real-time level meters
 - **Controls**:
-  - `j/k` or `↑/↓`: Select track (or adjust master level)
-  - `h/l` or `←/→`: Select parameter (or adjust level/pan)
+  - `h/l`, `←/→`: Select track/master
+  - `j/k`, `↓/↑`: Decrease/increase level
+  - `+`/`-`: Increase/decrease pan
   - `m`: Toggle mute
   - `s`: Toggle solo
-  - `q`: Quit
+  - `?`: Toggle help
+  - `q`: Quit module
 
 ### 5. Scope (Pane 5)
 - **Status**: ✅ Working
@@ -72,8 +99,11 @@ All modules have been converted from raw stdout printing to proper ratatui termi
   - `c`: Cycle channel mode
   - `+`/`=`: Zoom in
   - `-`: Zoom out
-  - `g`: Cycle gain
-  - `q`: Quit
+  - `g`: Increase gain
+  - `G`: Decrease gain
+  - `t/T`: Trigger level
+  - `?`: Toggle help
+  - `q`: Quit module
 
 ## Architecture
 
@@ -93,6 +123,7 @@ Modules communicate through POSIX shared memory:
 - Layout: 5 panes in even-vertical arrangement
 - Window size: Tracks largest attached client
 - Pane borders: Show module names
+- **Modules never close on Esc** — use tmux to manage panes
 
 ## Testing
 
@@ -106,20 +137,10 @@ This will:
 2. Spawn all 5 modules in separate panes
 3. Attach to the session
 
-To quit: Press `q` in any module, or detach with `Ctrl-b d`
-
-## Next Steps
-
-- Test audio output (ensure mixer is reading from ringbuffer)
-- Test sequencer → voice event flow
-- Test parameter changes in voice/mixer
-- Add more features as needed
+To quit a module: Press `q`
+To detach from tmux: `Ctrl-b d`
 
 ## Dependencies Added
 
 - `ratatui = "0.28"`: Terminal UI framework
 - `crossterm = "0.28"`: Terminal manipulation backend
-
-Total lines added: ~1836
-Total lines removed: ~373
-Net change: +1463 lines

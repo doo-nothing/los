@@ -203,13 +203,13 @@ fn draw_ui(
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),  // Status
                 Constraint::Length(1),  // Shape
                 Constraint::Length(1),  // Sub
                 Constraint::Length(1),  // FM
                 Constraint::Length(1),  // Output
                 Constraint::Length(1),  // Level meter
                 Constraint::Min(0),
+                Constraint::Length(1),  // Status
             ])
             .split(area);
 
@@ -223,7 +223,7 @@ fn draw_ui(
             state.level * 100.0
         );
         let status_widget = Paragraph::new(status).style(Style::default().fg(Color::Cyan));
-        f.render_widget(status_widget, chunks[0]);
+        f.render_widget(status_widget, chunks[6]);
 
         // Parameters
         let params = [
@@ -243,7 +243,7 @@ fn draw_ui(
                 .gauge_style(style)
                 .ratio(*value as f64)
                 .label(format!("{}: {:.2}", name, value));
-            f.render_widget(gauge, chunks[i + 1]);
+            f.render_widget(gauge, chunks[i]);
         }
 
         // Output mode
@@ -259,14 +259,14 @@ fn draw_ui(
             if state.output == 2 { "●" } else { "○" },
         );
         let output_widget = Paragraph::new(output_text).style(output_style);
-        f.render_widget(output_widget, chunks[4]);
+        f.render_widget(output_widget, chunks[3]);
 
         // Level meter
         let level_gauge = Gauge::default()
             .gauge_style(Style::default().fg(Color::Green))
             .ratio(state.level as f64)
             .label(format!("Level: {:.0}%", state.level * 100.0));
-        f.render_widget(level_gauge, chunks[5]);
+        f.render_widget(level_gauge, chunks[4]);
 
         // Help overlay
         if show_help {
@@ -282,8 +282,8 @@ fn draw_ui(
                 Line::from("  2          Main + Sub"),
                 Line::from("  3          Mix"),
                 Line::from(""),
-                Line::from("  ?          Close this help"),
-                Line::from("  q          Quit"),
+                Line::from("  ?          Toggle this help"),
+                Line::from("  Close pane: tmux prefix + x"),
             ];
             let help = Paragraph::new(help_text)
                 .style(Style::default().fg(Color::White).bg(Color::Black))
@@ -303,16 +303,14 @@ pub fn run(instance: usize) -> Result<()> {
     state::setup_save_signal();
     state::setup_reload_signal();
     state::write_pid_file("voice", instance);
-    let mut last_err = String::new();
     for attempt in 0..20 {
         match enable_raw_mode() {
             Ok(()) => break,
             Err(e) => {
-                last_err = format!("{}", e);
                 if attempt < 19 {
                     std::thread::sleep(Duration::from_millis(200));
                 } else {
-                    return Err(anyhow::anyhow!("Failed to enable raw mode after 20 attempts: {}", last_err));
+                    return Err(anyhow::anyhow!("Failed to enable raw mode after 20 attempts: {}", e));
                 }
             }
         }
@@ -380,7 +378,7 @@ pub fn run(instance: usize) -> Result<()> {
             }
         }
         
-        let current_state = state.lock().unwrap().clone();
+        let current_state = *state.lock().unwrap();
         draw_ui(&mut terminal, &current_state, selected, show_help)?;
 
         if event::poll(Duration::from_millis(50))? {
@@ -402,7 +400,6 @@ pub fn run(instance: usize) -> Result<()> {
                     continue;
                 }
                 match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
                     KeyCode::Char('j') | KeyCode::Down => {
                         selected = (selected + 1) % 4;
                     }
@@ -426,8 +423,20 @@ pub fn run(instance: usize) -> Result<()> {
                             1 => s.sub = (s.sub + 0.05).min(1.0),
                             2 => s.fm = (s.fm + 0.05).min(1.0),
                             3 => s.output = (s.output + 1) % 3,
-                             _ => {}
+                            _ => {}
                         }
+                    }
+                    KeyCode::Char('1') => {
+                        let mut s = state.lock().unwrap();
+                        s.output = 0;
+                    }
+                    KeyCode::Char('2') => {
+                        let mut s = state.lock().unwrap();
+                        s.output = 1;
+                    }
+                    KeyCode::Char('3') => {
+                        let mut s = state.lock().unwrap();
+                        s.output = 2;
                     }
                     KeyCode::Char('?') => {
                         show_help = !show_help;

@@ -52,7 +52,6 @@ struct MixerState {
     master: f32,
     master_meter: f32,
     selected: usize,
-    param: usize,
 }
 
 impl Default for MixerState {
@@ -62,7 +61,6 @@ impl Default for MixerState {
             master: 0.8,
             master_meter: 0.0,
             selected: 0,
-            param: 0,
         }
     }
 }
@@ -204,15 +202,15 @@ fn draw_ui(
                 Line::from(""),
                 Line::from("Navigation:"),
                 Line::from("  h/l, ←/→  Select track/master"),
-                Line::from("  j/k, ↑/↓  Select parameter"),
                 Line::from(""),
                 Line::from("Adjusting:"),
-                Line::from("  +/-        Increase/decrease value"),
+                Line::from("  j/k, ↓/↑   Decrease/increase level"),
+                Line::from("  +/-        Decrease/increase pan"),
                 Line::from("  m          Toggle mute"),
                 Line::from("  s          Toggle solo"),
                 Line::from(""),
-                Line::from("  ?          Close this help"),
-                Line::from("  q          Quit"),
+                Line::from("  ?          Toggle this help"),
+                Line::from("  Close pane: tmux prefix + x"),
             ];
             let help = Paragraph::new(help_text)
                 .style(Style::default().fg(Color::White).bg(Color::Black))
@@ -232,16 +230,14 @@ pub fn run() -> Result<()> {
     state::setup_save_signal();
     state::setup_reload_signal();
     state::write_pid_file("mixer", 0);
-    let mut last_err = String::new();
     for attempt in 0..20 {
         match enable_raw_mode() {
             Ok(()) => break,
             Err(e) => {
-                last_err = format!("{}", e);
                 if attempt < 19 {
                     std::thread::sleep(Duration::from_millis(200));
                 } else {
-                    return Err(anyhow::anyhow!("Failed to enable raw mode after 20 attempts: {}", last_err));
+                    return Err(anyhow::anyhow!("Failed to enable raw mode after 20 attempts: {}", e));
                 }
             }
         }
@@ -336,7 +332,6 @@ pub fn run() -> Result<()> {
                     continue;
                 }
                 match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
                     KeyCode::Char('h') | KeyCode::Left => {
                         let mut s = state.lock().unwrap();
                         s.selected = if s.selected == 0 { NUM_TRACKS } else { s.selected - 1 };
@@ -347,36 +342,34 @@ pub fn run() -> Result<()> {
                     }
                     KeyCode::Char('j') | KeyCode::Down => {
                         let mut s = state.lock().unwrap();
-                        s.param = (s.param + 1) % 4;
+                        let sel = s.selected;
+                        if sel < NUM_TRACKS {
+                            s.tracks[sel].level = (s.tracks[sel].level - 0.05).max(0.0);
+                        } else {
+                            s.master = (s.master - 0.05).max(0.0);
+                        }
                     }
                     KeyCode::Char('k') | KeyCode::Up => {
                         let mut s = state.lock().unwrap();
-                        s.param = if s.param == 0 { 3 } else { s.param - 1 };
+                        let sel = s.selected;
+                        if sel < NUM_TRACKS {
+                            s.tracks[sel].level = (s.tracks[sel].level + 0.05).min(1.0);
+                        } else {
+                            s.master = (s.master + 0.05).min(1.0);
+                        }
                     }
                     KeyCode::Char('+') | KeyCode::Char('=') => {
                         let mut s = state.lock().unwrap();
                         let sel = s.selected;
                         if sel < NUM_TRACKS {
-                            match s.param {
-                                0 => s.tracks[sel].level = (s.tracks[sel].level + 0.05).min(1.0),
-                                1 => s.tracks[sel].pan = (s.tracks[sel].pan + 0.1).min(1.0),
-                                _ => {}
-                            }
-                        } else {
-                            s.master = (s.master + 0.05).min(1.0);
+                            s.tracks[sel].pan = (s.tracks[sel].pan + 0.1).min(1.0);
                         }
                     }
                     KeyCode::Char('-') => {
                         let mut s = state.lock().unwrap();
                         let sel = s.selected;
                         if sel < NUM_TRACKS {
-                            match s.param {
-                                0 => s.tracks[sel].level = (s.tracks[sel].level - 0.05).max(0.0),
-                                1 => s.tracks[sel].pan = (s.tracks[sel].pan - 0.1).max(-1.0),
-                                _ => {}
-                            }
-                        } else {
-                            s.master = (s.master - 0.05).max(0.0);
+                            s.tracks[sel].pan = (s.tracks[sel].pan - 0.1).max(-1.0);
                         }
                     }
                     KeyCode::Char('m') => {

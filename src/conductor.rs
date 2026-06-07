@@ -30,7 +30,7 @@ fn exe_path() -> Result<String> {
 
 fn list_session_panes(session: &str, window: &str) -> Result<Vec<(usize, String)>> {
     let output = Command::new("tmux")
-        .args(&["list-panes", "-t", &format!("{}:{}", session, window), "-F", "#{pane_index} #{pane_id}"])
+        .args(["list-panes", "-t", &format!("{}:{}", session, window), "-F", "#{pane_index} #{pane_id}"])
         .output()?;
     let mut panes: Vec<(usize, String)> = String::from_utf8(output.stdout)?
         .lines()
@@ -51,25 +51,25 @@ fn spawn_session_panes(panes_data: &[(&str, &str)]) -> Result<()> {
     
     // Create window
     Command::new("tmux")
-        .args(&["new-window", "-t", session, "-n", win])
+        .args(["new-window", "-t", session, "-n", win])
         .output()?;
     
     // Split into required number of panes
     for _ in 1..panes_data.len() {
         Command::new("tmux")
-            .args(&["split-window", "-t", &format!("{}:{}", session, win)])
+            .args(["split-window", "-t", &format!("{}:{}", session, win)])
             .output()?;
     }
     Command::new("tmux")
-        .args(&["select-layout", "-t", &format!("{}:{}", session, win), "tiled"])
+        .args(["select-layout", "-t", &format!("{}:{}", session, win), "tiled"])
         .output()?;
     
     // Enable pane borders
     Command::new("tmux")
-        .args(&["set-option", "-t", &format!("{}:{}", session, win), "pane-border-status", "top"])
+        .args(["set-option", "-t", &format!("{}:{}", session, win), "pane-border-status", "top"])
         .output()?;
     Command::new("tmux")
-        .args(&["set-option", "-t", &format!("{}:{}", session, win), "pane-border-format", " #{pane_title} "])
+        .args(["set-option", "-t", &format!("{}:{}", session, win), "pane-border-format", " #{pane_title} "])
         .output()?;
     
     // Discover panes and spawn modules
@@ -81,12 +81,12 @@ fn spawn_session_panes(panes_data: &[(&str, &str)]) -> Result<()> {
         let (cmd, label) = panes_data[i];
         
         Command::new("tmux")
-            .args(&["select-pane", "-t", pane_id, "-T", label])
+            .args(["select-pane", "-t", pane_id, "-T", label])
             .output()?;
         
         let full_cmd = format!("{} {}", exe, cmd);
         Command::new("tmux")
-            .args(&["respawn-pane", "-k", "-t", pane_id, &full_cmd])
+            .args(["respawn-pane", "-k", "-t", pane_id, &full_cmd])
             .output()?;
     }
     
@@ -95,11 +95,11 @@ fn spawn_session_panes(panes_data: &[(&str, &str)]) -> Result<()> {
 
 pub fn create_session() -> Result<()> {
     state::ensure_dirs()?;
-    let _ = Command::new("tmux").args(&["kill-session", "-t", "los"]).output();
+    let _ = Command::new("tmux").args(["kill-session", "-t", "los"]).output();
 
     // Create conductor window
     Command::new("tmux")
-        .args(&["new-session", "-d", "-s", "los", "-n", "conductor"])
+        .args(["new-session", "-d", "-s", "los", "-n", "conductor"])
         .output()?;
     
     // Start conductor TUI in its pane
@@ -107,7 +107,7 @@ pub fn create_session() -> Result<()> {
     let exe = exe_path()?;
     if let Some((_, pane_id)) = panes.first() {
         Command::new("tmux")
-            .args(&["respawn-pane", "-k", "-t", pane_id, &format!("{} conductor", exe)])
+            .args(["respawn-pane", "-k", "-t", pane_id, &format!("{} conductor", exe)])
             .output()?;
     }
     
@@ -115,12 +115,15 @@ pub fn create_session() -> Result<()> {
     let modules = [("sequencer", "Sequencer"), ("voice", "Voice"), ("mixer", "Mixer"), ("scope", "Scope")];
     spawn_session_panes(&modules)?;
     
-    // Select modules window and attach
+    // Select modules window, first pane, and attach
     Command::new("tmux")
-        .args(&["select-window", "-t", "los:modules"])
+        .args(["select-window", "-t", "los:modules"])
         .output()?;
     Command::new("tmux")
-        .args(&["attach-session", "-t", "los"])
+        .args(["select-pane", "-t", "los:modules.0"])
+        .output()?;
+    Command::new("tmux")
+        .args(["attach-session", "-t", "los"])
         .status()?;
     
     Ok(())
@@ -130,14 +133,14 @@ pub fn load_session(state_path: &str) -> Result<()> {
     state::ensure_dirs()?;
     
     // Read the state file
-    let st = state::from_toml_file::<state::SessionState>(&std::path::Path::new(state_path))?;
+    let st = state::from_toml_file::<state::SessionState>(std::path::Path::new(state_path))?;
     
     // Kill existing session
-    let _ = Command::new("tmux").args(&["kill-session", "-t", "los"]).output();
+    let _ = Command::new("tmux").args(["kill-session", "-t", "los"]).output();
     
     // Create conductor window
     Command::new("tmux")
-        .args(&["new-session", "-d", "-s", "los", "-n", "conductor"])
+        .args(["new-session", "-d", "-s", "los", "-n", "conductor"])
         .output()?;
     
     let exe = exe_path()?;
@@ -146,7 +149,7 @@ pub fn load_session(state_path: &str) -> Result<()> {
     let panes = list_session_panes("los", "conductor")?;
     if let Some((_, pane_id)) = panes.first() {
         Command::new("tmux")
-            .args(&["respawn-pane", "-k", "-t", pane_id, &format!("{} conductor", exe)])
+            .args(["respawn-pane", "-k", "-t", pane_id, &format!("{} conductor", exe)])
             .output()?;
     }
     
@@ -179,17 +182,20 @@ pub fn load_session(state_path: &str) -> Result<()> {
     // Apply tmux settings from state
     if !st.tmux.window_size.is_empty() {
         let _ = Command::new("tmux")
-            .args(&["set-option", "-t", "los:modules", "window-size", &st.tmux.window_size])
+            .args(["set-option", "-t", "los:modules", "window-size", &st.tmux.window_size])
             .output();
     }
     
-    // Select modules window and attach
+    // Select active window, first pane, and attach
     let active_win = if st.tmux.active_window.is_empty() { "modules" } else { &st.tmux.active_window };
     Command::new("tmux")
-        .args(&["select-window", "-t", &format!("los:{}", active_win)])
+        .args(["select-window", "-t", &format!("los:{}", active_win)])
         .output()?;
     Command::new("tmux")
-        .args(&["attach-session", "-t", "los"])
+        .args(["select-pane", "-t", &format!("los:{}.0", active_win)])
+        .output()?;
+    Command::new("tmux")
+        .args(["attach-session", "-t", "los"])
         .status()?;
     
     Ok(())
@@ -272,7 +278,7 @@ pub fn run_conductor() -> Result<()> {
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 if show_help {
-                    if let KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Esc = key.code {
+                    if let KeyCode::Char('?') | KeyCode::Char('q') = key.code {
                         show_help = false;
                         needs_refresh = true;
                     }
@@ -280,7 +286,6 @@ pub fn run_conductor() -> Result<()> {
                 }
                 
                 match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
                     KeyCode::Char('j') | KeyCode::Down => {
                         if selected + 1 < entries.len() {
                             selected += 1;
@@ -288,9 +293,7 @@ pub fn run_conductor() -> Result<()> {
                         needs_refresh = true;
                     }
                     KeyCode::Char('k') | KeyCode::Up => {
-                        if selected > 0 {
-                            selected -= 1;
-                        }
+                        selected = selected.saturating_sub(1);
                         needs_refresh = true;
                     }
                     KeyCode::Char('s') => {
@@ -307,7 +310,7 @@ pub fn run_conductor() -> Result<()> {
                         
                         // Send SIGUSR1 to all module processes
                         for pid in &pids {
-                            let _ = state::send_save_signal(*pid);
+                            state::send_save_signal(*pid);
                         }
                         
                         // Wait for modules to write their state files
@@ -362,44 +365,40 @@ pub fn run_conductor() -> Result<()> {
                         needs_refresh = true;
                         
                     }
-                    KeyCode::Char('l') => {
+                    KeyCode::Char('l') if selected < entries.len() => {
                         // Load selected state: write module state files, send SIGUSR2
-                        if selected < entries.len() {
-                            let path = state::states_dir().join(&entries[selected]);
-                            
-                            // Read the saved state file
-                            if let Ok(st) = state::from_toml_file::<state::SessionState>(&path) {
-                                // Write module state files from the loaded session
-                                for win in &st.windows {
-                                    for pane in &win.panes {
-                                        if let Some(ref inline) = pane.patch_inline {
-                                            let filepath = state::module_state_path(&pane.module, pane.instance);
-                                            let toml_str = toml::to_string_pretty(inline)
-                                                .unwrap_or_default();
-                                            let _ = state::write_state_file(&filepath, &toml_str);
-                                        }
+                        let path = state::states_dir().join(&entries[selected]);
+                        
+                        // Read the saved state file
+                        if let Ok(st) = state::from_toml_file::<state::SessionState>(&path) {
+                            // Write module state files from the loaded session
+                            for win in &st.windows {
+                                for pane in &win.panes {
+                                    if let Some(ref inline) = pane.patch_inline {
+                                        let filepath = state::module_state_path(&pane.module, pane.instance);
+                                        let toml_str = toml::to_string_pretty(inline)
+                                            .unwrap_or_default();
+                                        let _ = state::write_state_file(&filepath, &toml_str);
                                     }
                                 }
-                                
-                                // Send SIGUSR2 to all module processes to trigger reload
-                                let modules = ["sequencer", "voice", "mixer", "scope"];
-                                for mod_name in &modules {
-                                    if let Some(pid) = state::read_pid_file(mod_name, 0) {
-                                        state::send_reload_signal(pid);
-                                    }
-                                }
-                                
-                                needs_refresh = true;
                             }
-                        }
-                    }
-                    KeyCode::Char('d') => {
-                        // Delete selected state
-                        if selected < entries.len() {
-                            let path = state::states_dir().join(&entries[selected]);
-                            let _ = std::fs::remove_file(&path);
+                            
+                            // Send SIGUSR2 to all module processes to trigger reload
+                            let modules = ["sequencer", "voice", "mixer", "scope"];
+                            for mod_name in &modules {
+                                if let Some(pid) = state::read_pid_file(mod_name, 0) {
+                                    state::send_reload_signal(pid);
+                                }
+                            }
+                            
                             needs_refresh = true;
                         }
+                    }
+                    KeyCode::Char('d') if selected < entries.len() => {
+                        // Delete selected state
+                        let path = state::states_dir().join(&entries[selected]);
+                        let _ = std::fs::remove_file(&path);
+                        needs_refresh = true;
                     }
                     KeyCode::Char('?') => {
                         show_help = true;
@@ -419,8 +418,8 @@ pub fn run_conductor() -> Result<()> {
                     Line::from("  s          Save current session state"),
                     Line::from("  l          Load selected state (creates new session)"),
                     Line::from("  d          Delete selected state"),
-                    Line::from("  ?          Close this help"),
-                    Line::from("  q          Quit"),
+                Line::from("  ?          Toggle this help"),
+                Line::from("  Close pane: tmux prefix + x"),
                 ];
                 let help = Paragraph::new(help_text)
                     .style(Style::default().fg(Color::White))
@@ -435,7 +434,7 @@ pub fn run_conductor() -> Result<()> {
             loop {
                 if event::poll(Duration::from_millis(100))? {
                     if let Event::Key(k) = event::read()? {
-                        if let KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Esc = k.code {
+                        if let KeyCode::Char('?') | KeyCode::Char('q') = k.code {
                             show_help = false;
                             needs_refresh = true;
                             break;

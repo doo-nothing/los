@@ -1,6 +1,6 @@
 use std::io;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::{
@@ -139,20 +139,20 @@ fn sequencer_thread(
                 s.last_notes.push(None);
             }
 
-            for t in 0..s.tracks.len() {
+            for (t, last_step) in last_steps.iter_mut().enumerate().take(s.tracks.len()) {
                 let len = s.tracks[t].length;
                 let current_step = if samples_per_step > 0 && playing {
                     (clock / samples_per_step) as usize % len
                 } else {
-                    last_steps[t].max(0) as usize
+                    (*last_step).max(0) as usize
                 };
 
-                if current_step as i32 != last_steps[t] {
+                if current_step as i32 != *last_step {
                     s.current_steps[t] = current_step;
 
                     if playing && !s.tracks[t].muted {
                         if let Some(n) = s.last_notes[t] {
-                            let _ = events.write_event(&AudioEvent::note_off(n, last_steps[t] as u32));
+                            let _ = events.write_event(&AudioEvent::note_off(n, *last_step as u32));
                         }
                         if s.tracks[t].steps[current_step].active {
                             let note = s.tracks[t].steps[current_step].note;
@@ -163,7 +163,7 @@ fn sequencer_thread(
                             s.last_notes[t] = None;
                         }
                     }
-                    last_steps[t] = current_step as i32;
+                    *last_step = current_step as i32;
                 }
             }
         } // lock released here, before sleep
@@ -186,23 +186,49 @@ fn euclidean_apply(steps: &mut [Step], pulses: usize, length: usize, rotation: u
     let mut pattern = vec![false; len];
     if pulses > 0 && pulses <= len {
         let mut bucket = 0usize;
-        for i in 0..len {
+        for pat in pattern.iter_mut().take(len) {
             bucket += pulses;
             if bucket >= len {
                 bucket -= len;
-                pattern[i] = true;
+                *pat = true;
             }
         }
     }
     let rot = rotation % len;
-    for i in 0..len {
+    for (i, step) in steps.iter_mut().enumerate().take(len) {
         let src = (i + len - rot) % len;
-        steps[i].active = pattern[src];
+        step.active = pattern[src];
     }
     // Deactivate any steps beyond the set length
-    for i in len..steps.len() {
-        steps[i].active = false;
+    for step in steps.iter_mut().skip(len) {
+        step.active = false;
     }
+}
+
+fn compact_track_row(track: &Track, track_idx: usize, current_track: usize, selected: usize) -> String {
+    let is_current = track_idx == current_track;
+    let mut row = format!("{}T{} ", if is_current { "▶" } else { " " }, track_idx + 1);
+    if track.muted {
+        row.push_str("[m] ");
+    } else {
+        row.push_str("    ");
+    }
+    for (i, step) in track.steps.iter().enumerate().take(track.length) {
+        let ch = if i == selected && is_current {
+            '▽'
+        } else if step.active {
+            '●'
+        } else {
+            '○'
+        };
+        row.push(ch);
+    }
+    // Pad to 16 chars if shorter
+    for _ in track.length..16 {
+        row.push(' ');
+    }
+    row.push_str(&format!("  P:{} L:{} R:{}", track.pulses, track.length, track.rotation));
+    row
 }
 
 fn draw_ui(
@@ -211,54 +237,50 @@ fn draw_ui(
     mode: &str,
     submode: &str,
     input_buffer: &str,
+    pending_count: &Option<String>,
+    gt_target: &Option<String>,
+    gt_input: &str,
     show_help: bool,
 ) -> Result<()> {
     terminal.draw(|f| {
         let area = f.area();
+        let track_rows = state.tracks.len().min(6).max(1) as u16;
         
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),  // Track bar
-                Constraint::Length(1),  // Status line
-                Constraint::Length(3),  // Step grid
-                Constraint::Length(1),  // Note display
-                Constraint::Length(1),  // Command bar
-                Constraint::Min(0),     // Help or empty
+                Constraint::Length(track_rows), // Stacked track list
+                Constraint::Length(3),            // Step grid
+                Constraint::Length(1),            // Note display
+                Constraint::Min(0),               // Help or empty
+                Constraint::Length(1),            // Status line
             ])
             .split(area);
 
-        // Track bar: │ 1  │*2  │ 3m │
-        let mut tabs = String::new();
-        for (i, t) in state.tracks.iter().enumerate() {
-            if i == state.current_track {
-                tabs.push_str(&format!("│▶{}", i + 1));
-            } else if t.muted {
-                tabs.push_str(&format!("│ {}m", i + 1));
+        // Stacked track rows
+        for (ti, trk) in state.tracks.iter().enumerate() {
+            let sel = if ti == state.current_track { state.selected } else { 0 };
+            let row_text = compact_track_row(trk, ti, state.current_track, sel);
+            let style = if ti == state.current_track {
+                Style::default().fg(Color::Yellow)
+            } else if trk.muted {
+                Style::default().fg(Color::DarkGray)
             } else {
-                tabs.push_str(&format!("│ {} ", i + 1));
+                Style::default().fg(Color::Cyan)
+            };
+            let row_widget = Paragraph::new(row_text).style(style);
+            if ti < chunks[0].height as usize {
+                let row_rect = Rect::new(chunks[0].x, chunks[0].y + ti as u16, chunks[0].width, 1);
+                f.render_widget(row_widget, row_rect);
             }
         }
-        tabs.push('│');
-        let tabs_widget = Paragraph::new(tabs)
-            .style(Style::default().fg(Color::Cyan));
-        f.render_widget(tabs_widget, chunks[0]);
 
-        // Status line
         let len = state.track().length;
         let play_str = if state.playing { "▶" } else { "■" };
         let cstep = state.current_steps[state.current_track];
-        let status = format!(
-            "{} {} BPM | Step {}/{} | Sel {} | P:{} L:{} R:{}",
-            play_str, state.bpm as u32, cstep, len, state.selected,
-            state.track().pulses, len, state.track().rotation,
-        );
-        let status_widget = Paragraph::new(status)
-            .style(Style::default().fg(Color::Cyan));
-        f.render_widget(status_widget, chunks[1]);
-
+        
         let step_width = area.width as usize / len;
-        let step_width = step_width.max(3).min(10);
+        let step_width = step_width.clamp(3, 10);
         
         for i in 0..len {
             let step = &state.track().steps[i];
@@ -266,7 +288,7 @@ fn draw_ui(
             let is_selected = i == state.selected;
 
             let x = (i * step_width) as u16;
-            let rect = Rect::new(x, chunks[2].y, step_width as u16, 3);
+            let rect = Rect::new(x, chunks[1].y, step_width as u16, 3);
 
             let (bg, fg, marker) = if is_current && is_selected {
                 (Color::Yellow, Color::Black, "▶")
@@ -306,66 +328,85 @@ fn draw_ui(
         );
         let note_widget = Paragraph::new(note_info)
             .style(Style::default().fg(Color::Yellow));
-        f.render_widget(note_widget, chunks[3]);
+        f.render_widget(note_widget, chunks[2]);
 
-        // Command bar
-        let mode_style = if mode == "insert" {
-            Style::default().fg(Color::Green).bg(Color::Black)
-        } else {
-            Style::default().fg(Color::Cyan).bg(Color::Black)
-        };
+        // Bottom status bar
         let mode_label = if mode == "insert" {
             if !submode.is_empty() {
-                format!(" INSERT [{}] ", submode)
+                format!(" INSERT[{}] ", submode)
             } else {
                 " INSERT ".to_string()
             }
         } else {
             " NORMAL ".to_string()
         };
-        let cmd_bar = Paragraph::new(mode_label)
-            .style(mode_style);
-        f.render_widget(cmd_bar, chunks[4]);
+        let mut status_parts = vec![
+            mode_label,
+            format!("T{}/{}", state.current_track + 1, state.tracks.len()),
+            format!("{} {} BPM", play_str, state.bpm as u32),
+            format!("Step {}/{}", cstep, len),
+            format!("Sel {}", state.selected),
+            format!("P:{} L:{} R:{}", state.track().pulses, len, state.track().rotation),
+        ];
+        if let Some(ref count) = pending_count {
+            status_parts.push(format!("Count:{}", count));
+        }
+        if !submode.is_empty() {
+            status_parts.push(format!("{}:{}", submode.to_uppercase(), input_buffer));
+        }
+        if let Some(ref target) = gt_target {
+            status_parts.push(format!("gt{}:{}", target, gt_input));
+        }
+        let status = status_parts.join(" | ");
+        let status_style = if mode == "insert" {
+            Style::default().fg(Color::Green).bg(Color::Black)
+        } else {
+            Style::default().fg(Color::Cyan).bg(Color::Black)
+        };
+        let status_widget = Paragraph::new(status).style(status_style);
+        f.render_widget(status_widget, chunks[4]);
 
         if show_help {
             let help_text = vec![
                 Line::from("━━━ Sequencer Help ━━━"),
                 Line::from(""),
-                Line::from("Navigation:"),
+                Line::from("Navigation (both modes):"),
                 Line::from("  h/l, ←/→  Move left/right"),
-                Line::from("  0          First step"),
-                Line::from("  $          Last step"),
+                Line::from("  gg         First step"),
+                Line::from("  G          Last step"),
                 Line::from("  w          Next active step"),
                 Line::from("  b          Previous active step"),
-                Line::from("  gg         Go to step 0"),
-                Line::from(""),
-                Line::from("Tracks:"),
-                Line::from("  n          New track"),
                 Line::from("  [ / ]      Previous/next track"),
-                Line::from("  m          Toggle mute track"),
+                Line::from("  #j/#k      Jump # tracks down/up"),
+                Line::from("  1..9       Jump to track"),
                 Line::from(""),
-                Line::from("Editing:"),
-                Line::from("  Enter      Toggle step on/off"),
-                Line::from("  x          Delete step (copies to clipboard)"),
-                Line::from("  p          Paste step from clipboard"),
-                Line::from("  k/K        Raise note (semitone/octave)"),
-                Line::from("  j/J        Lower note (semitone/octave)"),
-                Line::from("  N<NUM>     Set note (e.g. N60 for C4)"),
-                Line::from("  t<NUM>     Set BPM (e.g. t140)"),
-                Line::from(""),
-                Line::from("Euclidean:"),
-                Line::from("  <N>P       Set pulses and fill"),
-                Line::from("  <N>L       Set pattern length"),
-                Line::from("  <N>R       Set rotation"),
-                Line::from("  R          Rotate by 1"),
-                Line::from("  (e.g. 5P, 16L, 3R)"),
-                Line::from(""),
-                Line::from("Transport:"),
+                Line::from("Normal mode:"),
+                Line::from("  Enter/i    Enter insert mode"),
+                Line::from("  n          New track"),
+                Line::from("  dd         Delete track"),
+                Line::from("  yy         Yank track"),
+                Line::from("  P          Paste track after current"),
+                Line::from("  m          Toggle mute"),
+                Line::from("  gt#        Go to track #"),
                 Line::from("  space      Play/pause"),
                 Line::from("  s          Stop"),
+                Line::from("  t<NUM>     Set BPM"),
                 Line::from(""),
-                Line::from("  ?          Close this help"),
-                Line::from("  q          Quit"),
+                Line::from("Insert mode:"),
+                Line::from("  Esc        Return to normal"),
+                Line::from("  Enter/space Toggle step"),
+                Line::from("  x          Cut step"),
+                Line::from("  y          Yank step"),
+                Line::from("  p          Paste step"),
+                Line::from("  k/K        Raise note (st/oct)"),
+                Line::from("  j/J        Lower note (st/oct)"),
+                Line::from("  N<NUM>     Set note (e.g. N60)"),
+                Line::from("  gt#        Go to step #"),
+                Line::from("  <N>P/L/R   Euclidean pulses/length/rotation"),
+                Line::from("  R          Rotate by 1"),
+                Line::from(""),
+                Line::from("  ?          Toggle this help"),
+                Line::from("  Close pane: tmux prefix + x"),
             ];
             let help = Paragraph::new(help_text)
                 .style(Style::default().fg(Color::White).bg(Color::Black))
@@ -381,85 +422,28 @@ fn draw_ui(
 }
 
 pub fn run(instance: usize) -> Result<()> {
-    use std::fs::OpenOptions;
-    use std::io::Write;
-    let mut log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/los-sequencer.log")
-        .ok();
-    
-    if let Some(ref mut f) = log {
-        writeln!(f, "Sequencer starting at {:?}", std::time::SystemTime::now()).ok();
-        unsafe {
-            writeln!(f, "isatty(stdin)={} isatty(stdout)={}", 
-                libc::isatty(libc::STDIN_FILENO), 
-                libc::isatty(libc::STDOUT_FILENO)).ok();
-            let tty_path = std::ffi::CString::new("/dev/tty").unwrap();
-            let dev = libc::open(tty_path.as_ptr(), libc::O_RDWR);
-            if dev >= 0 {
-                writeln!(f, "/dev/tty opened, isatty={}", libc::isatty(dev)).ok();
-                libc::close(dev);
-            } else {
-                writeln!(f, "/dev/tty failed: {}", std::io::Error::last_os_error()).ok();
-            }
-        }
-    }
-    
     // Setup SIGUSR1 handler for save-on-signal
     state::setup_save_signal();
     state::setup_reload_signal();
     state::write_pid_file("sequencer", instance);
     
-    let mut last_err = String::new();
     for attempt in 0..20 {
         match enable_raw_mode() {
-            Ok(()) => {
-                if let Some(ref mut f) = log {
-                    writeln!(f, "Raw mode enabled on attempt {}", attempt + 1).ok();
-                }
-                break;
-            }
+            Ok(()) => break,
             Err(e) => {
-                last_err = format!("{}", e);
-                if let Some(ref mut f) = log {
-                    writeln!(f, "Attempt {} failed: {}", attempt + 1, e).ok();
-                }
                 if attempt < 19 {
                     std::thread::sleep(Duration::from_millis(200));
                 } else {
-                    if let Some(ref mut f) = log {
-                        writeln!(f, "All 20 attempts failed, giving up").ok();
-                    }
-                    return Err(anyhow::anyhow!("Failed to enable raw mode after 20 attempts: {}", last_err));
+                    return Err(anyhow::anyhow!("Failed to enable raw mode after 20 attempts: {}", e));
                 }
             }
         }
     }
     
-    if let Some(ref mut f) = log {
-        writeln!(f, "Raw mode enabled").ok();
-    }
-    
     let mut stdout = io::stdout();
-    if let Err(e) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
-        if let Some(ref mut f) = log {
-            writeln!(f, "Failed to enter alternate screen: {}", e).ok();
-        }
-        return Err(anyhow::anyhow!("Failed to enter alternate screen: {}", e));
-    }
-    
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
-    let mut terminal = match Terminal::new(backend) {
-        Ok(t) => t,
-        Err(e) => {
-            return Err(anyhow::anyhow!("Failed to create terminal: {}", e));
-        }
-    };
-    
-    if let Some(ref mut f) = log {
-        writeln!(f, "Terminal created, starting main loop").ok();
-    }
+    let mut terminal = Terminal::new(backend)?;
 
     let state = Arc::new(Mutex::new(SequencerState::default()));
     
@@ -468,7 +452,6 @@ pub fn run(instance: usize) -> Result<()> {
         let mut s = state.lock().unwrap();
         if let Some(bpm) = params.bpm { s.bpm = bpm; }
         if let Some(playing) = params.playing { s.playing = playing; }
-        // Load from tracks, falling back to flat fields for backward compat
         if !params.tracks.is_empty() {
             for (ti, tp) in params.tracks.iter().enumerate() {
                 if ti >= s.tracks.len() {
@@ -516,11 +499,14 @@ pub fn run(instance: usize) -> Result<()> {
     let mut mode = String::from("normal");
     let mut submode = String::new();
     let mut input_buffer = String::new();
-    let mut pending_g = false;
-    let mut pending_d = false;
-    let mut pending_y = false;
     let mut show_help = false;
     let mut pending_count: Option<String> = None;
+    let mut pending_d = false;
+    let mut pending_y = false;
+    let mut pending_g = false;
+    let mut gt_target: Option<String> = None;
+    let mut gt_input = String::new();
+    let mut gt_last_key: Option<Instant> = None;
 
     loop {
         
@@ -557,7 +543,7 @@ pub fn run(instance: usize) -> Result<()> {
                 if let Some(bpm) = params.bpm { s.bpm = bpm; }
                 if let Some(playing) = params.playing { s.playing = playing; }
                 if !params.tracks.is_empty() {
-                    let ti = 0.min(s.tracks.len() - 1);
+                    let ti = 0;
                     let trk = &mut s.tracks[ti];
                     if let Some(l) = params.tracks[0].length { trk.length = l; }
                     if let Some(p) = params.tracks[0].pulses { trk.pulses = p; }
@@ -569,8 +555,34 @@ pub fn run(instance: usize) -> Result<()> {
             }
         }
         
+        // Auto-execute gt on timeout (only when digits were collected)
+        if let Some(ref target) = gt_target {
+            if gt_last_key.as_ref().map_or(false, |t| t.elapsed() > Duration::from_millis(300)) && !gt_input.is_empty() {
+                let mut s = state.lock().unwrap();
+                match target.as_str() {
+                    "track" => {
+                        if let Ok(tnum) = gt_input.parse::<usize>() {
+                            let tidx = tnum.saturating_sub(1).min(s.tracks.len().saturating_sub(1));
+                            s.current_track = tidx;
+                            s.selected = 0;
+                        }
+                    }
+                    "step" => {
+                        if let Ok(step) = gt_input.parse::<usize>() {
+                            let len = s.track_mut().length;
+                            s.selected = step.min(len - 1);
+                        }
+                    }
+                    _ => {}
+                }
+                gt_target = None;
+                gt_input.clear();
+                gt_last_key = None;
+            }
+        }
+
         let current_state = state.lock().unwrap().clone();
-        draw_ui(&mut terminal, &current_state, &mode, &submode, &input_buffer, show_help)?;
+        draw_ui(&mut terminal, &current_state, &mode, &submode, &input_buffer, &pending_count, &gt_target, &gt_input, show_help)?;
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
@@ -600,66 +612,163 @@ pub fn run(instance: usize) -> Result<()> {
                     let _ = state::save_module_state("sequencer", 0, &params);
                     continue;
                 }
-                match key.code {
-                                        KeyCode::Char('q') if mode == "normal" => break,
-                    KeyCode::Esc if mode == "insert" => {
-                        mode = String::from("normal");
-                        submode.clear();
+
+                // gt<#> inline collection (mode-independent)
+                if let Some(ref target) = gt_target {
+                    match key.code {
+                        KeyCode::Char(c) if c.is_ascii_digit() => {
+                            gt_input.push(c);
+                            gt_last_key = Some(Instant::now());
+                            continue;
+                        }
+                        KeyCode::Enter => {
+                            if !gt_input.is_empty() {
+                                let mut s = state.lock().unwrap();
+                                match target.as_str() {
+                                    "track" => {
+                                        if let Ok(tnum) = gt_input.parse::<usize>() {
+                                            let tidx = tnum.saturating_sub(1).min(s.tracks.len().saturating_sub(1));
+                                            s.current_track = tidx;
+                                            s.selected = 0;
+                                        }
+                                    }
+                                    "step" => {
+                                        if let Ok(step) = gt_input.parse::<usize>() {
+                                            let len = s.track_mut().length;
+                                            s.selected = step.min(len - 1);
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            gt_target = None;
+                            gt_input.clear();
+                            gt_last_key = None;
+                            continue;
+                        }
+                        _ => {
+                            // Execute pending gt before handling this key
+                            if !gt_input.is_empty() {
+                                let mut s = state.lock().unwrap();
+                                match target.as_str() {
+                                    "track" => {
+                                        if let Ok(tnum) = gt_input.parse::<usize>() {
+                                            let tidx = tnum.saturating_sub(1).min(s.tracks.len().saturating_sub(1));
+                                            s.current_track = tidx;
+                                            s.selected = 0;
+                                        }
+                                    }
+                                    "step" => {
+                                        if let Ok(step) = gt_input.parse::<usize>() {
+                                            let len = s.track_mut().length;
+                                            s.selected = step.min(len - 1);
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            gt_target = None;
+                            gt_input.clear();
+                            gt_last_key = None;
+                            // Fall through to normal key processing
+                        }
                     }
-                    KeyCode::Esc if mode == "normal" => break,
-                    
-                    // Digits accumulate into pending_count
-                    KeyCode::Char(c) if mode == "insert" && c.is_ascii_digit() => {
+                }
+
+                // Input submode handling (mode-independent)
+                if !submode.is_empty() {
+                    match key.code {
+                        KeyCode::Enter => {
+                            let mut s = state.lock().unwrap();
+                            match submode.as_str() {
+                                "note" => {
+                                    if let Ok(note) = input_buffer.parse::<u8>() {
+                                        let sel = s.selected;
+                                        s.track_mut().steps[sel].note = note.clamp(0, 127);
+                                    }
+                                }
+                                "bpm" => {
+                                    if let Ok(bpm) = input_buffer.parse::<f64>() {
+                                        s.bpm = bpm.clamp(20.0, 300.0);
+                                    }
+                                }
+                                "track" => {
+                                    if let Ok(tnum) = input_buffer.parse::<usize>() {
+                                        let tidx = tnum.saturating_sub(1).min(s.tracks.len().saturating_sub(1));
+                                        s.current_track = tidx;
+                                        s.selected = 0;
+                                    }
+                                }
+                                "step" => {
+                                    if let Ok(step) = input_buffer.parse::<usize>() {
+                                        let len = s.track_mut().length;
+                                        s.selected = step.min(len - 1);
+                                    }
+                                }
+                                _ => {}
+                            }
+                            submode.clear();
+                            input_buffer.clear();
+                        }
+                        KeyCode::Char(c) if c.is_ascii_digit() || c == '.' => {
+                            input_buffer.push(c);
+                        }
+                        _ => {
+                            submode.clear();
+                            input_buffer.clear();
+                        }
+                    }
+                    continue;
+                }
+
+                // Help toggle (mode-independent)
+                if key.code == KeyCode::Char('?') {
+                    pending_count = None;
+                    pending_d = false;
+                    pending_y = false;
+                    show_help = !show_help;
+                    continue;
+                }
+
+                // Mode switch: Esc in insert → normal
+                if key.code == KeyCode::Esc && mode == "insert" {
+                    mode = String::from("normal");
+                    submode.clear();
+                    input_buffer.clear();
+                    pending_count = None;
+                    continue;
+                }
+
+                // Digits accumulate into pending_count (both modes)
+                if let KeyCode::Char(c) = key.code {
+                    if c.is_ascii_digit() {
                         if c == '0' && pending_count.is_none() {
                             let mut s = state.lock().unwrap();
                             s.selected = 0;
                         } else {
                             pending_count.get_or_insert(String::new()).push(c);
                         }
+                        pending_d = false;
+                        pending_y = false;
+                        continue;
                     }
-                    
-                    // Count-prefixed P, L, R
-                    KeyCode::Char('P') if pending_count.is_some() => {
-                        let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(0);
-                        let mut s = state.lock().unwrap();
-                let tidx = s.current_track;
-                        if count > 0 { s.track_mut().pulses = count.min(16); }
-                        let (p, l, r) = (s.track_mut().pulses, s.track_mut().length, s.track_mut().rotation);
-                        euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
-                    }
-                    KeyCode::Char('L') if pending_count.is_some() => {
-                        let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(0);
-                        let mut s = state.lock().unwrap();
-                let tidx = s.current_track;
-                        if count > 0 { s.track_mut().length = count.min(16).max(1); }
-                        s.selected = s.selected.min(s.track_mut().length - 1);
-                        let (p, l, r) = (s.track_mut().pulses, s.track_mut().length, s.track_mut().rotation);
-                        euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
-                    }
-                    KeyCode::Char('R') if pending_count.is_some() => {
-                        let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(0);
-                        let mut s = state.lock().unwrap();
-                let tidx = s.current_track;
-                        if count > 0 {
-                            s.track_mut().rotation = count.min(255);
-                        } else {
-                            s.track_mut().rotation = (s.track_mut().rotation + 1) % s.track_mut().length;
-                        }
-                        let (p, l, r) = (s.track_mut().pulses, s.track_mut().length, s.track_mut().rotation);
-                        euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
-                    }
-                    // Count-prefixed navigation
+                }
+
+                // Mode-independent navigation
+                match key.code {
                     KeyCode::Char('l') | KeyCode::Right if pending_count.is_some() => {
                         let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
                         let mut s = state.lock().unwrap();
                         let len = s.track_mut().length;
                         s.selected = (s.selected + count) % len;
+                        continue;
                     }
                     KeyCode::Char('h') | KeyCode::Left if pending_count.is_some() => {
                         let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
                         let mut s = state.lock().unwrap();
                         let len = s.track_mut().length;
                         s.selected = s.selected.saturating_sub(count).min(len - 1);
+                        continue;
                     }
                     KeyCode::Char('w') if pending_count.is_some() => {
                         let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
@@ -674,6 +783,7 @@ pub fn run(instance: usize) -> Result<()> {
                                 }
                             }
                         }
+                        continue;
                     }
                     KeyCode::Char('b') if pending_count.is_some() => {
                         let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
@@ -688,124 +798,30 @@ pub fn run(instance: usize) -> Result<()> {
                                 }
                             }
                         }
+                        continue;
                     }
-                    
-                    // Non-count commands (clear pending_count)
-                    KeyCode::Char('P') if mode == "normal" => {
+                    KeyCode::Char('l') | KeyCode::Right => {
                         pending_count = None;
-                        let mut s = state.lock().unwrap();
-                let tidx = s.current_track;
-                        let (p, l, r) = (s.track_mut().pulses, s.track_mut().length, s.track_mut().rotation);
-                        euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
-                    }
-                    KeyCode::Char('L') if mode == "insert" => {
-                        pending_count = None;
-                        let mut s = state.lock().unwrap();
-                let tidx = s.current_track;
-                        s.selected = s.selected.min(s.track_mut().length - 1);
-                        let (p, l, r) = (s.track_mut().pulses, s.track_mut().length, s.track_mut().rotation);
-                        euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
-                    }
-                    KeyCode::Char('R') if mode == "insert" => {
-                        pending_count = None;
-                        let mut s = state.lock().unwrap();
-                let tidx = s.current_track;
-                        s.track_mut().rotation = (s.track_mut().rotation + 1) % s.track_mut().length;
-                        let (p, l, r) = (s.track_mut().pulses, s.track_mut().length, s.track_mut().rotation);
-                        euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
-                    }
-                    
-                    // Clear pending_count on any other action key
-                    KeyCode::Char(' ') if mode == "insert" => {
-                        pending_count = None;
-                        let mut s = state.lock().unwrap();
-                        let tidx = s.current_track;
-                        s.playing = !s.playing;
-                    }
-                    KeyCode::Char(' ') if mode == "normal" => {
-                        let mut s = state.lock().unwrap();
-                        s.playing = !s.playing;
-                    }
-                    KeyCode::Enter if mode == "insert" => {
-                        pending_count = None;
-                        let mut s = state.lock().unwrap();
-                        let sel = s.selected;
-                        s.track_mut().steps[sel].active = !s.track_mut().steps[sel].active;
-                    }
-                    KeyCode::Char('x') if mode == "insert" => {
-                        pending_count = None;
-                        let mut s = state.lock().unwrap();
-                        let sel = s.selected;
-                        s.clipboard = Some(s.track_mut().steps[sel].clone());
-                        s.track_mut().steps[sel].active = false;
-                    }
-                    KeyCode::Char('p') if mode == "insert" => {
-                        pending_count = None;
-                        let mut s = state.lock().unwrap();
-                        let sel = s.selected;
-                        if let Some(ref clip) = s.clipboard {
-                            s.track_mut().steps[sel] = clip.clone();
-                            s.track_mut().steps[sel].active = true;
-                        }
-                    }
-                    KeyCode::Char('k') if mode == "insert" => {
-                        pending_count = None;
-                        let mut s = state.lock().unwrap();
-                        let sel = s.selected;
-                        s.track_mut().steps[sel].note = (s.track_mut().steps[sel].note + 1).min(127);
-                    }
-                    KeyCode::Char('j') if mode == "insert" => {
-                        pending_count = None;
-                        let mut s = state.lock().unwrap();
-                        let sel = s.selected;
-                        s.track_mut().steps[sel].note = s.track_mut().steps[sel].note.saturating_sub(1).max(0);
-                    }
-                    KeyCode::Char('K') if mode == "insert" => {
-                        pending_count = None;
-                        let mut s = state.lock().unwrap();
-                        let sel = s.selected;
-                        s.track_mut().steps[sel].note = (s.track_mut().steps[sel].note + 12).min(127);
-                    }
-                    KeyCode::Char('J') if mode == "insert" => {
-                        pending_count = None;
-                        let mut s = state.lock().unwrap();
-                        let sel = s.selected;
-                        s.track_mut().steps[sel].note = s.track_mut().steps[sel].note.saturating_sub(12).max(0);
-                    }
-                    KeyCode::Char('s') if mode == "normal" => {
-                        let mut s = state.lock().unwrap();
-                        s.playing = false;
-                    }
-                    KeyCode::Char('s') if mode == "insert" => {
-                        pending_count = None;
-                        let mut s = state.lock().unwrap();
-                        s.playing = false;
-                    }
-                    KeyCode::Char('+') | KeyCode::Char('=') if mode == "insert" => {
-                        pending_count = None;
-                    }
-                    KeyCode::Char('-') if mode == "insert" => {
-                        pending_count = None;
-                    }
-                    KeyCode::Char('$') if mode == "insert" => {
-                        pending_count = None;
-                        let mut s = state.lock().unwrap();
-                        s.selected = s.track_mut().length - 1;
-                    }
-                    KeyCode::Char('l') | KeyCode::Right if mode == "insert" => {
-                        pending_count = None;
+                        pending_d = false;
+                        pending_y = false;
                         let mut s = state.lock().unwrap();
                         let len = s.track_mut().length;
                         s.selected = (s.selected + 1) % len;
+                        continue;
                     }
-                    KeyCode::Char('h') | KeyCode::Left if mode == "insert" => {
+                    KeyCode::Char('h') | KeyCode::Left => {
                         pending_count = None;
+                        pending_d = false;
+                        pending_y = false;
                         let mut s = state.lock().unwrap();
                         let len = s.track_mut().length;
                         s.selected = s.selected.saturating_sub(1).min(len - 1);
+                        continue;
                     }
-                    KeyCode::Char('w') if mode == "insert" => {
+                    KeyCode::Char('w') => {
                         pending_count = None;
+                        pending_d = false;
+                        pending_y = false;
                         let mut s = state.lock().unwrap();
                         let len = s.track_mut().length;
                         for i in 1..=len {
@@ -815,9 +831,12 @@ pub fn run(instance: usize) -> Result<()> {
                                 break;
                             }
                         }
+                        continue;
                     }
-                    KeyCode::Char('b') if mode == "insert" => {
+                    KeyCode::Char('b') => {
                         pending_count = None;
+                        pending_d = false;
+                        pending_y = false;
                         let mut s = state.lock().unwrap();
                         let len = s.track_mut().length;
                         for i in 1..=len {
@@ -827,145 +846,389 @@ pub fn run(instance: usize) -> Result<()> {
                                 break;
                             }
                         }
+                        continue;
                     }
-                    KeyCode::Char('g') if mode == "insert" => {
-                        pending_count = None;
-                        if pending_g {
-                            let mut s = state.lock().unwrap();
-                            s.selected = 0;
-                            pending_g = false;
-                        } else {
-                            pending_g = true;
-                        }
-                    }
-                    KeyCode::Char('N') if mode == "insert" => {
-                        pending_count = None;
-                        submode = String::from("note");
-                        input_buffer.clear();
-                    }
-                    KeyCode::Char('t') if mode == "insert" => {
-                        pending_count = None;
-                        submode = String::from("bpm");
-                        input_buffer.clear();
-                    }
-                    // Track switching
-                    KeyCode::Char('[') if mode == "normal" => {
-                        pending_count = None;
-                        let mut s = state.lock().unwrap();
-                        if s.current_track > 0 {
-                            s.current_track -= 1;
-                        }
-                        s.selected = 0;
-                    }
-                    KeyCode::Char(']') if mode == "normal" => {
-                        pending_count = None;
-                        let mut s = state.lock().unwrap();
-                        if s.current_track + 1 < s.tracks.len() {
-                            s.current_track += 1;
-                        }
-                        s.selected = 0;
-                    }
-                    KeyCode::Char('n') if mode == "normal" => {
-                        pending_count = None;
-                        let mut s = state.lock().unwrap();
-                        s.tracks.push(Track::new());
-                        s.current_steps.push(0);
-                        s.last_notes.push(None);
-                        s.current_track = s.tracks.len() - 1;
-                        s.selected = 0;
-                    }
-                    KeyCode::Char('d') if mode == "normal" => {
-                        if pending_d {
-                            pending_d = false;
-                            let mut s = state.lock().unwrap();
-                            if s.tracks.len() > 1 {
-                                let was = s.current_track;
-                                s.track_clipboard = Some(s.tracks.remove(was));
-                                s.current_steps.remove(was);
-                                s.last_notes.remove(was);
-                                if s.current_track >= s.tracks.len() {
-                                    s.current_track = s.tracks.len() - 1;
-                                }
-                                s.selected = 0;
-                            }
-                        } else {
-                            pending_d = true;
-                            pending_y = false;
-                        }
-                    }
-                    KeyCode::Char('y') if mode == "normal" => {
-                        if pending_y {
-                            pending_y = false;
-                            let mut s = state.lock().unwrap();
-                            s.track_clipboard = Some(s.tracks[s.current_track].clone());
-                        } else {
-                            pending_y = true;
-                            pending_d = false;
-                        }
-                    }
-                    KeyCode::Char('P') if mode == "normal" => {
+                    KeyCode::Char('0') => {
                         pending_count = None;
                         pending_d = false;
                         pending_y = false;
-                        let clip = state.lock().unwrap().track_clipboard.clone();
-                        if let Some(track) = clip {
-                            let mut s = state.lock().unwrap();
-                            let insert_at = s.current_track + 1;
-                            s.tracks.insert(insert_at, track);
-                            s.current_steps.insert(insert_at, 0);
-                            s.last_notes.insert(insert_at, None);
-                            s.current_track = insert_at;
-                            s.selected = 0;
-                        }
-                    }
-                    KeyCode::Char('m') if mode == "normal" => {
-                        pending_count = None;
                         let mut s = state.lock().unwrap();
-                        let tidx = s.current_track;
-                        s.tracks[tidx].muted = !s.tracks[tidx].muted;
+                        s.selected = 0;
+                        continue;
                     }
-                    KeyCode::Char('?') if mode == "insert" => {
+                    KeyCode::Char('$') => {
                         pending_count = None;
-                        show_help = !show_help;
-                    }
-                    KeyCode::Char(c) if !submode.is_empty() => {
-                        if c.is_ascii_digit() || c == '.' {
-                            input_buffer.push(c);
-                        }
-                    }
-                    KeyCode::Enter if !submode.is_empty() => {
-                        let mut s = state.lock().unwrap();
-                        match submode.as_str() {
-                            "note" => {
-                                if let Ok(note) = input_buffer.parse::<u8>() {
-                                    let sel = s.selected;
-                                    s.track_mut().steps[sel].note = note.clamp(0, 127);
-                                }
-                            }
-                            "bpm" => {
-                                if let Ok(bpm) = input_buffer.parse::<f64>() {
-                                    s.bpm = bpm.clamp(20.0, 300.0);
-                                }
-                            }
-                            _ => {}
-                        }
-                        submode.clear();
-                        input_buffer.clear();
-                    }
-                    KeyCode::Esc if !submode.is_empty() => {
-                        submode.clear();
-                        input_buffer.clear();
-                    }
-                    
-                    // Any other key clears pending_count
-                    _ if pending_count.is_some() => {
-                        pending_count = None;
-                    }
-                    _ if pending_d || pending_y => {
                         pending_d = false;
                         pending_y = false;
+                        let mut s = state.lock().unwrap();
+                        s.selected = s.track_mut().length - 1;
+                        continue;
                     }
                     _ => {}
+                }
+
+                // Count-prefixed P, L, R (both modes)
+                match key.code {
+                    KeyCode::Char('P') if pending_count.is_some() => {
+                        let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let mut s = state.lock().unwrap();
+                        let tidx = s.current_track;
+                        if count > 0 { s.track_mut().pulses = count.min(16); }
+                        let (p, l, r) = (s.track_mut().pulses, s.track_mut().length, s.track_mut().rotation);
+                        euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
+                        pending_d = false; pending_y = false;
+                        continue;
+                    }
+                    KeyCode::Char('L') if pending_count.is_some() => {
+                        let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let mut s = state.lock().unwrap();
+                        let tidx = s.current_track;
+                        if count > 0 { s.track_mut().length = count.clamp(1, 16); }
+                        s.selected = s.selected.min(s.track_mut().length - 1);
+                        let (p, l, r) = (s.track_mut().pulses, s.track_mut().length, s.track_mut().rotation);
+                        euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
+                        pending_d = false; pending_y = false;
+                        continue;
+                    }
+                    KeyCode::Char('R') if pending_count.is_some() => {
+                        let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let mut s = state.lock().unwrap();
+                        let tidx = s.current_track;
+                        if count > 0 {
+                            s.track_mut().rotation = count.min(255);
+                        } else {
+                            s.track_mut().rotation = (s.track_mut().rotation + 1) % s.track_mut().length;
+                        }
+                        let (p, l, r) = (s.track_mut().pulses, s.track_mut().length, s.track_mut().rotation);
+                        euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
+                        pending_d = false; pending_y = false;
+                        continue;
+                    }
+                    _ => {}
+                }
+
+                // Count-prefixed track jump (both modes)
+                if let KeyCode::Char(c) = key.code {
+                    if c.is_ascii_digit() && pending_count.is_some() {
+                        // Already handled above
+                    }
+                }
+
+                if mode == "normal" {
+                    match key.code {
+                        // Enter insert mode
+                        KeyCode::Enter | KeyCode::Char('i') => {
+                            pending_count = None;
+                            pending_d = false;
+                            pending_y = false;
+                            pending_g = false;
+                            mode = String::from("insert");
+                        }
+
+                        // Count-prefixed track jump
+                        KeyCode::Char(c) if c.is_ascii_digit() && pending_count.is_some() => {
+                            let count: usize = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
+                            let mut s = state.lock().unwrap();
+                            let tidx = count.saturating_sub(1).min(s.tracks.len().saturating_sub(1));
+                            s.current_track = tidx;
+                            s.selected = 0;
+                            pending_g = false;
+                        }
+
+                        // Track ops
+                        KeyCode::Char('n') => {
+                            pending_count = None;
+                            pending_d = false;
+                            pending_y = false;
+                            pending_g = false;
+                            let mut s = state.lock().unwrap();
+                            s.tracks.push(Track::new());
+                            s.current_steps.push(0);
+                            s.last_notes.push(None);
+                            s.current_track = s.tracks.len() - 1;
+                            s.selected = 0;
+                        }
+                        KeyCode::Char('d') => {
+                            pending_count = None;
+                            pending_g = false;
+                            if pending_d {
+                                pending_d = false;
+                                let mut s = state.lock().unwrap();
+                                if s.tracks.len() > 1 {
+                                    let was = s.current_track;
+                                    s.track_clipboard = Some(s.tracks.remove(was));
+                                    s.current_steps.remove(was);
+                                    s.last_notes.remove(was);
+                                    if s.current_track >= s.tracks.len() {
+                                        s.current_track = s.tracks.len() - 1;
+                                    }
+                                    s.selected = 0;
+                                }
+                            } else {
+                                pending_d = true;
+                                pending_y = false;
+                            }
+                        }
+                        KeyCode::Char('y') => {
+                            pending_count = None;
+                            pending_g = false;
+                            if pending_y {
+                                pending_y = false;
+                                let mut s = state.lock().unwrap();
+                                s.track_clipboard = Some(s.tracks[s.current_track].clone());
+                            } else {
+                                pending_y = true;
+                                pending_d = false;
+                            }
+                        }
+                        KeyCode::Char('P') => {
+                            pending_count = None;
+                            pending_d = false;
+                            pending_y = false;
+                            pending_g = false;
+                            let clip = state.lock().unwrap().track_clipboard.clone();
+                            if let Some(track) = clip {
+                                let mut s = state.lock().unwrap();
+                                let insert_at = s.current_track + 1;
+                                s.tracks.insert(insert_at, track);
+                                s.current_steps.insert(insert_at, 0);
+                                s.last_notes.insert(insert_at, None);
+                                s.current_track = insert_at;
+                                s.selected = 0;
+                            }
+                        }
+                        KeyCode::Char('m') => {
+                            pending_count = None;
+                            pending_d = false;
+                            pending_y = false;
+                            pending_g = false;
+                            let mut s = state.lock().unwrap();
+                            let tidx = s.current_track;
+                            s.tracks[tidx].muted = !s.tracks[tidx].muted;
+                        }
+                        KeyCode::Char('k') | KeyCode::Up if pending_count.is_some() => {
+                            let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
+                            let mut s = state.lock().unwrap();
+                            for _ in 0..count {
+                                if s.current_track > 0 {
+                                    s.current_track -= 1;
+                                }
+                            }
+                            s.selected = 0;
+                            pending_d = false;
+                            pending_y = false;
+                            pending_g = false;
+                        }
+                        KeyCode::Char('j') | KeyCode::Down if pending_count.is_some() => {
+                            let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
+                            let mut s = state.lock().unwrap();
+                            for _ in 0..count {
+                                if s.current_track + 1 < s.tracks.len() {
+                                    s.current_track += 1;
+                                }
+                            }
+                            s.selected = 0;
+                            pending_d = false;
+                            pending_y = false;
+                            pending_g = false;
+                        }
+                        KeyCode::Char('[') | KeyCode::Char('k') | KeyCode::Up => {
+                            pending_count = None;
+                            pending_d = false;
+                            pending_y = false;
+                            pending_g = false;
+                            let mut s = state.lock().unwrap();
+                            if s.current_track > 0 {
+                                s.current_track -= 1;
+                            }
+                            s.selected = 0;
+                        }
+                        KeyCode::Char(']') | KeyCode::Char('j') | KeyCode::Down => {
+                            pending_count = None;
+                            pending_d = false;
+                            pending_y = false;
+                            pending_g = false;
+                            let mut s = state.lock().unwrap();
+                            if s.current_track + 1 < s.tracks.len() {
+                                s.current_track += 1;
+                            }
+                            s.selected = 0;
+                        }
+                        KeyCode::Char('g') => {
+                            pending_count = None;
+                            if pending_g {
+                                // gg = go to first track
+                                pending_g = false;
+                                let mut s = state.lock().unwrap();
+                                s.current_track = 0;
+                                s.selected = 0;
+                            } else {
+                                pending_g = true;
+                                pending_d = false;
+                                pending_y = false;
+                            }
+                        }
+                        KeyCode::Char('t') if pending_g => {
+                            pending_g = false;
+                            gt_target = Some(String::from("track"));
+                            gt_input.clear();
+                            gt_last_key = Some(Instant::now());
+                        }
+                        KeyCode::Char('G') => {
+                            pending_count = None;
+                            pending_d = false;
+                            pending_y = false;
+                            pending_g = false;
+                            let mut s = state.lock().unwrap();
+                            s.current_track = s.tracks.len() - 1;
+                            s.selected = 0;
+                        }
+
+                        // Transport
+                        KeyCode::Char(' ') => {
+                            pending_count = None;
+                            pending_d = false;
+                            pending_y = false;
+                            pending_g = false;
+                            let mut s = state.lock().unwrap();
+                            s.playing = !s.playing;
+                        }
+                        KeyCode::Char('s') => {
+                            pending_count = None;
+                            pending_d = false;
+                            pending_y = false;
+                            pending_g = false;
+                            let mut s = state.lock().unwrap();
+                            s.playing = false;
+                        }
+                        KeyCode::Char('t') => {
+                            pending_count = None;
+                            pending_d = false;
+                            pending_y = false;
+                            pending_g = false;
+                            submode = String::from("bpm");
+                            input_buffer.clear();
+                        }
+
+                        _ => {
+                            pending_count = None;
+                            pending_d = false;
+                            pending_g = false;
+                            pending_y = false;
+                            pending_g = false;
+                        }
+                    }
+                } else {
+                    // Insert mode
+                    match key.code {
+                        KeyCode::Enter | KeyCode::Char(' ') => {
+                            pending_count = None;
+                            let mut s = state.lock().unwrap();
+                            let sel = s.selected;
+                            s.track_mut().steps[sel].active = !s.track_mut().steps[sel].active;
+                        }
+                        KeyCode::Char('x') => {
+                            pending_count = None;
+                            let mut s = state.lock().unwrap();
+                            let sel = s.selected;
+                            s.clipboard = Some(s.track_mut().steps[sel].clone());
+                            s.track_mut().steps[sel].active = false;
+                        }
+                        KeyCode::Char('y') => {
+                            pending_count = None;
+                            let mut s = state.lock().unwrap();
+                            let sel = s.selected;
+                            s.clipboard = Some(s.track_mut().steps[sel].clone());
+                        }
+                        KeyCode::Char('p') => {
+                            pending_count = None;
+                            let mut s = state.lock().unwrap();
+                            let sel = s.selected;
+                            if let Some(ref clip) = s.clipboard {
+                                s.track_mut().steps[sel] = clip.clone();
+                                s.track_mut().steps[sel].active = true;
+                            }
+                        }
+                        KeyCode::Char('k') => {
+                            pending_count = None;
+                            let mut s = state.lock().unwrap();
+                            let sel = s.selected;
+                            s.track_mut().steps[sel].note = (s.track_mut().steps[sel].note + 1).min(127);
+                        }
+                        KeyCode::Char('j') => {
+                            pending_count = None;
+                            let mut s = state.lock().unwrap();
+                            let sel = s.selected;
+                            s.track_mut().steps[sel].note = s.track_mut().steps[sel].note.saturating_sub(1);
+                        }
+                        KeyCode::Char('K') => {
+                            pending_count = None;
+                            let mut s = state.lock().unwrap();
+                            let sel = s.selected;
+                            s.track_mut().steps[sel].note = (s.track_mut().steps[sel].note + 12).min(127);
+                        }
+                        KeyCode::Char('J') => {
+                            pending_count = None;
+                            let mut s = state.lock().unwrap();
+                            let sel = s.selected;
+                            s.track_mut().steps[sel].note = s.track_mut().steps[sel].note.saturating_sub(12);
+                        }
+                        KeyCode::Char('g') => {
+                            pending_count = None;
+                            if pending_g {
+                                // gg = go to step 0
+                                pending_g = false;
+                                let mut s = state.lock().unwrap();
+                                s.selected = 0;
+                            } else {
+                                pending_g = true;
+                            }
+                        }
+                        KeyCode::Char('t') if pending_g => {
+                            pending_g = false;
+                            gt_target = Some(String::from("step"));
+                            gt_input.clear();
+                            gt_last_key = Some(Instant::now());
+                        }
+                        KeyCode::Char('t') => {
+                            pending_count = None;
+                            submode = String::from("bpm");
+                            input_buffer.clear();
+                        }
+                        KeyCode::Char('N') => {
+                            pending_count = None;
+                            submode = String::from("note");
+                            input_buffer.clear();
+                        }
+                        // Euclidean (no count)
+                        KeyCode::Char('P') => {
+                            pending_count = None;
+                            let mut s = state.lock().unwrap();
+                            let tidx = s.current_track;
+                            let (p, l, r) = (s.track_mut().pulses, s.track_mut().length, s.track_mut().rotation);
+                            euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
+                        }
+                        KeyCode::Char('L') => {
+                            pending_count = None;
+                            let mut s = state.lock().unwrap();
+                            let tidx = s.current_track;
+                            s.selected = s.selected.min(s.track_mut().length - 1);
+                            let (p, l, r) = (s.track_mut().pulses, s.track_mut().length, s.track_mut().rotation);
+                            euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
+                        }
+                        KeyCode::Char('R') => {
+                            pending_count = None;
+                            let mut s = state.lock().unwrap();
+                            let tidx = s.current_track;
+                            s.track_mut().rotation = (s.track_mut().rotation + 1) % s.track_mut().length;
+                            let (p, l, r) = (s.track_mut().pulses, s.track_mut().length, s.track_mut().rotation);
+                            euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
+                        }
+                        _ => {
+                            pending_count = None;
+                            pending_g = false;
+                        }
+                    }
                 }
             }
         }

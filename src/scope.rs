@@ -99,8 +99,8 @@ fn draw_ui(
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),
                 Constraint::Min(0),
+                Constraint::Length(1),
             ])
             .split(area);
 
@@ -120,7 +120,7 @@ fn draw_ui(
             mode_str, channel_str, state.zoom, state.gain, state.trigger_level
         );
         let status_widget = Paragraph::new(status).style(Style::default().fg(Color::Cyan));
-        f.render_widget(status_widget, chunks[0]);
+        f.render_widget(status_widget, chunks[1]);
 
         let data: Vec<(f64, f64)> = state
             .buffer
@@ -163,7 +163,7 @@ fn draw_ui(
                     ]),
             );
 
-        f.render_widget(chart, chunks[1]);
+        f.render_widget(chart, chunks[0]);
 
         // Help overlay
         if show_help {
@@ -180,8 +180,8 @@ fn draw_ui(
                 Line::from("  g/G        Increase/decrease gain"),
                 Line::from("  t/T        Trigger level"),
                 Line::from(""),
-                Line::from("  ?          Close this help"),
-                Line::from("  q          Quit"),
+                Line::from("  ?          Toggle this help"),
+                Line::from("  Close pane: tmux prefix + x"),
             ];
             let help = Paragraph::new(help_text)
                 .style(Style::default().fg(Color::White).bg(Color::Black))
@@ -201,16 +201,14 @@ pub fn run(instance: usize) -> Result<()> {
     state::setup_save_signal();
     state::setup_reload_signal();
     state::write_pid_file("scope", instance);
-    let mut last_err = String::new();
     for attempt in 0..20 {
         match enable_raw_mode() {
             Ok(()) => break,
             Err(e) => {
-                last_err = format!("{}", e);
                 if attempt < 19 {
                     std::thread::sleep(Duration::from_millis(200));
                 } else {
-                    return Err(anyhow::anyhow!("Failed to enable raw mode after 20 attempts: {}", last_err));
+                    return Err(anyhow::anyhow!("Failed to enable raw mode after 20 attempts: {}", e));
                 }
             }
         }
@@ -287,7 +285,6 @@ pub fn run(instance: usize) -> Result<()> {
                     continue;
                 }
                 match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
                     KeyCode::Char('m') => {
                         let mut s = state.lock().unwrap();
                         s.mode = (s.mode + 1) % 4;
