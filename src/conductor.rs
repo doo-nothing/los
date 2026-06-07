@@ -92,7 +92,7 @@ fn spawn_session_panes(panes_data: &[(&str, &str)]) -> Result<()> {
     
     // Select first pane
     Command::new("tmux")
-        .args(["select-pane", "-t", &format!("{}:{}.0", session, win)])
+        .args(["select-pane", "-t", "0"])
         .output()?;
     
     Ok(())
