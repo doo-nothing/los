@@ -17,7 +17,7 @@ use ratatui::{
     Terminal,
 };
 
-use crate::shm::{AudioRingbuf, EventRingbuf, ModulationBus, ShmTransport};
+use crate::shm::{AudioRingbuf, EventRingbuf, Manifest, ModulationBus, ShmTransport};
 use crate::state;
 
 #[derive(Clone, Copy)]
@@ -58,11 +58,17 @@ impl Default for VoiceState {
 fn voice_thread(
     state: Arc<Mutex<VoiceState>>,
     shutdown: std::sync::mpsc::Receiver<()>,
+    instance: usize,
 ) -> Result<()> {
-    let mut ringbuf = AudioRingbuf::open("/los_mix_in")
-        .or_else(|_| AudioRingbuf::create("/los_mix_in"))?;
+    let shm_name = format!("/los_audio_voice_{}", instance);
+    let mut ringbuf = AudioRingbuf::open(&shm_name)
+        .or_else(|_| AudioRingbuf::create(&shm_name))?;
 
-    let mut events = EventRingbuf::open(0).ok();
+    let mut manifest = Manifest::open().or_else(|_| Manifest::create())?;
+    let _ = manifest.register("voice", instance, Some(&shm_name));
+
+    let consumer_id = instance.min(15); // voice N uses consumer ID N
+    let mut events = EventRingbuf::open(consumer_id).ok();
     let mut modbus = ModulationBus::open().or_else(|_| ModulationBus::create()).ok();
 
     let _transport = ShmTransport::open()
@@ -375,7 +381,7 @@ pub fn run(instance: usize) -> Result<()> {
     let (_tx, rx) = std::sync::mpsc::channel();
 
     let _voice_handle = std::thread::spawn(move || {
-        if let Err(e) = voice_thread(state_clone, rx) {
+        if let Err(e) = voice_thread(state_clone, rx, instance) {
             eprintln!("Voice thread error: {}", e);
         }
     });

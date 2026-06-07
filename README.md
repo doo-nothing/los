@@ -35,15 +35,18 @@ Module-specific keybindings work when that pane is focused.
 
 ## Project status
 
-**Phase 1 complete** — Full modular synth workstation with save/load.
+**Phase 6 complete** — Full modular synth workstation with save/load.
 
 - ✅ Conductor with session management TUI
 - ✅ Sequencer with 8 tracks, Euclidean rhythms, step editing
 - ✅ Voice (STO-style waveshaping, sub osc, FM)
-- ✅ Mixer (4-track + master)
+- ✅ Mixer (dynamic channels, manifest-driven discovery)
 - ✅ Scope (Braille/HalfBlock/Bars/Dots render modes)
 - ✅ Envelope (per-channel rise/fall with modulation)
 - ✅ Save/load: full session state (pane order, layout, active pane, params)
+- ✅ Module lifecycle: add/remove modules at runtime, `/los_manifest` SHM registry, per-module audio ringbuffers
+- ✅ Mixer auto-detects new audio sources, dynamically creates channels
+- ✅ CLI: `los --help`, module aliases (`sto` → voice, `maths` → envelope)
 
 See [DESIGN.md](DESIGN.md) for architecture details and [docs/plans/roadmap.md](docs/plans/roadmap.md) for future phases.
 

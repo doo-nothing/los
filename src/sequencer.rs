@@ -17,7 +17,7 @@ use ratatui::{
     Terminal,
 };
 
-use crate::shm::{AudioEvent, EventRingbuf, ModulationBus, ShmTransport};
+use crate::shm::{AudioEvent, EventRingbuf, Manifest, ModulationBus, ShmTransport};
 use crate::state::{self, TrackMode, TrackParam};
 
 const NUM_STEPS: usize = 16;
@@ -476,6 +476,8 @@ pub fn run(instance: usize) -> Result<()> {
     state::setup_save_signal();
     state::setup_reload_signal();
     state::write_pid_file("sequencer", instance);
+    let mut manifest = Manifest::open().or_else(|_| Manifest::create())?;
+    let _ = manifest.register("sequencer", instance, None);
     
     for attempt in 0..20 {
         match enable_raw_mode() {

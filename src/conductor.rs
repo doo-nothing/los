@@ -2,6 +2,14 @@ use std::io;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+    }
+}
+
 #[allow(dead_code)]
 fn shell_escape(s: &str) -> String {
     // Simple escaping: wrap in single quotes, escape embedded single quotes
@@ -28,6 +36,7 @@ use ratatui::{
     Terminal,
 };
 
+use crate::shm::Manifest;
 use crate::state;
 
 // ── tmux command helpers ───────────────────────────────────────────────────
@@ -167,8 +176,14 @@ pub fn create_session() -> Result<()> {
         tmux_cmd(&["respawn-pane", "-k", "-t", pane_id, &format!("{} conductor", exe)])?;
     }
     
-    // Spawn module panes
-    let modules = [("sequencer", "Sequencer"), ("voice", "Voice"), ("mixer", "Mixer"), ("scope", "Scope"), ("envelope", "Envelope")];
+    // Spawn module panes (each with instance 0 by default)
+    let modules = [
+        ("sequencer 0", "Sequencer 0"),
+        ("voice 0", "Voice 0"),
+        ("mixer 0", "Mixer 0"),
+        ("scope 0", "Scope 0"),
+        ("envelope 0", "Envelope 0"),
+    ];
     spawn_session_panes(&modules)?;
 
     // Apply default tiled layout
@@ -218,24 +233,23 @@ pub fn load_session(state_path: &str) -> Result<()> {
         }
     }
 
-    // Build module list for spawning with real labels
+    // Build module list for spawning with real labels and instance numbers
     let all_panes: Vec<(String, String)> = module_windows.iter()
         .flat_map(|w| w.panes.iter())
         .map(|p| {
-            let label = p.module.chars().next().unwrap().to_uppercase().to_string() + &p.module[1..];
-            (p.module.clone(), label)
+            let label = format!("{} {}", capitalize(&p.module), p.instance);
+            let cmd = format!("{} {}", p.module, p.instance);
+            (cmd, label)
         })
         .collect();
     let all_panes_ref: Vec<(&str, &str)> = all_panes.iter()
-        .map(|(m, l)| (m.as_str(), l.as_str()))
+        .map(|(c, l)| (c.as_str(), l.as_str()))
         .collect();
 
     if !all_panes_ref.is_empty() {
         spawn_session_panes(&all_panes_ref)?;
     }
 
-    // Apply saved layout directly. Tmux accepts layouts with old pane IDs
-    // and maps them to the current window's panes automatically.
     let mut layout_applied = false;
     for win in &st.windows {
         if win.name == "modules" && !win.layout.is_empty() {
@@ -251,19 +265,16 @@ pub fn load_session(state_path: &str) -> Result<()> {
         tmux_cmd_ok(&["select-layout", "-t", "los:modules", "tiled"]);
     }
 
-    // Apply tmux settings from state
     if !st.tmux.window_size.is_empty() {
         tmux_cmd_ok(&["set-option", "-t", "los:modules", "window-size", &st.tmux.window_size]);
     }
 
-    // Restore active pane
     for win in &st.windows {
         if win.name == "modules" {
             tmux_cmd_ok(&["select-pane", "-t", &format!("los:modules.{}", win.active_pane)]);
         }
     }
 
-    // Attach (blocks until detached; use raw .status() since tmux_cmd would hang)
     let _ = Command::new("tmux")
         .args(["attach-session", "-t", "los"])
         .status();
@@ -296,24 +307,23 @@ fn reload_modules_from_state(state_path: &std::path::Path) -> Result<()> {
         }
     }
 
-    // Build module list for spawning with real labels
+    // Build module list for spawning with real labels and instance numbers
     let all_panes: Vec<(String, String)> = module_windows.iter()
         .flat_map(|w| w.panes.iter())
         .map(|p| {
-            let label = p.module.chars().next().unwrap().to_uppercase().to_string() + &p.module[1..];
-            (p.module.clone(), label)
+            let label = format!("{} {}", capitalize(&p.module), p.instance);
+            let cmd = format!("{} {}", p.module, p.instance);
+            (cmd, label)
         })
         .collect();
     let all_panes_ref: Vec<(&str, &str)> = all_panes.iter()
-        .map(|(m, l)| (m.as_str(), l.as_str()))
+        .map(|(c, l)| (c.as_str(), l.as_str()))
         .collect();
 
     if !all_panes_ref.is_empty() {
         spawn_session_panes(&all_panes_ref)?;
     }
 
-    // Apply saved layout directly. Tmux accepts layouts with old pane IDs
-    // and maps them to the current window's panes automatically.
     let mut layout_applied = false;
     for win in &st.windows {
         if win.name == "modules" && !win.layout.is_empty() {
@@ -327,7 +337,6 @@ fn reload_modules_from_state(state_path: &std::path::Path) -> Result<()> {
         tmux_cmd_ok(&["select-layout", "-t", "los:modules", "tiled"]);
     }
 
-    // Restore active pane
     for win in &st.windows {
         if win.name == "modules" {
             tmux_cmd_ok(&["select-pane", "-t", &format!("los:modules.{}", win.active_pane)]);
@@ -433,41 +442,57 @@ pub fn run_conductor() -> Result<()> {
                         needs_refresh = true;
                     }
                     KeyCode::Char('s') => {
-                        // Save: query tmux for actual pane order, send SIGUSR1, collect
-                        let mut modules = Vec::new();
+                        // Query tmux for actual pane order and discover module instances
+                        let mut pane_info: Vec<(String, usize)> = Vec::new();
                         if let Ok(titles) = tmux_cmd(&["list-panes", "-t", "los:modules", "-F", "#{pane_title}"]) {
                             for title in titles.lines() {
-                                let module_name = title.trim().to_lowercase();
-                                if ["sequencer", "voice", "mixer", "scope", "envelope"].contains(&module_name.as_str()) {
-                                    modules.push(module_name);
-                                }
+                                let t = title.trim();
+                                let parts: Vec<&str> = t.split_whitespace().collect();
+                                if parts.is_empty() { continue; }
+                                let module_name = parts[0].to_lowercase();
+                                let instance = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                                pane_info.push((module_name, instance));
                             }
                         }
                         // Fallback to default order if tmux query fails or returns nothing
-                        if modules.is_empty() {
-                            modules = vec!["sequencer".into(), "voice".into(), "mixer".into(), "scope".into(), "envelope".into()];
+                        if pane_info.is_empty() {
+                            pane_info = vec![
+                                ("sequencer".into(), 0),
+                                ("voice".into(), 0),
+                                ("mixer".into(), 0),
+                                ("scope".into(), 0),
+                                ("envelope".into(), 0),
+                            ];
                         }
-                        
-                        // Read module PIDs from their pid files (written at startup)
+
+                        // Read PIDs from manifest + pid files
+                        let manifest = Manifest::open().ok();
                         let mut pids = Vec::new();
-                        for mod_name in &modules {
-                            if let Some(pid) = state::read_pid_file(mod_name, 0) {
-                                pids.push(pid);
+                        for (mod_name, instance) in &pane_info {
+                            let pid = manifest.as_ref().and_then(|m| {
+                                m.entries().iter().find(|e| {
+                                    e.module_name == *mod_name && e.instance == *instance
+                                }).map(|e| e.pid)
+                            }).or_else(|| {
+                                state::read_pid_file(mod_name, *instance)
+                            });
+                            if let Some(p) = pid {
+                                pids.push(p);
                             }
                         }
-                        
+
                         // Send SIGUSR1 to all module processes
                         for pid in &pids {
                             state::send_save_signal(*pid);
                         }
-                        
+
                         // Wait for modules to write their state files
                         std::thread::sleep(Duration::from_millis(500));
-                        
+
                         // Collect module state files from tmp in pane order
                         let mut panes = Vec::new();
-                        for mod_name in modules.iter() {
-                            let path = state::module_state_path(mod_name, 0);
+                        for (mod_name, instance) in pane_info.iter() {
+                            let path = state::module_state_path(mod_name, *instance);
                             let exists = path.exists();
                             let inline = if exists {
                                 std::fs::read_to_string(&path)
@@ -478,7 +503,7 @@ pub fn run_conductor() -> Result<()> {
                             };
                             panes.push(state::PaneState {
                                 module: mod_name.to_string(),
-                                instance: 0,
+                                instance: *instance,
                                 patch: None,
                                 patch_inline: inline,
                             });

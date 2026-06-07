@@ -3,12 +3,15 @@ use std::thread;
 
 use anyhow::{Context, Result};
 
-use crate::shm::AudioRingbuf;
+use crate::shm::{AudioRingbuf, Manifest};
 
 pub fn run(frequency: f32, instance: usize) -> Result<()> {
-    let shm_name = "/los_mix_in";
-    let mut ringbuf = AudioRingbuf::create(shm_name)
+    let shm_name = format!("/los_audio_tone_{}", instance);
+    let mut ringbuf = AudioRingbuf::create(&shm_name)
         .context("creating SHM audio ringbuffer")?;
+
+    let mut manifest = Manifest::open().or_else(|_| Manifest::create())?;
+    manifest.register("tone", instance, Some(&shm_name))?;
 
     let sample_rate = 48000.0;
     let channels = ringbuf.channels() as usize;
@@ -17,7 +20,7 @@ pub fn run(frequency: f32, instance: usize) -> Result<()> {
 
     let mut phase = 0.0_f64;
     let freq = frequency;
-    let amplitude = 0.3 / (instance + 1) as f32; // soften per-instance
+    let amplitude = 0.3 / (instance + 1) as f32;
 
     eprintln!(
         "los tone {}: {} Hz -> {} ({} ch, {} frames/slot)",
@@ -32,7 +35,6 @@ pub fn run(frequency: f32, instance: usize) -> Result<()> {
     loop {
         let tick = Instant::now();
 
-        // Fill block
         for frame in 0..slot_frames {
             let t = phase + frame as f64;
             let sample = (t * freq as f64 * 2.0 * std::f64::consts::PI / sample_rate).sin() as f32;
@@ -41,12 +43,10 @@ pub fn run(frequency: f32, instance: usize) -> Result<()> {
             }
         }
 
-        // Write to ringbuffer (spin-wait if full)
         loop {
             match ringbuf.write(&block) {
                 Ok(()) => break,
                 Err(_) => {
-                    // Ringbuffer full — yield and retry
                     thread::yield_now();
                 }
             }
@@ -54,7 +54,6 @@ pub fn run(frequency: f32, instance: usize) -> Result<()> {
 
         phase = (phase + slot_frames as f64) % sample_rate;
 
-        // Pace ourselves to real-time (sleep for remaining slot duration)
         let elapsed = tick.elapsed();
         if elapsed < slot_duration {
             thread::sleep(slot_duration - elapsed);

@@ -506,34 +506,72 @@ the target string.
 
 ## Phase 6: Module Lifecycle
 
-**Status: 🔜 Future**
+**Status: ✅ Complete**
 
-### Adding a new module at runtime
+### Key Changes
 
-User wants: "I need a second voice" or "I want another envelope."
+1. **Per-module audio ringbuffers**: Each audio-producing module (voice, tone) now
+   writes to its own SHM ringbuffer (`/los_audio_voice_N`) instead of sharing
+   `/los_mix_in`. This eliminates the SPSC race condition that prevented multiple
+   voices from working simultaneously.
 
-Approach: tmux keybinding (e.g. `Ctrl-b n` or a conductor key) that:
-1. Splits a pane or creates a new window
-2. Prompts for module type
-3. Spawns the module
-4. Assigns it to the mixer
+2. **`/los_manifest` SHM registry**: New lock-free shared memory object where every
+   module registers itself on startup: module type, instance number, PID, and
+   audio SHM name (if any). Uses two-phase atomic CAS protocol for safe concurrent
+   access.
 
-For now, this can be done manually in tmux:
+3. **Dynamic mixer channels**: The mixer no longer hardcodes `NUM_TRACKS = 4`.
+   It scans the manifest every 500ms, opens all discovered audio ringbuffers,
+   and dynamically adds/removes mixer channels. The mixer writes the summed
+   output to `/los_mix_in` for the scope to read.
+
+4. **CLI improvements**:
+   - `los --help` shows usage with all modules and aliases
+   - `los sto` → alias for `los voice 0`
+   - `los maths` → alias for `los envelope 0`
+   - All modules accept instance number: `los voice 1`
+
+5. **Dynamic pane discovery**: Conductor save queries tmux for all pane titles
+   and parses them to determine module type + instance number. Load recreates
+   the exact pane configuration.
+
+### Adding a module at runtime
+
+Manually in tmux:
 1. `Ctrl-b "` or `Ctrl-b %` to create a new pane
-2. `los voice 2` to spawn a second voice
-3. The new voice picks up an available mixer channel
-4. Or use a dedicated conductor keybinding: `a` for "add module" opens a prompt
+2. `los voice 1` to spawn a second voice
+3. The new voice registers in the manifest
+4. Mixer auto-detects the new source and adds a channel
+5. Save captures the expanded layout on next `s` keypress
 
 ### Mixer auto-assignment
 
-When a new voice starts, it registers itself by writing a "module manifest"
-to a new SHM object (`/los_manifest`). The mixer sees the new manifest entry
-and creates a mixer channel for it. This avoids manual routing.
+When a module starts, its `Manifest::register()` call writes an entry to
+`/los_manifest` including the audio ringbuffer name. The mixer's main loop
+scans the manifest entries and opens any new ringbuffers it finds.
 
 ### Module removal
 
-`dd` on a module in the conductor TUI kills the process and closes the pane.
-The mixer detects the manifest removal and cleans up the channel.
+Close the tmux pane (`Ctrl-b x`). When the module process exits, its manifest
+entry is cleared (via `Drop`). The mixer detects the removal and removes the
+corresponding channel on its next scan cycle.
+
+### `shm.rs` Architecture
+
+```
+Manifest (/los_manifest):
+  Header (64 bytes): version, max_entries=16, entry_size=64
+  Entries (16 × 64 bytes):
+    valid: AtomicU32 (0=empty, 2=claiming, 1=active)
+    module_name: [u8; 16]
+    instance: u32
+    pid: u32
+    audio_shm: [u8; 32] (or empty)
+
+EventRingbuf (/los_events_v2):
+  NUM_CONSUMERS: 4 → 16 (supports multiple voices/envelopes)
+  EVENT_DATA_OFFSET: 256 (was 64, to accommodate larger consumer index array)
+```
 
 ---
 
@@ -554,6 +592,6 @@ Phase 2: Merge to master             ✅ Complete
 Phase 3: Multi-track sequencer       ✅ Complete
 Phase 4: Envelope module             ✅ Complete
 Phase 5: Track routing / modulation  ✅ Complete
-Phase 6: Module lifecycle            🔜 Future
+Phase 6: Module lifecycle            ✅ Complete
 ```
 

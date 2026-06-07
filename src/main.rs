@@ -1,5 +1,5 @@
 use anyhow::Result;
-use los::{conductor, voice, sequencer, mixer, scope, envelope, state};
+use los::{conductor, voice, sequencer, mixer, scope, envelope, tone, state};
 
 fn most_recent_save() -> Option<std::path::PathBuf> {
     let states_dir = state::states_dir();
@@ -22,12 +22,48 @@ fn most_recent_save() -> Option<std::path::PathBuf> {
     entries.last().map(|(_, p)| p.clone())
 }
 
+fn usage() {
+    eprintln!("los — Live Operating System (modular synth workstation in tmux)");
+    eprintln!();
+    eprintln!("Usage:");
+    eprintln!("  los                           Auto-load last save or create fresh session");
+    eprintln!("  los <module> [instance]       Run a module directly (independent pane)");
+    eprintln!("  los load <state-file.toml>    Load a saved session state");
+    eprintln!("  los <state-file.toml>         Same as 'load'");
+    eprintln!("  los --help                    Show this help");
+    eprintln!();
+    eprintln!("Modules:");
+    eprintln!("  conductor          Session orchestrator (TUI with save/load)");
+    eprintln!("  sequencer          Step sequencer (N tracks, Euclidean rhythms)");
+    eprintln!("  voice              STO-style synth voice (shape, sub, FM)");
+    eprintln!("  mixer              Audio mixer (cpal output, dynamic channels)");
+    eprintln!("  scope              ASCII oscilloscope (reads master mix)");
+    eprintln!("  envelope           Envelope generator (Maths-inspired, 4 channels)");
+    eprintln!("  tone [freq]        Test tone generator (for testing)");
+    eprintln!();
+    eprintln!("Aliases:");
+    eprintln!("  sto                → voice");
+    eprintln!("  maths              → envelope");
+}
+
+fn dispatch_module(name: &str, instance: usize) -> Result<()> {
+    match name {
+        "conductor" => conductor::run_conductor(),
+        "sequencer" => sequencer::run(instance),
+        "voice" | "sto" => voice::run(instance),
+        "mixer" => mixer::run(),
+        "scope" => scope::run(instance),
+        "envelope" | "maths" => envelope::run(instance),
+        "tone" => tone::run(440.0, instance),
+        _ => anyhow::bail!("unknown module: {name}"),
+    }
+}
+
 fn main() -> Result<()> {
     state::ensure_dirs()?;
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() < 2 {
-        // Auto-load most recent save, or create fresh session
         if let Some(path) = most_recent_save() {
             eprintln!("[los] auto-loading {}", path.display());
             conductor::load_session(&path.to_string_lossy())
@@ -37,29 +73,14 @@ fn main() -> Result<()> {
         }
     } else {
         match args[1].as_str() {
-            "conductor" => conductor::run_conductor(),
-            "sequencer" => {
-                let instance = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-                sequencer::run(instance)
-            }
-            "voice" => {
-                let instance = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-                voice::run(instance)
-            }
-            "mixer" => mixer::run(),
-            "scope" => {
-                let instance = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-                scope::run(instance)
-            }
-            "envelope" => {
-                let instance = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-                envelope::run(instance)
+            "--help" | "-h" => {
+                usage();
+                Ok(())
             }
             "load" => {
                 let path = args.get(2).cloned().unwrap_or_default();
                 if path.is_empty() {
-                    eprintln!("Usage: los load <state-file.toml>");
-                    std::process::exit(1);
+                    anyhow::bail!("Usage: los load <state-file.toml>");
                 }
                 conductor::load_session(&path)
             }
@@ -67,9 +88,8 @@ fn main() -> Result<()> {
                 conductor::load_session(&args[1])
             }
             _ => {
-                eprintln!("Unknown command: {}", args[1]);
-                eprintln!("Run 'los' with no arguments to start the session");
-                std::process::exit(1);
+                let instance = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+                dispatch_module(&args[1], instance)
             }
         }
     }

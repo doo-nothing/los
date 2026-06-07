@@ -17,7 +17,7 @@ use ratatui::{
     Terminal,
 };
 
-use crate::shm::{EventRingbuf, ModulationBus, ShmTransport};
+use crate::shm::{EventRingbuf, Manifest, ModulationBus, ShmTransport};
 use crate::state;
 
 const NUM_CHANNELS: usize = 4;
@@ -158,8 +158,10 @@ fn curve(t: f32, shape: f32) -> f32 {
 fn env_thread(
     state: Arc<Mutex<EnvelopeState>>,
     shutdown: std::sync::mpsc::Receiver<()>,
+    instance: usize,
 ) -> Result<()> {
-    let mut events = EventRingbuf::open(1).ok();
+    let consumer_id = (4 + instance).min(15);
+    let mut events = EventRingbuf::open(consumer_id).ok();
     let mut modbus = ModulationBus::open().or_else(|_| ModulationBus::create()).ok();
     let _transport = ShmTransport::open().ok();
 
@@ -171,7 +173,7 @@ fn env_thread(
         }
 
         if events.is_none() {
-            events = EventRingbuf::open(1).ok();
+            events = EventRingbuf::open((4 + instance).min(15)).ok();
         }
         if modbus.is_none() {
             modbus = ModulationBus::open().ok();
@@ -498,6 +500,8 @@ pub fn run(instance: usize) -> Result<()> {
     state::setup_save_signal();
     state::setup_reload_signal();
     state::write_pid_file("envelope", instance);
+    let mut manifest = Manifest::open().or_else(|_| Manifest::create())?;
+    let _ = manifest.register("envelope", instance, None);
 
     for attempt in 0..20 {
         match enable_raw_mode() {
@@ -540,7 +544,7 @@ pub fn run(instance: usize) -> Result<()> {
     let (_tx, rx) = std::sync::mpsc::channel();
 
     let _env_handle = std::thread::spawn(move || {
-        if let Err(e) = env_thread(state_clone, rx) {
+        if let Err(e) = env_thread(state_clone, rx, instance) {
             eprintln!("Envelope thread error: {}", e);
         }
     });

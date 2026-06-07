@@ -18,7 +18,7 @@ use ratatui::{
     Terminal,
 };
 
-use crate::shm::{AudioRingbuf, ModulationBus};
+use crate::shm::{AudioRingbuf, Manifest, ModulationBus};
 use crate::state;
 
 const BUFFER_SIZE: usize = 512;
@@ -219,6 +219,8 @@ pub fn run(instance: usize) -> Result<()> {
     state::setup_save_signal();
     state::setup_reload_signal();
     state::write_pid_file("scope", instance);
+    let mut manifest = Manifest::open().or_else(|_| Manifest::create())?;
+    let _ = manifest.register("scope", instance, None);
     for attempt in 0..20 {
         match enable_raw_mode() {
             Ok(()) => break,

@@ -139,4 +139,4 @@ Lookup order: `./los.toml` → `~/.config/los/layout.toml` → built-in defaults
 | **3** | `los sequencer` — step sequencer TUI, writes events to SHM | ✅ |
 | **4** | `los scope` — reads mixer SHM, ASCII oscilloscope | ✅ |
 | **5** | Save/load session state, envelope module, track routing, multi-track | ✅ |
-| **6** | Effects (delay, reverb, filter), recorder, patch system, polish | 🔜 |
+| **6** | Module lifecycle: add/remove at runtime, `/los_manifest` SHM registry, per-module audio ringbuffers, dynamic mixer channels, CLI aliases | ✅ |

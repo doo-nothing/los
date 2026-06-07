@@ -1,6 +1,6 @@
 use std::ffi::CString;
 use std::ptr;
-use std::sync::atomic::{compiler_fence, Ordering};
+use std::sync::atomic::{AtomicU32, compiler_fence, Ordering};
 
 use anyhow::{Context, Result};
 
@@ -17,6 +17,7 @@ const SHM_DATA_SIZE: usize = DEFAULT_SLOT_FRAMES as usize
     * DEFAULT_NUM_SLOTS as usize;
 
 const DATA_OFFSET: usize = 64;
+const EVENT_DATA_OFFSET: usize = 256; // larger header for 16 consumer read indices
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -584,7 +585,7 @@ impl AudioEvent {
 // ── EventRingbuf (MPMC) ────────────────────────────────────────────────────
 
 const EVENT_SIZE: usize = 32;
-const NUM_CONSUMERS: usize = 4;
+const NUM_CONSUMERS: usize = 16;
 
 /// Lock-free multi-producer multi-consumer ringbuffer for fixed-size events
 /// backed by POSIX SHM.
@@ -592,12 +593,8 @@ const NUM_CONSUMERS: usize = 4;
 /// Layout:
 ///   [0..8)     write_index    : u64
 ///   [8..16)    reserved
-///   [16..24)   read_index_0   : u64  (voice consumer)
-///   [24..32)   read_index_1   : u64  (envelope consumer)
-///   [32..40)   read_index_2   : u64  (reserved)
-///   [40..48)   read_index_3   : u64  (reserved)
-///   [48..64)   reserved
-///   [64..)     event data  (EVENT_SIZE bytes each)
+///   [16..N*8)  read_index_0..N : u64  (one per consumer)
+///   [256..)    event data  (EVENT_SIZE bytes each)
 pub struct EventRingbuf {
     fd: i32,
     ptr: *mut u8,
@@ -639,7 +636,7 @@ impl EventRingbuf {
 
     fn slot_ptr(&self, index: u64) -> *mut u8 {
         let slot = index as usize % self.num_slots as usize;
-        let offset = DATA_OFFSET + slot * EVENT_SIZE;
+        let offset = EVENT_DATA_OFFSET + slot * EVENT_SIZE;
         unsafe { self.ptr.add(offset) }
     }
 
@@ -657,7 +654,7 @@ impl EventRingbuf {
     pub fn create() -> Result<Self> {
         let num_slots = 256u32;
         let data_bytes = num_slots as usize * EVENT_SIZE;
-        let total_size = DATA_OFFSET + data_bytes;
+        let total_size = EVENT_DATA_OFFSET + data_bytes;
         let cname = CString::new(Self::name()).unwrap();
 
         let fd = unsafe {
@@ -696,8 +693,6 @@ impl EventRingbuf {
 
         unsafe {
             ptr::write_unaligned(ptr as *mut u64, 0);            // write_index
-            // Initialize read indices to MAX so unopened consumers don't block the producer.
-            // Each consumer sets its index to the current write_index on open().
             for i in 0..NUM_CONSUMERS {
                 ptr::write_unaligned(ptr.add(16 + i * 8) as *mut u64, u64::MAX);
             }
@@ -717,7 +712,7 @@ impl EventRingbuf {
     pub fn open_producer() -> Result<Self> {
         let num_slots = 256u32;
         let data_bytes = num_slots as usize * EVENT_SIZE;
-        let total_size = DATA_OFFSET + data_bytes;
+        let total_size = EVENT_DATA_OFFSET + data_bytes;
         let cname = CString::new(Self::name()).unwrap();
 
         let fd = unsafe {
@@ -758,7 +753,7 @@ impl EventRingbuf {
         anyhow::ensure!(consumer_id < NUM_CONSUMERS, "consumer_id must be < {}", NUM_CONSUMERS);
         let num_slots = 256u32;
         let data_bytes = num_slots as usize * EVENT_SIZE;
-        let total_size = DATA_OFFSET + data_bytes;
+        let total_size = EVENT_DATA_OFFSET + data_bytes;
         let cname = CString::new(Self::name()).unwrap();
 
         let fd = unsafe {
@@ -998,6 +993,221 @@ impl ModulationBus {
         }
         compiler_fence(Ordering::Release);
     }
+}
+
+// ── Manifest ────────────────────────────────────────────────────────────
+
+const MANIFEST_MAX_ENTRIES: usize = 16;
+const MANIFEST_ENTRY_SIZE: usize = 64;
+const MANIFEST_HEADER_SIZE: usize = 64;
+const MANIFEST_TOTAL_SIZE: usize =
+    MANIFEST_HEADER_SIZE + MANIFEST_MAX_ENTRIES * MANIFEST_ENTRY_SIZE;
+
+/// Shared module registry: each module registers itself on startup.
+///
+/// Lock-free fixed-size array. Entries are claimed atomically via CAS.
+/// See `Manifest::entries()` for the reader-safe protocol.
+pub struct Manifest {
+    ptr: *mut u8,
+    fd: i32,
+    owned: bool,
+    my_slot: Option<usize>,
+}
+
+unsafe impl Send for Manifest {}
+
+impl Drop for Manifest {
+    fn drop(&mut self) {
+        self.unregister();
+        if !self.ptr.is_null() {
+            unsafe { libc::munmap(self.ptr as *mut libc::c_void, MANIFEST_TOTAL_SIZE) };
+        }
+        if self.fd >= 0 {
+            unsafe { libc::close(self.fd) };
+        }
+        if self.owned {
+            let cname = CString::new("/los_manifest").unwrap();
+            unsafe { libc::shm_unlink(cname.as_ptr()) };
+        }
+    }
+}
+
+impl Manifest {
+    fn entry_valid_ptr(&self, slot: usize) -> *const AtomicU32 {
+        unsafe {
+            self.ptr
+                .add(MANIFEST_HEADER_SIZE + slot * MANIFEST_ENTRY_SIZE)
+                as *const AtomicU32
+        }
+    }
+
+    fn entry_valid_mut_ptr(&self, slot: usize) -> *mut AtomicU32 {
+        unsafe {
+            self.ptr
+                .add(MANIFEST_HEADER_SIZE + slot * MANIFEST_ENTRY_SIZE)
+                as *mut AtomicU32
+        }
+    }
+
+    fn entry_data_ptr(&self, slot: usize) -> *mut u8 {
+        unsafe { self.ptr.add(MANIFEST_HEADER_SIZE + slot * MANIFEST_ENTRY_SIZE + 4) }
+    }
+
+    pub fn create() -> Result<Self> {
+        let cname = CString::new("/los_manifest").unwrap();
+        let total = MANIFEST_TOTAL_SIZE;
+
+        let fd = unsafe {
+            let fd = libc::shm_open(cname.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o644);
+            if fd < 0 {
+                anyhow::bail!("shm_open(/los_manifest) failed: {}", std::io::Error::last_os_error());
+            }
+            if libc::ftruncate(fd, total as libc::off_t) < 0 {
+                libc::close(fd);
+                libc::shm_unlink(cname.as_ptr());
+                anyhow::bail!("ftruncate(/los_manifest) failed: {}", std::io::Error::last_os_error());
+            }
+            fd
+        };
+
+        let ptr = unsafe {
+            let p = libc::mmap(
+                std::ptr::null_mut(),
+                total,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            );
+            if p == libc::MAP_FAILED {
+                libc::close(fd);
+                libc::shm_unlink(cname.as_ptr());
+                anyhow::bail!("mmap(/los_manifest) failed: {}", std::io::Error::last_os_error());
+            }
+            p as *mut u8
+        };
+
+        unsafe {
+            ptr::write_unaligned(ptr as *mut u32, 1);
+            ptr::write_unaligned(ptr.add(4) as *mut u32, MANIFEST_MAX_ENTRIES as u32);
+            ptr::write_unaligned(ptr.add(8) as *mut u32, MANIFEST_ENTRY_SIZE as u32);
+            std::ptr::write_bytes(
+                ptr.add(MANIFEST_HEADER_SIZE),
+                0,
+                MANIFEST_MAX_ENTRIES * MANIFEST_ENTRY_SIZE,
+            );
+        }
+
+        Ok(Self { ptr, fd, owned: true, my_slot: None })
+    }
+
+    pub fn open() -> Result<Self> {
+        let cname = CString::new("/los_manifest").unwrap();
+
+        let fd = unsafe {
+            let fd = libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0);
+            if fd < 0 {
+                anyhow::bail!("shm_open(/los_manifest) failed: {}", std::io::Error::last_os_error());
+            }
+            fd
+        };
+
+        let ptr = unsafe {
+            let p = libc::mmap(
+                std::ptr::null_mut(),
+                MANIFEST_TOTAL_SIZE,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            );
+            if p == libc::MAP_FAILED {
+                libc::close(fd);
+                anyhow::bail!("mmap(/los_manifest) failed: {}", std::io::Error::last_os_error());
+            }
+            p as *mut u8
+        };
+
+        Ok(Self { ptr, fd, owned: false, my_slot: None })
+    }
+
+    /// Register this module in the manifest. Returns the slot index.
+    /// Uses two-phase claim protocol: 0 → CLAIMING → 1.
+    /// Readers only read entries with valid == 1 (data fully written).
+    pub fn register(&mut self, module_name: &str, instance: usize, audio_shm: Option<&str>) -> Result<usize> {
+        anyhow::ensure!(module_name.len() < 16, "module name too long (max 15 chars)");
+        if let Some(shm) = audio_shm {
+            anyhow::ensure!(shm.len() < 32, "audio SHM name too long (max 31 chars)");
+        }
+
+        for slot in 0..MANIFEST_MAX_ENTRIES {
+            let valid = unsafe { &*self.entry_valid_mut_ptr(slot) };
+            match valid.compare_exchange(0, 2, Ordering::Acquire, Ordering::Relaxed) {
+                Ok(_) => {
+                    let data = self.entry_data_ptr(slot);
+                    unsafe {
+                        let name_bytes = module_name.as_bytes();
+                        std::ptr::copy_nonoverlapping(name_bytes.as_ptr(), data, name_bytes.len());
+                        std::ptr::write(data.add(name_bytes.len()), 0u8);
+
+                        ptr::write_unaligned(data.add(16) as *mut u32, instance as u32);
+                        ptr::write_unaligned(data.add(20) as *mut u32, std::process::id());
+
+                        if let Some(shm) = audio_shm {
+                            let shm_bytes = shm.as_bytes();
+                            let dst = data.add(24);
+                            std::ptr::copy_nonoverlapping(shm_bytes.as_ptr(), dst, shm_bytes.len());
+                            std::ptr::write(dst.add(shm_bytes.len()), 0u8);
+                        }
+                    }
+                    valid.store(1, Ordering::Release);
+                    self.my_slot = Some(slot);
+                    return Ok(slot);
+                }
+                _ => continue,
+            }
+        }
+        anyhow::bail!("manifest is full ({} max entries)", MANIFEST_MAX_ENTRIES);
+    }
+
+    /// Unregister from our slot (called on Drop, but can be explicit too).
+    pub fn unregister(&mut self) {
+        if let Some(slot) = self.my_slot.take() {
+            let valid = unsafe { &*self.entry_valid_mut_ptr(slot) };
+            valid.store(0, Ordering::Release);
+        }
+    }
+
+    /// Read all valid entries from the manifest.
+    /// Only reads entries where valid == 1 (data fully written by producer).
+    pub fn entries(&self) -> Vec<ManifestEntry> {
+        let mut result = Vec::new();
+        for slot in 0..MANIFEST_MAX_ENTRIES {
+            let valid = unsafe { &*self.entry_valid_ptr(slot) };
+            if valid.load(Ordering::Acquire) != 1 {
+                continue;
+            }
+            let data = unsafe { std::slice::from_raw_parts(self.entry_data_ptr(slot), 60) };
+            let name_end = data[..16].iter().position(|&b| b == 0).unwrap_or(16);
+            let module_name = String::from_utf8_lossy(&data[..name_end]).to_string();
+            let instance = unsafe { ptr::read_unaligned(data.as_ptr().add(16) as *const u32) as usize };
+            let pid = unsafe { ptr::read_unaligned(data.as_ptr().add(20) as *const u32) };
+            let audio_shm = {
+                let shm_end = data[24..56].iter().position(|&b| b == 0).unwrap_or(32);
+                if shm_end == 0 { None } else { Some(String::from_utf8_lossy(&data[24..24 + shm_end]).to_string()) }
+            };
+            result.push(ManifestEntry { module_name, instance, pid, audio_shm });
+        }
+        result
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ManifestEntry {
+    pub module_name: String,
+    pub instance: usize,
+    pub pid: u32,
+    pub audio_shm: Option<String>,
 }
 
 #[cfg(test)]
@@ -1253,5 +1463,73 @@ mod shm_tests {
         // And the fallback pattern used in modules: open().or_else(|_| create())
         let bus3 = ModulationBus::open().or_else(|_| ModulationBus::create()).expect("fallback works");
         assert!((bus3.get(0) - 0.42).abs() < 0.001);
+    }
+
+    // ── Manifest tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn manifest_create_and_register() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ = unsafe { libc::shm_unlink(CString::new("/los_manifest").unwrap().as_ptr()) };
+        let mut m = Manifest::create().expect("create manifest");
+
+        let slot = m.register("voice", 0, Some("/los_audio_voice_0")).expect("register");
+        assert_eq!(slot, 0, "first registration should get slot 0");
+
+        let entries = m.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].module_name, "voice");
+        assert_eq!(entries[0].instance, 0);
+        assert_eq!(entries[0].audio_shm.as_deref(), Some("/los_audio_voice_0"));
+
+        m.unregister();
+        assert!(m.entries().is_empty(), "after unregister, entries should be empty");
+    }
+
+    #[test]
+    fn manifest_multiple_modules() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ = unsafe { libc::shm_unlink(CString::new("/los_manifest").unwrap().as_ptr()) };
+        let mut m = Manifest::create().expect("create manifest");
+
+        m.register("sequencer", 0, None).expect("register sequencer");
+        m.register("voice", 0, Some("/los_audio_voice_0")).expect("register voice 0");
+        m.register("voice", 1, Some("/los_audio_voice_1")).expect("register voice 1");
+        m.register("envelope", 0, None).expect("register envelope");
+
+        let entries = m.entries();
+        assert_eq!(entries.len(), 4);
+
+        let voice_entries: Vec<_> = entries.iter().filter(|e| e.module_name == "voice").collect();
+        assert_eq!(voice_entries.len(), 2);
+    }
+
+    #[test]
+    fn manifest_open_from_another_process() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ = unsafe { libc::shm_unlink(CString::new("/los_manifest").unwrap().as_ptr()) };
+        let mut m1 = Manifest::create().expect("create manifest");
+        m1.register("voice", 0, Some("/los_audio_voice_0")).expect("register");
+
+        // Simulate another process opening the same manifest
+        let m2 = Manifest::open().expect("open manifest");
+        let entries = m2.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].module_name, "voice");
+    }
+
+    #[test]
+    fn manifest_full() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ = unsafe { libc::shm_unlink(CString::new("/los_manifest").unwrap().as_ptr()) };
+        let mut m = Manifest::create().expect("create manifest");
+
+        // Fill all 16 slots
+        for i in 0..16 {
+            m.register("mod", i, None).expect("register");
+        }
+
+        // Next registration should fail
+        assert!(m.register("overflow", 0, None).is_err());
     }
 }
