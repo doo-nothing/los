@@ -359,13 +359,142 @@ pub fn load_module_state<T: for<'de> Deserialize<'de>>(module: &str, instance: u
 mod reload_tests {
     use super::*;
     use std::time::Duration;
-    
+
     #[test]
     fn test_reload_signal() {
         setup_reload_signal();
-        let pid = std::process::id() as u32;
+        let pid = std::process::id();
         send_reload_signal(pid);
         std::thread::sleep(Duration::from_millis(100));
         assert!(check_reload_signal(), "SIGUSR2 should have been received");
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+
+    #[test]
+    fn session_state_roundtrip_with_layout_and_active_pane() {
+        let original = SessionState {
+            meta: Meta {
+                name: "test-session".into(),
+                created: "1234567890".into(),
+            },
+            tmux: TmuxState {
+                session_name: "los".into(),
+                active_window: "modules".into(),
+                window_size: "largest".into(),
+            },
+            windows: vec![
+                WindowState {
+                    name: "modules".into(),
+                    layout: "1f88,159x79,0,0[159x25,0,0{79x25,0,0,1176,79x25,80,0,1177},159x25,0,26{79x25,0,26,1175,79x25,80,26,1178},159x27,0,52,1174]".into(),
+                    active_pane: 3,
+                    panes: vec![
+                        PaneState {
+                            module: "sequencer".into(),
+                            instance: 0,
+                            patch: None,
+                            patch_inline: None,
+                        },
+                        PaneState {
+                            module: "voice".into(),
+                            instance: 0,
+                            patch: None,
+                            patch_inline: None,
+                        },
+                        PaneState {
+                            module: "envelope".into(),
+                            instance: 0,
+                            patch: None,
+                            patch_inline: None,
+                        },
+                    ],
+                },
+            ],
+        };
+
+        let toml_str = to_toml_string(&original).expect("serialize");
+        let loaded: SessionState = from_toml_file_str(&toml_str).expect("deserialize");
+
+        assert_eq!(loaded.meta.name, "test-session");
+        assert_eq!(loaded.windows.len(), 1);
+        assert_eq!(loaded.windows[0].name, "modules");
+        assert_eq!(loaded.windows[0].layout, original.windows[0].layout);
+        assert_eq!(loaded.windows[0].active_pane, 3);
+        assert_eq!(loaded.windows[0].panes.len(), 3);
+        assert_eq!(loaded.windows[0].panes[0].module, "sequencer");
+        assert_eq!(loaded.windows[0].panes[1].module, "voice");
+        assert_eq!(loaded.windows[0].panes[2].module, "envelope");
+    }
+
+    #[test]
+    fn session_state_roundtrip_defaults() {
+        let original = SessionState {
+            meta: Meta {
+                name: "minimal".into(),
+                created: "".into(),
+            },
+            tmux: TmuxState::default(),
+            windows: vec![WindowState {
+                name: "modules".into(),
+                layout: "".into(),
+                active_pane: 0,
+                panes: vec![],
+            }],
+        };
+
+        let toml_str = to_toml_string(&original).expect("serialize");
+        let loaded: SessionState = from_toml_file_str(&toml_str).expect("deserialize");
+
+        assert_eq!(loaded.windows[0].layout, "");
+        assert_eq!(loaded.windows[0].active_pane, 0);
+        assert!(loaded.windows[0].panes.is_empty());
+        assert_eq!(loaded.tmux.session_name, "los");
+    }
+
+    #[test]
+    fn window_state_multiple_panes() {
+        let win = WindowState {
+            name: "test".into(),
+            layout: "tiled".into(),
+            active_pane: 2,
+            panes: vec![
+                PaneState { module: "a".into(), instance: 0, patch: None, patch_inline: None },
+                PaneState { module: "b".into(), instance: 1, patch: None, patch_inline: None },
+                PaneState { module: "c".into(), instance: 0, patch: None, patch_inline: None },
+            ],
+        };
+
+        let toml = to_toml_string(&win).expect("serialize");
+        let loaded: WindowState = from_toml_file_str(&toml).expect("deserialize");
+
+        assert_eq!(loaded.active_pane, 2);
+        assert_eq!(loaded.panes.len(), 3);
+        assert_eq!(loaded.panes[1].instance, 1);
+    }
+
+    #[test]
+    fn pane_state_with_inline_patch() {
+        use toml::Value;
+        let pane = PaneState {
+            module: "voice".into(),
+            instance: 0,
+            patch: None,
+            patch_inline: Some(Value::String("test".into())),
+        };
+
+        let toml = to_toml_string(&pane).expect("serialize");
+        let loaded: PaneState = from_toml_file_str(&toml).expect("deserialize");
+
+        assert_eq!(loaded.module, "voice");
+        assert!(loaded.patch_inline.is_some());
+    }
+
+    fn from_toml_file_str<T: for<'de> Deserialize<'de>>(s: &str) -> Result<T> {
+        let val: toml::Value = toml::from_str(s).context("parse toml")?;
+        let t = T::deserialize(val).context("deserialize")?;
+        Ok(t)
     }
 }
