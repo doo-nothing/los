@@ -114,178 +114,6 @@ fn get_active_pane_index(session: &str, window: &str) -> Result<usize> {
 // return a portable layout string that can be applied to any window with the
 // same number of panes.
 
-/// Recompute tmux's rotating-XOR checksum over `s`.
-/// Count leaf cells (panes with IDs) in a tmux layout string.
-fn count_layout_leaf_cells(layout: &str) -> usize {
-    let body = layout.split_once(',').map(|(_, b)| b).unwrap_or(layout);
-    let mut count = 0;
-    let mut depth = 0;
-    let mut bytes = body.bytes().peekable();
-
-    while let Some(b) = bytes.next() {
-        match b {
-            b'[' | b'{' => depth += 1,
-            b']' | b'}' => depth -= 1,
-            // A comma at depth 0 followed by a digit is a leaf ID separator
-            b',' if depth == 0 => {
-                if let Some(&next) = bytes.peek() {
-                    if next.is_ascii_digit() {
-                        count += 1;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    count
-}
-
-fn tmux_checksum(s: &str) -> u32 {
-    let mut csum: u32 = 0;
-    for b in s.bytes() {
-        csum ^= b as u32;
-        csum = csum.rotate_left(1);
-    }
-    csum
-}
-
-/// Parse a tmux layout string and replace all embedded pane IDs with the
-/// IDs of the newly created panes. Recomputes the checksum so the layout
-/// can be applied to a window with different pane IDs.
-fn make_layout_portable(layout: &str, new_ids: &[u32]) -> Option<String> {
-    // Split off the checksum prefix: "1f88,body"
-    let body = layout.split_once(',')?.1;
-
-    let mut parser = LayoutParser { s: body, pos: 0, id_idx: 0, new_ids };
-    let rebuilt = parser.parse_cell()?;
-
-    parser.skip_whitespace();
-    if !parser.is_at_end() {
-        return None;
-    }
-
-    let checksum = tmux_checksum(&rebuilt);
-    Some(format!("{:04x},{}", checksum, rebuilt))
-}
-
-struct LayoutParser<'a> {
-    s: &'a str,
-    pos: usize,
-    id_idx: usize,
-    new_ids: &'a [u32],
-}
-
-impl<'a> LayoutParser<'a> {
-    fn peek(&self) -> Option<u8> {
-        self.s.as_bytes().get(self.pos).copied()
-    }
-
-    fn skip_whitespace(&mut self) {
-        while let Some(b) = self.peek() {
-            if b.is_ascii_whitespace() {
-                self.pos += 1;
-            } else {
-                break;
-            }
-        }
-    }
-
-    fn is_at_end(&self) -> bool {
-        self.pos >= self.s.len()
-    }
-
-    fn parse_number(&mut self) -> Option<u32> {
-        let start = self.pos;
-        while let Some(b) = self.peek() {
-            if b.is_ascii_digit() {
-                self.pos += 1;
-            } else {
-                break;
-            }
-        }
-        if self.pos == start {
-            return None;
-        }
-        self.s[start..self.pos].parse().ok()
-    }
-
-    fn expect(&mut self, expected: u8) -> bool {
-        if self.peek() == Some(expected) {
-            self.pos += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn next_new_id(&mut self) -> Option<u32> {
-        if self.id_idx < self.new_ids.len() {
-            let id = self.new_ids[self.id_idx];
-            self.id_idx += 1;
-            Some(id)
-        } else {
-            None
-        }
-    }
-
-    fn parse_cell(&mut self) -> Option<String> {
-        let mut out = String::new();
-
-        // size: NUMBER x NUMBER
-        let w = self.parse_number()?;
-        if !self.expect(b'x') { return None; }
-        let h = self.parse_number()?;
-        out.push_str(&format!("{}x{}", w, h));
-
-        // position: , NUMBER , NUMBER
-        if !self.expect(b',') { return None; }
-        let x = self.parse_number()?;
-        out.push(',');
-        out.push_str(&x.to_string());
-
-        if !self.expect(b',') { return None; }
-        let y = self.parse_number()?;
-        out.push(',');
-        out.push_str(&y.to_string());
-
-        // After position:
-        //   , NUMBER  → leaf with ID (replace with new ID)
-        //   [ cells ] → horizontal container
-        //   { cells } → vertical container
-        if self.expect(b',') {
-            // leaf with ID — replace it
-            self.parse_number()?; // consume old ID
-            let new_id = self.next_new_id()?;
-            out.push(',');
-            out.push_str(&new_id.to_string());
-        } else if self.expect(b'[') {
-            out.push('[');
-            self.parse_cells(&mut out)?;
-            if !self.expect(b']') { return None; }
-            out.push(']');
-        } else if self.expect(b'{') {
-            out.push('{');
-            self.parse_cells(&mut out)?;
-            if !self.expect(b'}') { return None; }
-            out.push('}');
-        }
-
-        Some(out)
-    }
-
-    fn parse_cells(&mut self, out: &mut String) -> Option<()> {
-        let cell = self.parse_cell()?;
-        out.push_str(&cell);
-
-        while self.expect(b',') {
-            out.push(',');
-            let cell = self.parse_cell()?;
-            out.push_str(&cell);
-        }
-        Some(())
-    }
-}
-
 fn spawn_session_panes(panes_data: &[(&str, &str)]) -> Result<()> {
     let session = "los";
     let win = "modules";
@@ -411,32 +239,15 @@ pub fn load_session(state_path: &str) -> Result<()> {
         saved.min(actual_pane_count.saturating_sub(1))
     };
 
-    // Apply saved layout: query new pane IDs, replace them in the layout string,
-    // recompute checksum, then call select-layout.
+    // Apply saved layout directly. Tmux accepts layouts with old pane IDs
+    // and maps them to the current window's panes automatically.
     let mut layout_applied = false;
     for win in &st.windows {
         if win.name == "modules" && !win.layout.is_empty() {
-            let pane_ids_stdout = tmux_cmd(
-                &["list-panes", "-t", "los:modules", "-F", "#{pane_id}"]
-            );
-            if let Ok(stdout) = pane_ids_stdout {
-                let new_ids: Vec<u32> = stdout
-                    .lines()
-                    .filter_map(|line| line.trim().strip_prefix('%').and_then(|s| s.parse().ok()))
-                    .collect();
-                if let Some(portable) = make_layout_portable(&win.layout, &new_ids) {
-                    match tmux_cmd(&["select-layout", "-t", "los:modules", &portable]) {
-                        Ok(_) => layout_applied = true,
-                        Err(e) => eprintln!(
-                            "[load_session] portable layout failed ({}), falling back to tiled", e
-                        ),
-                    }
-                } else {
-                    eprintln!(
-                        "[load_session] failed to make layout portable ({} pane IDs, {} leaf cells), falling back to tiled",
-                        new_ids.len(),
-                        count_layout_leaf_cells(&win.layout)
-                    );
+            match tmux_cmd(&["select-layout", "-t", "los:modules", &win.layout]) {
+                Ok(_) => layout_applied = true,
+                Err(e) => {
+                    eprintln!("[load_session] layout failed ({}), falling back to tiled", e);
                 }
             }
         }
@@ -513,33 +324,14 @@ fn reload_modules_from_state(state_path: &std::path::Path) -> Result<()> {
         saved.min(actual_pane_count.saturating_sub(1))
     };
 
-    // Apply saved layout: query new pane IDs, replace them in the layout string,
-    // recompute checksum, then call select-layout.
+    // Apply saved layout directly. Tmux accepts layouts with old pane IDs
+    // and maps them to the current window's panes automatically.
     let mut layout_applied = false;
     for win in &st.windows {
         if win.name == "modules" && !win.layout.is_empty() {
-            let pane_ids_stdout = tmux_cmd(
-                &["list-panes", "-t", "los:modules", "-F", "#{pane_id}"]
-            );
-            if let Ok(stdout) = pane_ids_stdout {
-                let new_ids: Vec<u32> = stdout
-                    .lines()
-                    .filter_map(|line| line.trim().strip_prefix('%').and_then(|s| s.parse().ok()))
-                    .collect();
-                if let Some(portable) = make_layout_portable(&win.layout, &new_ids) {
-                    match tmux_cmd(&["select-layout", "-t", "los:modules", &portable]) {
-                        Ok(_) => layout_applied = true,
-                        Err(e) => eprintln!(
-                            "[reload] portable layout failed ({}), falling back to tiled", e
-                        ),
-                    }
-                } else {
-                    eprintln!(
-                        "[reload] failed to make layout portable ({} pane IDs, {} leaf cells), falling back to tiled",
-                        new_ids.len(),
-                        count_layout_leaf_cells(&win.layout)
-                    );
-                }
+            match tmux_cmd(&["select-layout", "-t", "los:modules", &win.layout]) {
+                Ok(_) => layout_applied = true,
+                Err(e) => eprintln!("[reload] layout failed ({}), falling back to tiled", e),
             }
         }
     }
@@ -847,67 +639,4 @@ mod tests {
         assert_eq!(shell_escape(path), "'/Users/jake/.config/los/states/YES.toml'");
     }
 
-    // ── layout parser tests ──────────────────────────────────────────────
-
-    #[test]
-    fn test_layout_portable_replaces_ids() {
-        // Full layout string from a real tmux session with 5 panes
-        let original = "1f88,159x79,0,0[159x25,0,0{79x25,0,0,1176,79x25,80,0,1177},159x25,0,26{79x25,0,26,1175,79x25,80,26,1178},159x27,0,52,1174]";
-        let new_ids = vec![2000, 2001, 2002, 2003, 2004];
-
-        let portable = make_layout_portable(original, &new_ids).expect("should parse");
-
-        // Should contain a comma after the checksum prefix
-        assert!(portable.contains(','));
-
-        // All old IDs should be replaced with new ones
-        assert!(!portable.contains("1176"));
-        assert!(!portable.contains("1177"));
-        assert!(!portable.contains("1175"));
-        assert!(!portable.contains("1178"));
-        assert!(!portable.contains("1174"));
-
-        // New IDs should be present
-        assert!(portable.contains("2000"));
-        assert!(portable.contains("2001"));
-        assert!(portable.contains("2002"));
-        assert!(portable.contains("2003"));
-        assert!(portable.contains("2004"));
-    }
-
-    #[test]
-    fn test_layout_portable_single_pane() {
-        let original = "0000,80x24,0,0,1234";
-        let portable = make_layout_portable(original, &[42]).expect("should parse");
-        assert!(portable.ends_with("80x24,0,0,42"));
-    }
-
-    #[test]
-    fn test_layout_portable_nested() {
-        // Nested containers: horizontal with vertical inside (4 panes)
-        let original = "aaaa,100x50,0,0[50x50,0,0{25x50,0,0,1,25x50,0,25,2},50x50,0,0{25x50,0,0,3,25x50,0,25,4}]";
-        let portable = make_layout_portable(original, &[10, 20, 30, 40]).expect("should parse");
-        assert!(portable.contains("25x50,0,0,10,25x50,0,25,20}"));
-        assert!(portable.contains("25x50,0,0,30,25x50,0,25,40}"));
-    }
-
-    #[test]
-    fn test_layout_portable_not_enough_ids_fails() {
-        let original = "0000,80x24,0,0,1,80x24,0,0,2"; // 2 panes
-        assert!(make_layout_portable(original, &[100]).is_none()); // only 1 new ID
-    }
-
-    #[test]
-    fn test_layout_portable_empty_fails() {
-        assert!(make_layout_portable("", &[]).is_none());
-        assert!(make_layout_portable("nocomma", &[]).is_none());
-    }
-
-    #[test]
-    fn test_layout_portable_checksum_recomputed() {
-        let body = "80x24,0,0,80x24,0,0";
-        let c1 = tmux_checksum(body);
-        let c2 = tmux_checksum(body);
-        assert_eq!(c1, c2);
-    }
 }
