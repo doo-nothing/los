@@ -165,19 +165,11 @@ pub struct VoiceParams {
 pub struct SequencerParams {
     pub bpm: Option<f64>,
     pub playing: Option<bool>,
-    #[serde(default)]
-    pub tracks: Vec<TrackParam>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TrackParam {
+    pub euclidean_pulses: Option<usize>,
+    pub euclidean_length: Option<usize>,
+    pub euclidean_rotation: Option<usize>,
     #[serde(default)]
     pub steps: Vec<StepParam>,
-    pub length: Option<usize>,
-    pub pulses: Option<usize>,
-    pub rotation: Option<usize>,
-    #[serde(default)]
-    pub muted: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
