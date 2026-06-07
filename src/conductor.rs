@@ -90,6 +90,13 @@ fn spawn_session_panes(panes_data: &[(&str, &str)]) -> Result<()> {
             .output()?;
     }
     
+    // Select first pane
+    if let Some((_, first_pane_id)) = panes.first() {
+        Command::new("tmux")
+            .args(["select-pane", "-t", first_pane_id])
+            .output()?;
+    }
+    
     Ok(())
 }
 
@@ -186,13 +193,14 @@ pub fn load_session(state_path: &str) -> Result<()> {
             .output();
     }
     
-    // Select active window, first pane, and attach
+    // Select active window, saved pane (or first), and attach
     let active_win = if st.tmux.active_window.is_empty() { "modules" } else { &st.tmux.active_window };
     Command::new("tmux")
         .args(["select-window", "-t", &format!("los:{}", active_win)])
         .output()?;
+    let pane_idx = st.tmux.active_pane.unwrap_or(0);
     Command::new("tmux")
-        .args(["select-pane", "-t", &format!("los:{}.0", active_win)])
+        .args(["select-pane", "-t", &format!("los:{}.{}", active_win, pane_idx)])
         .output()?;
     Command::new("tmux")
         .args(["attach-session", "-t", "los"])
@@ -346,12 +354,23 @@ pub fn run_conductor() -> Result<()> {
                         };
                         let save_path = state::states_dir().join(&filename);
                         
+                        // Capture active pane from modules window
+                        let active_pane = Command::new("tmux")
+                            .args(["display-message", "-p", "-t", "los:modules", "#{pane_index}"])
+                            .output()
+                            .ok()
+                            .and_then(|o| String::from_utf8(o.stdout).ok())
+                            .and_then(|s| s.trim().parse::<usize>().ok());
+                        
                         let session_state = state::SessionState {
                             meta: state::Meta {
                                 name: filename.trim_end_matches(".toml").to_string(),
                                 created: now,
                             },
-                            tmux: state::TmuxState::default(),
+                            tmux: state::TmuxState {
+                                active_pane,
+                                ..state::TmuxState::default()
+                            },
                             windows: vec![state::WindowState {
                                 name: "modules".into(),
                                 layout: "tiled".into(),
