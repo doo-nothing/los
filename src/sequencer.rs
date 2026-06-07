@@ -124,46 +124,49 @@ fn sequencer_thread(
         let clock = transport.clock();
         let samples_per_step = (60.0 / bpm * sample_rate / 4.0) as u64;
 
-        let mut s = state.lock().unwrap();
-        
-        // Grow tracking vectors as tracks are added
-        while last_steps.len() < s.tracks.len() {
-            last_steps.push(-1);
-        }
-        while s.current_steps.len() < s.tracks.len() {
-            s.current_steps.push(0);
-        }
-        while s.last_notes.len() < s.tracks.len() {
-            s.last_notes.push(None);
-        }
-
-        for t in 0..s.tracks.len() {
-            let len = s.tracks[t].length;
-            let current_step = if samples_per_step > 0 && playing {
-                (clock / samples_per_step) as usize % len
-            } else {
-                last_steps[t].max(0) as usize
-            };
-
-            if current_step as i32 != last_steps[t] {
-                s.current_steps[t] = current_step;
-
-                if playing && !s.tracks[t].muted {
-                    if let Some(n) = s.last_notes[t] {
-                        let _ = events.write_event(&AudioEvent::note_off(n, last_steps[t] as u32));
-                    }
-                    if s.tracks[t].steps[current_step].active {
-                        let note = s.tracks[t].steps[current_step].note;
-                        let vel = s.tracks[t].steps[current_step].velocity;
-                        let _ = events.write_event(&AudioEvent::note_on(note, vel, current_step as u32));
-                        s.last_notes[t] = Some(note);
-                    } else {
-                        s.last_notes[t] = None;
-                    }
-                }
-                last_steps[t] = current_step as i32;
+        // Scope the lock so it's not held during sleep
+        {
+            let mut s = state.lock().unwrap();
+            
+            // Grow tracking vectors as tracks are added
+            while last_steps.len() < s.tracks.len() {
+                last_steps.push(-1);
             }
-        }
+            while s.current_steps.len() < s.tracks.len() {
+                s.current_steps.push(0);
+            }
+            while s.last_notes.len() < s.tracks.len() {
+                s.last_notes.push(None);
+            }
+
+            for t in 0..s.tracks.len() {
+                let len = s.tracks[t].length;
+                let current_step = if samples_per_step > 0 && playing {
+                    (clock / samples_per_step) as usize % len
+                } else {
+                    last_steps[t].max(0) as usize
+                };
+
+                if current_step as i32 != last_steps[t] {
+                    s.current_steps[t] = current_step;
+
+                    if playing && !s.tracks[t].muted {
+                        if let Some(n) = s.last_notes[t] {
+                            let _ = events.write_event(&AudioEvent::note_off(n, last_steps[t] as u32));
+                        }
+                        if s.tracks[t].steps[current_step].active {
+                            let note = s.tracks[t].steps[current_step].note;
+                            let vel = s.tracks[t].steps[current_step].velocity;
+                            let _ = events.write_event(&AudioEvent::note_on(note, vel, current_step as u32));
+                            s.last_notes[t] = Some(note);
+                        } else {
+                            s.last_notes[t] = None;
+                        }
+                    }
+                    last_steps[t] = current_step as i32;
+                }
+            }
+        } // lock released here, before sleep
 
         std::thread::sleep(Duration::from_millis(10));
     }
