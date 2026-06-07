@@ -115,9 +115,12 @@ pub fn create_session() -> Result<()> {
     let modules = [("sequencer", "Sequencer"), ("voice", "Voice"), ("mixer", "Mixer"), ("scope", "Scope")];
     spawn_session_panes(&modules)?;
     
-    // Select modules window and attach
+    // Select modules window, first pane, and attach
     Command::new("tmux")
         .args(["select-window", "-t", "los:modules"])
+        .output()?;
+    Command::new("tmux")
+        .args(["select-pane", "-t", "los:modules.0"])
         .output()?;
     Command::new("tmux")
         .args(["attach-session", "-t", "los"])
