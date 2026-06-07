@@ -92,15 +92,15 @@ fn sequencer_thread(
             break;
         }
 
-        let (bpm, playing) = {
+        let (bpm, playing, length) = {
             let s = state.lock().unwrap();
-            (s.bpm, s.playing)
+            (s.bpm, s.playing, s.euclidean_length)
         };
 
         let clock = transport.clock();
         let samples_per_step = (60.0 / bpm * sample_rate / 4.0) as u64;
         let current_step = if samples_per_step > 0 && playing {
-            (clock / samples_per_step) as usize % NUM_STEPS
+            (clock / samples_per_step) as usize % length
         } else {
             last_step.max(0) as usize
         };
@@ -156,6 +156,10 @@ fn euclidean_apply(steps: &mut [Step], pulses: usize, length: usize, rotation: u
         let src = (i + len - rot) % len;
         steps[i].active = pattern[src];
     }
+    // Deactivate any steps beyond the set length
+    for i in len..steps.len() {
+        steps[i].active = false;
+    }
 }
 
 fn draw_ui(
@@ -179,20 +183,22 @@ fn draw_ui(
             .split(area);
 
         let play_str = if state.playing { "▶" } else { "■" };
+        let len = state.euclidean_length;
         let status = format!(
             "{} {} BPM | Step {}/{} | Sel {} | P:{} L:{} R:{} | {}",
-            play_str, state.bpm as u32, state.current_step, NUM_STEPS, state.selected,
-            state.euclidean_pulses, state.euclidean_length, state.euclidean_rotation,
+            play_str, state.bpm as u32, state.current_step, len, state.selected,
+            state.euclidean_pulses, len, state.euclidean_rotation,
             input_mode
         );
         let status_widget = Paragraph::new(status)
             .style(Style::default().fg(Color::Cyan));
         f.render_widget(status_widget, chunks[0]);
 
-        let step_width = area.width as usize / NUM_STEPS;
-        let step_width = step_width.max(3).min(8);
+        let step_width = area.width as usize / len;
+        let step_width = step_width.max(3).min(10);
         
-        for i in 0..NUM_STEPS {
+        for i in 0..len {
+            let step = &state.steps[i];
             let step = &state.steps[i];
             let is_current = i == state.current_step;
             let is_selected = i == state.selected;
@@ -412,6 +418,7 @@ pub fn run(_instance: usize) -> Result<()> {
                         let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(0);
                         let mut s = state.lock().unwrap();
                         if count > 0 { s.euclidean_length = count.min(16).max(1); }
+                        s.selected = s.selected.min(s.euclidean_length - 1);
                         let (p, l, r) = (s.euclidean_pulses, s.euclidean_length, s.euclidean_rotation);
                         euclidean_apply(&mut s.steps, p, l, r);
                     }
@@ -430,19 +437,22 @@ pub fn run(_instance: usize) -> Result<()> {
                     KeyCode::Char('l') | KeyCode::Right if pending_count.is_some() => {
                         let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
                         let mut s = state.lock().unwrap();
-                        s.selected = (s.selected + count) % NUM_STEPS;
+                        let len = s.euclidean_length;
+                        s.selected = (s.selected + count) % len;
                     }
                     KeyCode::Char('h') | KeyCode::Left if pending_count.is_some() => {
                         let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
                         let mut s = state.lock().unwrap();
-                        s.selected = s.selected.saturating_sub(count).min(NUM_STEPS - 1);
+                        let len = s.euclidean_length;
+                        s.selected = s.selected.saturating_sub(count).min(len - 1);
                     }
                     KeyCode::Char('w') if pending_count.is_some() => {
                         let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
                         let mut s = state.lock().unwrap();
+                        let len = s.euclidean_length;
                         for _ in 0..count {
-                            for i in 1..=NUM_STEPS {
-                                let idx = (s.selected + i) % NUM_STEPS;
+                            for i in 1..=len {
+                                let idx = (s.selected + i) % len;
                                 if s.steps[idx].active {
                                     s.selected = idx;
                                     break;
@@ -453,9 +463,10 @@ pub fn run(_instance: usize) -> Result<()> {
                     KeyCode::Char('b') if pending_count.is_some() => {
                         let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
                         let mut s = state.lock().unwrap();
+                        let len = s.euclidean_length;
                         for _ in 0..count {
-                            for i in 1..=NUM_STEPS {
-                                let idx = (s.selected + NUM_STEPS - i) % NUM_STEPS;
+                            for i in 1..=len {
+                                let idx = (s.selected + len - i) % len;
                                 if s.steps[idx].active {
                                     s.selected = idx;
                                     break;
@@ -474,6 +485,7 @@ pub fn run(_instance: usize) -> Result<()> {
                     KeyCode::Char('L') if input_mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
+                        s.selected = s.selected.min(s.euclidean_length - 1);
                         let (p, l, r) = (s.euclidean_pulses, s.euclidean_length, s.euclidean_rotation);
                         euclidean_apply(&mut s.steps, p, l, r);
                     }
@@ -551,23 +563,26 @@ pub fn run(_instance: usize) -> Result<()> {
                     KeyCode::Char('$') if input_mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
-                        s.selected = NUM_STEPS - 1;
+                        s.selected = s.euclidean_length - 1;
                     }
                     KeyCode::Char('l') | KeyCode::Right if input_mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
-                        s.selected = (s.selected + 1) % NUM_STEPS;
+                        let len = s.euclidean_length;
+                        s.selected = (s.selected + 1) % len;
                     }
                     KeyCode::Char('h') | KeyCode::Left if input_mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
-                        s.selected = s.selected.saturating_sub(1).min(NUM_STEPS - 1);
+                        let len = s.euclidean_length;
+                        s.selected = s.selected.saturating_sub(1).min(len - 1);
                     }
                     KeyCode::Char('w') if input_mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
-                        for i in 1..=NUM_STEPS {
-                            let idx = (s.selected + i) % NUM_STEPS;
+                        let len = s.euclidean_length;
+                        for i in 1..=len {
+                            let idx = (s.selected + i) % len;
                             if s.steps[idx].active {
                                 s.selected = idx;
                                 break;
@@ -577,8 +592,9 @@ pub fn run(_instance: usize) -> Result<()> {
                     KeyCode::Char('b') if input_mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
-                        for i in 1..=NUM_STEPS {
-                            let idx = (s.selected + NUM_STEPS - i) % NUM_STEPS;
+                        let len = s.euclidean_length;
+                        for i in 1..=len {
+                            let idx = (s.selected + len - i) % len;
                             if s.steps[idx].active {
                                 s.selected = idx;
                                 break;
