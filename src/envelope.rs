@@ -61,6 +61,10 @@ struct ChannelParams {
     loop_mode: bool,
     attenuverter: f32, // -1.0 to 1.0
     trigger_track: i32, // -1 = off, 0..NUM_TRACKS-1 = specific track
+    rise_track: i32,    // -1 = none, 0+ = track modulating rise
+    fall_track: i32,
+    shape_track: i32,
+    atten_track: i32,
 }
 
 /// Exponential parameter → real time in seconds.
@@ -103,7 +107,11 @@ impl Default for ChannelParams {
             shape_param: 0.5,  // ~1.0 (linear-ish)
             loop_mode: false,
             attenuverter: 1.0,
-            trigger_track: -1, // ch0 = global by default
+            trigger_track: -1, // ch0 = Track 1 in EnvelopeState::default
+            rise_track: -1,
+            fall_track: -1,
+            shape_track: -1,
+            atten_track: -1,
         }
     }
 }
@@ -233,10 +241,27 @@ fn env_thread(
                 ch.eoc_fired = false;
             }
 
-            // Convert params to real values
-            let rise_time = param_to_time(params.rise_param);
-            let fall_time = param_to_time(params.fall_param);
-            let shape = param_to_shape(params.shape_param);
+            // Track modulation: if a track is assigned, read its value from modbus
+            let track_val = |track: i32| -> f32 {
+                if track >= 0 {
+                    modbus.as_ref().map(|m| m.get(8 + track as usize)).unwrap_or(0.0)
+                } else {
+                    -1.0 // sentinel: no assignment
+                }
+            };
+
+            let rp = track_val(params.rise_track);
+            let rp = if rp < 0.0 { params.rise_param } else { rp.clamp(0.0, 1.0) };
+            let fp = track_val(params.fall_track);
+            let fp = if fp < 0.0 { params.fall_param } else { fp.clamp(0.0, 1.0) };
+            let sp = track_val(params.shape_track);
+            let sp = if sp < 0.0 { params.shape_param } else { sp.clamp(0.0, 1.0) };
+            let att = track_val(params.atten_track);
+            let att = if att < 0.0 { params.attenuverter } else { att.clamp(-1.0, 1.0) };
+
+            let rise_time = param_to_time(rp);
+            let fall_time = param_to_time(fp);
+            let shape = param_to_shape(sp);
 
             // Process one block worth of samples (update per sample for smoothness)
             for _ in 0..BLOCK_SIZE {
@@ -287,8 +312,7 @@ fn env_thread(
                 }
             }
 
-            // Apply attenuverter
-            let att = params.attenuverter;
+            // Apply attenuverter (already modulated above if track assigned)
             ch_outputs[i] = ch.output * att;
         }
 
@@ -364,6 +388,10 @@ fn draw_ui(
         let params = state.params[ch];
         let env_ch = state.channels[ch];
 
+        let track_label = |t: i32| -> String {
+            if t >= 0 { format!(" @T{}", t) } else { String::new() }
+        };
+
         let trigger_str = if params.trigger_track < 0 {
             "Off".to_string()
         } else {
@@ -375,10 +403,10 @@ fn draw_ui(
         let shape_exp = param_to_shape(params.shape_param);
 
         let param_labels = [
-            format!("Rise:  {}", format_time(rise_time)),
-            format!("Fall:  {}", format_time(fall_time)),
-            format!("Shape: {:.2}", shape_exp),
-            format!("Atten: {:+.2}", params.attenuverter),
+            format!("Rise:  {}{}", format_time(rise_time), track_label(params.rise_track)),
+            format!("Fall:  {}{}", format_time(fall_time), track_label(params.fall_track)),
+            format!("Shape: {:.2}{}", shape_exp, track_label(params.shape_track)),
+            format!("Atten: {:+.2}{}", params.attenuverter, track_label(params.atten_track)),
             format!("Trig:  {}", trigger_str),
         ];
 
@@ -440,7 +468,7 @@ fn draw_ui(
                 Line::from(""),
                 Line::from("Actions:"),
                 Line::from("  t          Trigger envelope manually"),
-                Line::from("  T          Cycle trigger track (Global/Track 1-8)"),
+                Line::from("  @          Cycle track assignment for selected param"),
                 Line::from("  c          Toggle cycle/loop mode"),
                 Line::from("  g          Toggle gate (sustain)"),
                 Line::from(""),
@@ -495,6 +523,10 @@ pub fn run(instance: usize) -> Result<()> {
             s.params[i].loop_mode = ch.loop_mode;
             s.params[i].attenuverter = ch.attenuverter;
             s.params[i].trigger_track = ch.trigger_track;
+            s.params[i].rise_track = ch.rise_track;
+            s.params[i].fall_track = ch.fall_track;
+            s.params[i].shape_track = ch.shape_track;
+            s.params[i].atten_track = ch.atten_track;
         }
     }
 
@@ -521,6 +553,10 @@ pub fn run(instance: usize) -> Result<()> {
                     loop_mode: p.loop_mode,
                     attenuverter: p.attenuverter,
                     trigger_track: p.trigger_track,
+                    rise_track: p.rise_track,
+                    fall_track: p.fall_track,
+                    shape_track: p.shape_track,
+                    atten_track: p.atten_track,
                 }).collect(),
                 logic_outputs: state::LogicOutputConfig {
                     sum_enabled: true,
@@ -542,6 +578,10 @@ pub fn run(instance: usize) -> Result<()> {
                     s.params[i].loop_mode = ch.loop_mode;
                     s.params[i].attenuverter = ch.attenuverter;
                     s.params[i].trigger_track = ch.trigger_track;
+                    s.params[i].rise_track = ch.rise_track;
+                    s.params[i].fall_track = ch.fall_track;
+                    s.params[i].shape_track = ch.shape_track;
+                    s.params[i].atten_track = ch.atten_track;
                 }
             }
         }
@@ -562,6 +602,10 @@ pub fn run(instance: usize) -> Result<()> {
                             loop_mode: p.loop_mode,
                             attenuverter: p.attenuverter,
                             trigger_track: p.trigger_track,
+                            rise_track: p.rise_track,
+                            fall_track: p.fall_track,
+                            shape_track: p.shape_track,
+                            atten_track: p.atten_track,
                         }).collect(),
                         logic_outputs: state::LogicOutputConfig {
                             sum_enabled: true,
@@ -627,16 +671,25 @@ pub fn run(instance: usize) -> Result<()> {
                         s.channels[ch].eor_fired = false;
                         s.channels[ch].eoc_fired = false;
                     }
-                    KeyCode::Char('T') => {
+                    KeyCode::Char('@') => {
                         let mut s = state.lock().unwrap();
                         let ch = s.current_channel;
                         let max_track = crate::NUM_TRACKS as i32 - 1;
-                        let next = match s.params[ch].trigger_track {
-                            -1 if max_track >= 0 => 0,
-                            x if x >= max_track => -1,
-                            x => x + 1,
+                        let next_track = |cur: i32| -> i32 {
+                            match cur {
+                                -1 if max_track >= 0 => 0,
+                                x if x >= max_track => -1,
+                                x => x + 1,
+                            }
                         };
-                        s.params[ch].trigger_track = next;
+                        match selected {
+                            0 => { s.params[ch].rise_track = next_track(s.params[ch].rise_track); }
+                            1 => { s.params[ch].fall_track = next_track(s.params[ch].fall_track); }
+                            2 => { s.params[ch].shape_track = next_track(s.params[ch].shape_track); }
+                            3 => { s.params[ch].atten_track = next_track(s.params[ch].atten_track); }
+                            4 => { s.params[ch].trigger_track = next_track(s.params[ch].trigger_track); }
+                            _ => {}
+                        }
                     }
                     KeyCode::Char('c') => {
                         let mut s = state.lock().unwrap();
@@ -723,6 +776,10 @@ mod envelope_tests {
             loop_mode: false,
             attenuverter: 1.0,
             trigger_track: -1,
+            rise_track: -1,
+            fall_track: -1,
+            shape_track: -1,
+            atten_track: -1,
         };
         let rise_time = param_to_time(params.rise_param);
         let shape = param_to_shape(params.shape_param);
@@ -758,6 +815,10 @@ mod envelope_tests {
             loop_mode: false,
             attenuverter: 1.0,
             trigger_track: -1,
+            rise_track: -1,
+            fall_track: -1,
+            shape_track: -1,
+            atten_track: -1,
         };
         let fall_time = param_to_time(params.fall_param);
         let shape = param_to_shape(params.shape_param);

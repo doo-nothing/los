@@ -159,6 +159,14 @@ pub struct VoiceParams {
     pub freq: Option<f32>,
     pub gate: Option<bool>,
     pub level: Option<f32>,
+    #[serde(default)]
+    pub shape_track: i32,
+    #[serde(default)]
+    pub sub_track: i32,
+    #[serde(default)]
+    pub fm_track: i32,
+    #[serde(default)]
+    pub level_track: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -179,6 +187,8 @@ pub struct StepParam {
     pub active: bool,
     pub note: u8,
     pub velocity: u8,
+    #[serde(default)]
+    pub mod_value: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,8 +200,8 @@ pub struct TrackParam {
     pub rotation: Option<usize>,
     #[serde(default)]
     pub muted: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mod_dest: Option<ModDest>,
+    #[serde(default)]
+    pub mode: TrackMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -234,6 +244,14 @@ pub struct EnvelopeChannelParams {
     pub attenuverter: f32,
     #[serde(default)]
     pub trigger_track: i32,
+    #[serde(default)]
+    pub rise_track: i32,
+    #[serde(default)]
+    pub fall_track: i32,
+    #[serde(default)]
+    pub shape_track: i32,
+    #[serde(default)]
+    pub atten_track: i32,
 }
 
 impl Default for EnvelopeChannelParams {
@@ -245,6 +263,10 @@ impl Default for EnvelopeChannelParams {
             loop_mode: false,
             attenuverter: 1.0,
             trigger_track: -1,
+            rise_track: -1,
+            fall_track: -1,
+            shape_track: -1,
+            atten_track: -1,
         }
     }
 }
@@ -254,6 +276,15 @@ pub struct LogicOutputConfig {
     pub sum_enabled: bool,
     pub or_enabled: bool,
     pub and_enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub enum TrackMode {
+    #[default]
+    #[serde(rename = "note")]
+    Note,
+    #[serde(rename = "modulation")]
+    Modulation,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

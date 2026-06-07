@@ -30,6 +30,10 @@ struct VoiceState {
     gate: bool,
     level: f32,
     velocity: f32, // 0.0-1.0 from last note_on
+    shape_track: i32,  // -1 = none, 0+ = track index
+    sub_track: i32,
+    fm_track: i32,
+    level_track: i32,
 }
 
 impl Default for VoiceState {
@@ -43,6 +47,10 @@ impl Default for VoiceState {
             gate: false,
             level: 0.0,
             velocity: 0.0,
+            shape_track: -1,
+            sub_track: -1,
+            fm_track: -1,
+            level_track: -1,
         }
     }
 }
@@ -105,18 +113,35 @@ fn voice_thread(
         let velocity = s.velocity;
 
         // Read modulation from bus
-        // ch0  = envelope ch1 output (primary amplitude control)
-        // ch12 = param mod: voice shape
-        // ch13 = param mod: voice sub
-        // ch14 = param mod: voice fm
+        // ch0       = envelope ch1 output (primary amplitude control)
+        // ch(8+N)   = track N step value (velocity for note tracks, voltage for mod tracks)
         let envelope_level = modbus.as_ref().map(|m| m.get(0)).unwrap_or(0.0);
-        let mod_shape = modbus.as_ref().map(|m| m.get(12)).unwrap_or(0.0);
-        let mod_sub = modbus.as_ref().map(|m| m.get(13)).unwrap_or(0.0);
-        let mod_fm = modbus.as_ref().map(|m| m.get(14)).unwrap_or(0.0);
 
-        let shape = (s.shape + mod_shape).clamp(0.0, 1.0);
-        let sub_mix = (s.sub + mod_sub).clamp(0.0, 1.0);
-        let fm_amount = (s.fm + mod_fm).clamp(0.0, 1.0);
+        let track_val = |track: i32| -> f32 {
+            if track >= 0 {
+                modbus.as_ref().map(|m| m.get(8 + track as usize)).unwrap_or(0.0)
+            } else {
+                0.0
+            }
+        };
+
+        let shape = if s.shape_track >= 0 {
+            track_val(s.shape_track)
+        } else {
+            s.shape
+        }.clamp(0.0, 1.0);
+
+        let sub_mix = if s.sub_track >= 0 {
+            track_val(s.sub_track)
+        } else {
+            s.sub
+        }.clamp(0.0, 1.0);
+
+        let fm_amount = if s.fm_track >= 0 {
+            track_val(s.fm_track)
+        } else {
+            s.fm
+        }.clamp(0.0, 1.0);
 
         // Final amplitude: envelope × velocity
         // envelope_level comes from envelope module (modbus ch0)
@@ -218,6 +243,12 @@ fn draw_ui(
         f.render_widget(status_widget, chunks[6]);
 
         // Parameters
+        let param_tracks = [
+            state.shape_track,
+            state.sub_track,
+            state.fm_track,
+        ];
+
         let params = [
             ("Shape", state.shape, selected == 0),
             ("Sub", state.sub, selected == 1),
@@ -231,10 +262,16 @@ fn draw_ui(
                 Style::default().fg(Color::White)
             };
 
+            let track_str = if param_tracks[i] >= 0 {
+                format!(" @T{}", param_tracks[i])
+            } else {
+                String::new()
+            };
+
             let gauge = Gauge::default()
                 .gauge_style(style)
                 .ratio(*value as f64)
-                .label(format!("{}: {:.2}", name, value));
+                .label(format!("{}: {:.2}{}", name, value, track_str));
             f.render_widget(gauge, chunks[i]);
         }
 
@@ -273,6 +310,9 @@ fn draw_ui(
                 Line::from("  1          Main (sine/saw/square)"),
                 Line::from("  2          Main + Sub"),
                 Line::from("  3          Mix"),
+                Line::from(""),
+                Line::from("Track assignment:"),
+                Line::from("  @          Assign selected param to next track"),
                 Line::from(""),
                 Line::from("  ?          Toggle this help"),
                 Line::from("  Close pane: tmux prefix + x"),
@@ -324,6 +364,10 @@ pub fn run(instance: usize) -> Result<()> {
         if let Some(v) = params.freq { s.freq = v; }
         if let Some(v) = params.gate { s.gate = v; }
         if let Some(v) = params.level { s.level = v; }
+        s.shape_track = params.shape_track;
+        s.sub_track = params.sub_track;
+        s.fm_track = params.fm_track;
+        s.level_track = params.level_track;
     }
     
     let state_clone = Arc::clone(&state);
@@ -351,9 +395,13 @@ pub fn run(instance: usize) -> Result<()> {
                 freq: Some(s.freq),
                 gate: Some(s.gate),
                 level: Some(s.level),
+                shape_track: s.shape_track,
+                sub_track: s.sub_track,
+                fm_track: s.fm_track,
+                level_track: s.level_track,
             };
             drop(s);
-            let _ = state::save_module_state("voice", 0, &params);
+            let _ = state::save_module_state("voice", instance, &params);
         }
         
         // Check for reload-on-signal
@@ -367,6 +415,10 @@ pub fn run(instance: usize) -> Result<()> {
                 if let Some(v) = params.freq { s.freq = v; }
                 if let Some(v) = params.gate { s.gate = v; }
                 if let Some(v) = params.level { s.level = v; }
+                s.shape_track = params.shape_track;
+                s.sub_track = params.sub_track;
+                s.fm_track = params.fm_track;
+                s.level_track = params.level_track;
             }
         }
         
@@ -386,9 +438,13 @@ pub fn run(instance: usize) -> Result<()> {
                         freq: Some(s.freq),
                         gate: Some(s.gate),
                         level: Some(s.level),
+                        shape_track: s.shape_track,
+                        sub_track: s.sub_track,
+                        fm_track: s.fm_track,
+                        level_track: s.level_track,
                     };
                     drop(s);
-                    let _ = state::save_module_state("voice", 0, &params);
+                    let _ = state::save_module_state("voice", instance, &params);
                     continue;
                 }
                 match key.code {
@@ -429,6 +485,24 @@ pub fn run(instance: usize) -> Result<()> {
                     KeyCode::Char('3') => {
                         let mut s = state.lock().unwrap();
                         s.output = 2;
+                    }
+                    KeyCode::Char('@') => {
+                        let mut s = state.lock().unwrap();
+                        let max_track = crate::NUM_TRACKS as i32 - 1;
+                        let next_track = |cur: i32| -> i32 {
+                            match cur {
+                                -1 if max_track >= 0 => 0,
+                                x if x >= max_track => -1,
+                                x => x + 1,
+                            }
+                        };
+                        match selected {
+                            0 => { s.shape_track = next_track(s.shape_track); }
+                            1 => { s.sub_track = next_track(s.sub_track); }
+                            2 => { s.fm_track = next_track(s.fm_track); }
+                            3 => { s.level_track = next_track(s.level_track); }
+                            _ => {}
+                        }
                     }
                     KeyCode::Char('?') => {
                         show_help = !show_help;

@@ -18,7 +18,7 @@ use ratatui::{
 };
 
 use crate::shm::{AudioEvent, EventRingbuf, ModulationBus, ShmTransport};
-use crate::state::{self, ModDest, TrackParam};
+use crate::state::{self, TrackMode, TrackParam};
 
 const NUM_STEPS: usize = 16;
 
@@ -27,11 +27,12 @@ struct Step {
     active: bool,
     note: u8,
     velocity: u8,
+    mod_value: f32,
 }
 
 impl Default for Step {
     fn default() -> Self {
-        Self { active: false, note: 60, velocity: 100 }
+        Self { active: false, note: 60, velocity: 100, mod_value: 0.0 }
     }
 }
 
@@ -42,7 +43,7 @@ struct Track {
     pulses: usize,
     rotation: usize,
     muted: bool,
-    mod_dest: Option<ModDest>,
+    mode: state::TrackMode,
 }
 
 impl Track {
@@ -51,7 +52,7 @@ impl Track {
         for i in (0..NUM_STEPS).step_by(4) {
             steps[i].active = true;
         }
-        Self { steps, length: 16, pulses: 5, rotation: 0, muted: false, mod_dest: None }
+        Self { steps, length: 16, pulses: 5, rotation: 0, muted: false, mode: state::TrackMode::Note }
     }
 }
 
@@ -159,28 +160,31 @@ fn sequencer_thread(
 
                     if playing && !s.tracks[t].muted {
                         let track = &s.tracks[t];
-                        if let Some(ref dest) = track.mod_dest {
-                            // Modulation routing: write directly to modbus
-                            let step = &track.steps[current_step];
-                            let mod_value = if step.active {
-                                step.velocity as f32 / 127.0
-                            } else {
-                                0.0
-                            };
-                            let bus_ch = modbus_channel_for_dest(dest);
-                            if let Some(ref mut bus) = modbus {
-                                bus.set(bus_ch, mod_value);
+                        let step = &track.steps[current_step];
+
+                        // Always write step value to modbus per-track channel
+                        let mod_val = match track.mode {
+                            TrackMode::Note => {
+                                if step.active {
+                                    step.velocity as f32 / 127.0
+                                } else {
+                                    0.0
+                                }
                             }
-                        } else {
-                            // Note routing — tag with source track index
+                            TrackMode::Modulation => step.mod_value,
+                        };
+                        if let Some(ref mut bus) = modbus {
+                            bus.set(8 + t, mod_val);
+                        }
+
+                        // Note mode: send note-on/note-off events
+                        if track.mode == TrackMode::Note {
                             if let Some(n) = s.last_notes[t] {
                                 let _ = events.write_event(&AudioEvent::note_off_source(n, t as u8, *last_step as u32));
                             }
-                            if track.steps[current_step].active {
-                                let note = track.steps[current_step].note;
-                                let vel = track.steps[current_step].velocity;
-                                let _ = events.write_event(&AudioEvent::note_on_source(note, vel, t as u8, current_step as u32));
-                                s.last_notes[t] = Some(note);
+                            if step.active {
+                                let _ = events.write_event(&AudioEvent::note_on_source(step.note, step.velocity, t as u8, current_step as u32));
+                                s.last_notes[t] = Some(step.note);
                             } else {
                                 s.last_notes[t] = None;
                             }
@@ -202,31 +206,6 @@ fn midi_note_name(note: u8) -> String {
     let octave = (note / 12).saturating_sub(1);
     let idx = (note % 12) as usize;
     format!("{}{}", names[idx], octave)
-}
-
-fn modbus_channel_for_dest(dest: &ModDest) -> usize {
-    let base = match dest.target_module.as_str() {
-        "voice" => 12 + dest.target_instance * 4,
-        "envelope" => match dest.target_param.as_str() {
-            "rise" => 28,
-            "fall" => 29,
-            "shape" => 30,
-            _ => 28,
-        },
-        "mixer" => match dest.target_param.as_str() {
-            "master" => 31,
-            _ => 31,
-        },
-        _ => 8,
-    };
-    let param_offset = match dest.target_param.as_str() {
-        "shape" => 0,
-        "sub" => 1,
-        "fm" => 2,
-        "level" => 3,
-        _ => 0,
-    };
-    (base + param_offset).min(31)
 }
 
 fn euclidean_apply(steps: &mut [Step], pulses: usize, length: usize, rotation: usize) {
@@ -256,13 +235,14 @@ fn euclidean_apply(steps: &mut [Step], pulses: usize, length: usize, rotation: u
 fn compact_track_row(track: &Track, track_idx: usize, current_track: usize, selected: usize) -> String {
     let is_current = track_idx == current_track;
     let mut row = format!("{}T{} ", if is_current { "▶" } else { " " }, track_idx + 1);
-    if let Some(ref dest) = track.mod_dest {
-        let target = format!("{}.{}", dest.target_module, dest.target_param);
-        row.push_str(&format!("[{:<8}] ", target));
-    } else if track.muted {
+    if track.muted {
         row.push_str("[mute]   ");
     } else {
-        row.push_str("         ");
+        let mode_str = match track.mode {
+            state::TrackMode::Note => "[NOTE]",
+            state::TrackMode::Modulation => "[MOD] ",
+        };
+        row.push_str(&format!("{:<8} ", mode_str));
     }
     for (i, step) in track.steps.iter().enumerate().take(track.length) {
         let ch = if i == selected && is_current {
@@ -354,12 +334,16 @@ fn draw_ui(
                 (Color::Reset, Color::DarkGray, " ")
             };
 
+            let third_line = match state.track().mode {
+                state::TrackMode::Note => midi_note_name(step.note),
+                state::TrackMode::Modulation => format!("{:+.2}", step.mod_value),
+            };
             let step_text = format!(
                 "{}{}\n{}\n{}",
                 marker,
                 i,
                 if step.active { "●" } else { "○" },
-                midi_note_name(step.note)
+                third_line,
             );
 
             let step_widget = Paragraph::new(step_text)
@@ -369,15 +353,24 @@ fn draw_ui(
         }
 
         let sel_step = &state.track().steps[state.selected];
-        let note_info = format!(
-            "Step {}: {} | Note: {} ({}) | Vel: {} | {}",
-            state.selected,
-            if sel_step.active { "ON" } else { "OFF" },
-            sel_step.note,
-            midi_note_name(sel_step.note),
-            sel_step.velocity,
-            if !input_buffer.is_empty() { format!("Input: {}", input_buffer) } else { String::new() }
-        );
+        let note_info = match state.track().mode {
+            state::TrackMode::Note => format!(
+                "Step {}: {} | Note: {} ({}) | Vel: {} | {}",
+                state.selected,
+                if sel_step.active { "ON" } else { "OFF" },
+                sel_step.note,
+                midi_note_name(sel_step.note),
+                sel_step.velocity,
+                if !input_buffer.is_empty() { format!("Input: {}", input_buffer) } else { String::new() }
+            ),
+            state::TrackMode::Modulation => format!(
+                "Step {}: {} | Value: {:+.2} | {}",
+                state.selected,
+                if sel_step.active { "ON" } else { "OFF" },
+                sel_step.mod_value,
+                if !input_buffer.is_empty() { format!("Input: {}", input_buffer) } else { String::new() }
+            ),
+        };
         let note_widget = Paragraph::new(note_info)
             .style(Style::default().fg(Color::Yellow));
         f.render_widget(note_widget, chunks[2]);
@@ -392,15 +385,14 @@ fn draw_ui(
         } else {
             " NORMAL ".to_string()
         };
-        let route_str = if let Some(ref dest) = state.track().mod_dest {
-            format!("→ {}.{}", dest.target_module, dest.target_param)
-        } else {
-            "→ voice".to_string()
+        let mode_str = match state.track().mode {
+            state::TrackMode::Note => "NOTE",
+            state::TrackMode::Modulation => "MOD",
         };
         let mut status_parts = vec![
             mode_label,
             format!("T{}/{}", state.current_track + 1, state.tracks.len()),
-            route_str,
+            mode_str.to_string(),
             format!("{} {} BPM", play_str, state.bpm as u32),
             format!("Step {}/{}", cstep, len),
             format!("Sel {}", state.selected),
@@ -519,7 +511,7 @@ pub fn run(instance: usize) -> Result<()> {
                         pulses: tp.pulses.unwrap_or(5),
                         rotation: tp.rotation.unwrap_or(0),
                         muted: tp.muted,
-                        mod_dest: tp.mod_dest.clone(),
+                        mode: tp.mode,
                     });
                     s.current_steps.push(0);
                     s.last_notes.push(None);
@@ -529,9 +521,9 @@ pub fn run(instance: usize) -> Result<()> {
                 if let Some(p) = tp.pulses { trk.pulses = p; }
                 if let Some(r) = tp.rotation { trk.rotation = r; }
                 trk.muted = tp.muted;
-                trk.mod_dest = tp.mod_dest.clone();
+                trk.mode = tp.mode;
                 for (i, step) in tp.steps.iter().enumerate().take(trk.steps.len()) {
-                    trk.steps[i] = Step { active: step.active, note: step.note, velocity: step.velocity };
+                    trk.steps[i] = Step { active: step.active, note: step.note, velocity: step.velocity, mod_value: step.mod_value };
                 }
             }
         } else {
@@ -541,7 +533,7 @@ pub fn run(instance: usize) -> Result<()> {
             if let Some(l) = params.euclidean_length { trk.length = l; }
             if let Some(r) = params.euclidean_rotation { trk.rotation = r; }
             for (i, step) in params.steps.iter().enumerate().take(trk.steps.len()) {
-                trk.steps[i] = Step { active: step.active, note: step.note, velocity: step.velocity };
+                trk.steps[i] = Step { active: step.active, note: step.note, velocity: step.velocity, mod_value: step.mod_value };
             }
         }
     }
@@ -585,12 +577,13 @@ pub fn run(instance: usize) -> Result<()> {
                         active: step.active,
                         note: step.note,
                         velocity: step.velocity,
+                        mod_value: step.mod_value,
                     }).collect(),
                     length: Some(trk.length),
                     pulses: Some(trk.pulses),
                     rotation: Some(trk.rotation),
                     muted: trk.muted,
-                    mod_dest: trk.mod_dest.clone(),
+                    mode: trk.mode,
                 }).collect(),
             };
             drop(s);
@@ -610,7 +603,7 @@ pub fn run(instance: usize) -> Result<()> {
                     if let Some(p) = params.tracks[0].pulses { trk.pulses = p; }
                     if let Some(r) = params.tracks[0].rotation { trk.rotation = r; }
                     for (i, step) in params.tracks[0].steps.iter().enumerate().take(trk.steps.len()) {
-                        trk.steps[i] = Step { active: step.active, note: step.note, velocity: step.velocity };
+                        trk.steps[i] = Step { active: step.active, note: step.note, velocity: step.velocity, mod_value: step.mod_value };
                     }
                 }
             }
@@ -662,12 +655,13 @@ pub fn run(instance: usize) -> Result<()> {
                                 active: step.active,
                                 note: step.note,
                                 velocity: step.velocity,
+                                mod_value: step.mod_value,
                             }).collect(),
                             length: Some(trk.length),
                             pulses: Some(trk.pulses),
                             rotation: Some(trk.rotation),
                             muted: trk.muted,
-                            mod_dest: trk.mod_dest.clone(),
+                            mode: trk.mode,
                         }).collect(),
                     };
                     drop(s);
@@ -1075,25 +1069,10 @@ pub fn run(instance: usize) -> Result<()> {
                             pending_g = false;
                             let mut s = state.lock().unwrap();
                             let tidx = s.current_track;
-                            let presets = [
-                                None,
-                                Some(state::ModDest { target_module: "voice".to_string(), target_instance: 0, target_param: "shape".to_string() }),
-                                Some(state::ModDest { target_module: "voice".to_string(), target_instance: 0, target_param: "fm".to_string() }),
-                                Some(state::ModDest { target_module: "voice".to_string(), target_instance: 0, target_param: "level".to_string() }),
-                                Some(state::ModDest { target_module: "envelope".to_string(), target_instance: 0, target_param: "rise".to_string() }),
-                            ];
-                            let current = s.tracks[tidx].mod_dest.as_ref().map(|d| {
-                                for (i, p) in presets.iter().enumerate() {
-                                    if let Some(ref pr) = p {
-                                        if pr.target_module == d.target_module && pr.target_param == d.target_param && pr.target_instance == d.target_instance {
-                                            return i;
-                                        }
-                                    }
-                                }
-                                0
-                            }).unwrap_or(0);
-                            let next = (current + 1) % presets.len();
-                            s.tracks[tidx].mod_dest = presets[next].clone();
+                            s.tracks[tidx].mode = match s.tracks[tidx].mode {
+                                state::TrackMode::Note => state::TrackMode::Modulation,
+                                state::TrackMode::Modulation => state::TrackMode::Note,
+                            };
                         }
                         KeyCode::Char('k') | KeyCode::Up if pending_count.is_some() => {
                             let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
@@ -1241,25 +1220,45 @@ pub fn run(instance: usize) -> Result<()> {
                             pending_count = None;
                             let mut s = state.lock().unwrap();
                             let sel = s.selected;
-                            s.track_mut().steps[sel].note = (s.track_mut().steps[sel].note + 1).min(127);
+                            if s.track().mode == state::TrackMode::Modulation {
+                                let v = s.track_mut().steps[sel].mod_value + 0.01;
+                                s.track_mut().steps[sel].mod_value = v.min(1.0);
+                            } else {
+                                s.track_mut().steps[sel].note = (s.track_mut().steps[sel].note + 1).min(127);
+                            }
                         }
                         KeyCode::Char('j') => {
                             pending_count = None;
                             let mut s = state.lock().unwrap();
                             let sel = s.selected;
-                            s.track_mut().steps[sel].note = s.track_mut().steps[sel].note.saturating_sub(1);
+                            if s.track().mode == state::TrackMode::Modulation {
+                                let v = s.track_mut().steps[sel].mod_value - 0.01;
+                                s.track_mut().steps[sel].mod_value = v.max(-1.0);
+                            } else {
+                                s.track_mut().steps[sel].note = s.track_mut().steps[sel].note.saturating_sub(1);
+                            }
                         }
                         KeyCode::Char('K') => {
                             pending_count = None;
                             let mut s = state.lock().unwrap();
                             let sel = s.selected;
-                            s.track_mut().steps[sel].note = (s.track_mut().steps[sel].note + 12).min(127);
+                            if s.track().mode == state::TrackMode::Modulation {
+                                let v = s.track_mut().steps[sel].mod_value + 0.1;
+                                s.track_mut().steps[sel].mod_value = v.min(1.0);
+                            } else {
+                                s.track_mut().steps[sel].note = (s.track_mut().steps[sel].note + 12).min(127);
+                            }
                         }
                         KeyCode::Char('J') => {
                             pending_count = None;
                             let mut s = state.lock().unwrap();
                             let sel = s.selected;
-                            s.track_mut().steps[sel].note = s.track_mut().steps[sel].note.saturating_sub(12);
+                            if s.track().mode == state::TrackMode::Modulation {
+                                let v = s.track_mut().steps[sel].mod_value - 0.1;
+                                s.track_mut().steps[sel].mod_value = v.max(-1.0);
+                            } else {
+                                s.track_mut().steps[sel].note = s.track_mut().steps[sel].note.saturating_sub(12);
+                            }
                         }
                         KeyCode::Char('g') => {
                             pending_count = None;
