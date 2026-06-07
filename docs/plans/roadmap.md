@@ -234,6 +234,24 @@ The conductor window gets a basic ratatui TUI with:
 This keeps the conductor useful without adding complexity. No mouse support
 needed — everything keyboard-driven.
 
+### Crucial Save/Load Behavior (learned the hard way)
+
+**Pane order must be captured from live tmux state.**
+
+The save handler queries `tmux list-panes -t los:modules -F '#{pane_title}'` to get the actual pane order, then collects module state files in that order. Previously we hardcoded `[sequencer, voice, mixer, scope, envelope]`, which meant manual rearrangements were lost.
+
+**Layout strings are passed directly to tmux.**
+
+`#{window_layout}` returns a string with embedded pane IDs and a checksum. We pass it directly to `select-layout` without parsing or modifying it. Tmux maps old pane IDs to the current window's panes automatically. We wasted hours trying to parse the layout string, replace IDs, and recompute the checksum — none of that was necessary.
+
+**Active pane index must account for tmux `pane-base-index`.**
+
+The default tmux `pane-base-index` is 1, so pane indices are `1,2,3,4,5` for 5 panes. We save the raw tmux pane index on save and use it directly on load. Previously we clamped with `panes.len() - 1` assuming 0-based indexing, which caused off-by-one errors.
+
+**Conductor `l` key does full module reload without killing itself.**
+
+The `l` key kills only the `modules` window, recreates panes from the save, applies layout, and restores active pane. The conductor stays alive. This is distinct from `load_session` which kills the entire session.
+
 ### Implementation Steps (detailed)
 
 1. **Create `~/.config/los/` directories** in conductor startup

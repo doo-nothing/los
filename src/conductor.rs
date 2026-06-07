@@ -636,4 +636,106 @@ mod tests {
         assert_eq!(shell_escape(path), "'/Users/jake/.config/los/states/YES.toml'");
     }
 
+    // ── save/load state format tests ─────────────────────────────────────
+
+    #[test]
+    fn test_session_state_with_reordered_panes() {
+        let state = state::SessionState {
+            meta: state::Meta {
+                name: "reordered".into(),
+                created: "123".into(),
+            },
+            tmux: state::TmuxState::default(),
+            windows: vec![state::WindowState {
+                name: "modules".into(),
+                layout: "test,100x50,0,0[50x50,0,0,1,50x50,0,0,2]".into(),
+                active_pane: 3,
+                panes: vec![
+                    state::PaneState {
+                        module: "voice".into(),
+                        instance: 0,
+                        patch: None,
+                        patch_inline: None,
+                    },
+                    state::PaneState {
+                        module: "envelope".into(),
+                        instance: 0,
+                        patch: None,
+                        patch_inline: None,
+                    },
+                    state::PaneState {
+                        module: "sequencer".into(),
+                        instance: 0,
+                        patch: None,
+                        patch_inline: None,
+                    },
+                ],
+            }],
+        };
+
+        let toml = state::to_toml_string(&state).expect("serialize");
+        let loaded: state::SessionState = toml::from_str(&toml).expect("deserialize");
+
+        assert_eq!(loaded.windows[0].panes[0].module, "voice");
+        assert_eq!(loaded.windows[0].panes[1].module, "envelope");
+        assert_eq!(loaded.windows[0].panes[2].module, "sequencer");
+        assert_eq!(loaded.windows[0].active_pane, 3);
+    }
+
+    #[test]
+    fn test_active_pane_with_base_index_1() {
+        // tmux default pane-base-index is 1, so active_pane=5 means the 5th pane
+        let state = state::SessionState {
+            meta: state::Meta {
+                name: "base-index-1".into(),
+                created: "123".into(),
+            },
+            tmux: state::TmuxState::default(),
+            windows: vec![state::WindowState {
+                name: "modules".into(),
+                layout: "".into(),
+                active_pane: 5,
+                panes: vec![
+                    state::PaneState { module: "a".into(), instance: 0, patch: None, patch_inline: None },
+                    state::PaneState { module: "b".into(), instance: 0, patch: None, patch_inline: None },
+                    state::PaneState { module: "c".into(), instance: 0, patch: None, patch_inline: None },
+                    state::PaneState { module: "d".into(), instance: 0, patch: None, patch_inline: None },
+                    state::PaneState { module: "e".into(), instance: 0, patch: None, patch_inline: None },
+                ],
+            }],
+        };
+
+        let toml = state::to_toml_string(&state).expect("serialize");
+        let loaded: state::SessionState = toml::from_str(&toml).expect("deserialize");
+
+        assert_eq!(loaded.windows[0].active_pane, 5);
+    }
+
+    #[test]
+    fn test_layout_string_preserved_raw() {
+        // Layout strings with old pane IDs must be passed directly to tmux.
+        // We must NOT parse, modify, or recompute checksums.
+        let raw_layout = "f1d4,100x50,0,0[50x50,0,0,1,50x50,0,0,2]";
+        let state = state::SessionState {
+            meta: state::Meta {
+                name: "layout-preserve".into(),
+                created: "123".into(),
+            },
+            tmux: state::TmuxState::default(),
+            windows: vec![state::WindowState {
+                name: "modules".into(),
+                layout: raw_layout.into(),
+                active_pane: 1,
+                panes: vec![
+                    state::PaneState { module: "a".into(), instance: 0, patch: None, patch_inline: None },
+                    state::PaneState { module: "b".into(), instance: 0, patch: None, patch_inline: None },
+                ],
+            }],
+        };
+
+        let toml = state::to_toml_string(&state).expect("serialize");
+        let loaded: state::SessionState = toml::from_str(&toml).expect("deserialize");
+
+        assert_eq!(loaded.windows[0].layout, raw_layout);
+    }
 }
