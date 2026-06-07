@@ -541,6 +541,7 @@ pub fn run(instance: usize) -> Result<()> {
 
     let mut selected = 0usize;
     let mut show_help = false;
+    let mut at_pending = false;
 
     loop {
         if state::check_save_signal() {
@@ -690,6 +691,23 @@ pub fn run(instance: usize) -> Result<()> {
                             4 => { s.params[ch].trigger_track = next_track(s.params[ch].trigger_track); }
                             _ => {}
                         }
+                        at_pending = true;
+                    }
+                    KeyCode::Char(d) if at_pending && d.is_ascii_digit() => {
+                        let tnum = (d as u8 - b'0') as i32;
+                        if tnum >= 1 && tnum <= crate::NUM_TRACKS as i32 {
+                            let mut s = state.lock().unwrap();
+                            let ch = s.current_channel;
+                            match selected {
+                                0 => { s.params[ch].rise_track = tnum - 1; }
+                                1 => { s.params[ch].fall_track = tnum - 1; }
+                                2 => { s.params[ch].shape_track = tnum - 1; }
+                                3 => { s.params[ch].atten_track = tnum - 1; }
+                                4 => { s.params[ch].trigger_track = tnum - 1; }
+                                _ => {}
+                            }
+                        }
+                        at_pending = false;
                     }
                     KeyCode::Char('c') => {
                         let mut s = state.lock().unwrap();
@@ -720,7 +738,9 @@ pub fn run(instance: usize) -> Result<()> {
                     KeyCode::Char('?') => {
                         show_help = !show_help;
                     }
-                    _ => {}
+                    _ => {
+                        at_pending = false;
+                    }
                 }
             }
         }

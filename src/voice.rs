@@ -382,6 +382,7 @@ pub fn run(instance: usize) -> Result<()> {
 
     let mut selected = 0usize;
     let mut show_help = false;
+    let mut at_pending = false;
 
     loop {
         // Check for save-on-signal
@@ -474,18 +475,6 @@ pub fn run(instance: usize) -> Result<()> {
                             _ => {}
                         }
                     }
-                    KeyCode::Char('1') => {
-                        let mut s = state.lock().unwrap();
-                        s.output = 0;
-                    }
-                    KeyCode::Char('2') => {
-                        let mut s = state.lock().unwrap();
-                        s.output = 1;
-                    }
-                    KeyCode::Char('3') => {
-                        let mut s = state.lock().unwrap();
-                        s.output = 2;
-                    }
                     KeyCode::Char('@') => {
                         let mut s = state.lock().unwrap();
                         let max_track = crate::NUM_TRACKS as i32 - 1;
@@ -503,11 +492,40 @@ pub fn run(instance: usize) -> Result<()> {
                             3 => { s.level_track = next_track(s.level_track); }
                             _ => {}
                         }
+                        at_pending = true;
+                    }
+                    KeyCode::Char(d) if at_pending && d.is_ascii_digit() => {
+                        let tnum = (d as u8 - b'0') as i32;
+                        if tnum >= 1 && tnum <= crate::NUM_TRACKS as i32 {
+                            let mut s = state.lock().unwrap();
+                            match selected {
+                                0 => { s.shape_track = tnum - 1; }
+                                1 => { s.sub_track = tnum - 1; }
+                                2 => { s.fm_track = tnum - 1; }
+                                3 => { s.level_track = tnum - 1; }
+                                _ => {}
+                            }
+                        }
+                        at_pending = false;
+                    }
+                    KeyCode::Char('1') => {
+                        let mut s = state.lock().unwrap();
+                        s.output = 0;
+                    }
+                    KeyCode::Char('2') => {
+                        let mut s = state.lock().unwrap();
+                        s.output = 1;
+                    }
+                    KeyCode::Char('3') => {
+                        let mut s = state.lock().unwrap();
+                        s.output = 2;
                     }
                     KeyCode::Char('?') => {
                         show_help = !show_help;
                     }
-                    _ => {}
+                    _ => {
+                        at_pending = false;
+                    }
                 }
             }
         }
