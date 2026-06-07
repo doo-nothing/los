@@ -1,56 +1,37 @@
+use std::io;
 use std::process::Command;
-use anyhow::Result;
+use std::time::Duration;
 
-pub fn create_session() -> Result<()> {
-    // Kill existing session if it exists
-    let _ = Command::new("tmux").args(&["kill-session", "-t", "los"]).output();
+use anyhow::{Context, Result};
+use crossterm::{
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Style},
+    text::Line,
+    widgets::{Block, Borders, List, ListItem, Paragraph},
+    Terminal,
+};
 
-    // Create new session with conductor in first window
-    Command::new("tmux")
-        .args(&["new-session", "-d", "-s", "los", "-n", "conductor"])
-        .output()?;
+use crate::state;
 
-    // Get the binary path
-    let exe = std::env::current_exe()?;
-    let exe_str = exe.to_str().unwrap();
+// ── session creation ───────────────────────────────────────────────────────
 
-    // Start conductor in first pane using its pane_id
+fn exe_path() -> Result<String> {
+    Ok(std::env::current_exe()?
+        .to_str()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "los".into()))
+}
+
+fn list_session_panes(session: &str, window: &str) -> Result<Vec<(usize, String)>> {
     let output = Command::new("tmux")
-        .args(&["list-panes", "-t", "los:conductor", "-F", "#{pane_id}"])
+        .args(&["list-panes", "-t", &format!("{}:{}", session, window), "-F", "#{pane_index} #{pane_id}"])
         .output()?;
-    let conductor_pane = String::from_utf8(output.stdout)?.trim().to_string();
-    Command::new("tmux")
-        .args(&["respawn-pane", "-k", "-t", &conductor_pane, &format!("{} conductor", exe_str)])
-        .output()?;
-
-    // Create modules window and split into 4 panes
-    Command::new("tmux")
-        .args(&["new-window", "-t", "los", "-n", "modules"])
-        .output()?;
-    
-    // Split into 4 panes (3 splits), then tiled layout arranges as 2x2
-    for _ in 0..3 {
-        Command::new("tmux")
-            .args(&["split-window", "-t", "los:modules"])
-            .output()?;
-    }
-    Command::new("tmux")
-        .args(&["select-layout", "-t", "los:modules", "tiled"])
-        .output()?;
-
-    // Enable pane borders with labels
-    Command::new("tmux")
-        .args(&["set-option", "-t", "los:modules", "pane-border-status", "top"])
-        .output()?;
-    Command::new("tmux")
-        .args(&["set-option", "-t", "los:modules", "pane-border-format", " #{pane_title} "])
-        .output()?;
-
-    // Discover panes sorted by pane_index
-    let output = Command::new("tmux")
-        .args(&["list-panes", "-t", "los:modules", "-F", "#{pane_index} #{pane_id}"])
-        .output()?;
-    
     let mut panes: Vec<(usize, String)> = String::from_utf8(output.stdout)?
         .lines()
         .filter_map(|line| {
@@ -60,52 +41,390 @@ pub fn create_session() -> Result<()> {
             Some((idx, id))
         })
         .collect();
-    
     panes.sort_by_key(|(idx, _)| *idx);
+    Ok(panes)
+}
 
-    // Assign modules to discovered panes using pane_id (%N format, always works)
-    let modules = [("sequencer", "Sequencer"), ("voice", "Voice"), ("mixer", "Mixer"), ("scope", "Scope")];
+fn spawn_session_panes(panes_data: &[(&str, &str)]) -> Result<()> {
+    let session = "los";
+    let win = "modules";
     
-    for (i, (_, pane_id)) in panes.iter().enumerate() {
-        if i >= modules.len() {
-            break;
-        }
-        let (module_cmd, module_label) = modules[i];
-        
+    // Create window
+    Command::new("tmux")
+        .args(&["new-window", "-t", session, "-n", win])
+        .output()?;
+    
+    // Split into required number of panes
+    for _ in 1..panes_data.len() {
         Command::new("tmux")
-            .args(&["select-pane", "-t", pane_id, "-T", module_label])
-            .output()?;
-        
-        let cmd = format!("{} {}", exe_str, module_cmd);
-        Command::new("tmux")
-            .args(&["respawn-pane", "-k", "-t", pane_id, &cmd])
+            .args(&["split-window", "-t", &format!("{}:{}", session, win)])
             .output()?;
     }
+    Command::new("tmux")
+        .args(&["select-layout", "-t", &format!("{}:{}", session, win), "tiled"])
+        .output()?;
+    
+    // Enable pane borders
+    Command::new("tmux")
+        .args(&["set-option", "-t", &format!("{}:{}", session, win), "pane-border-status", "top"])
+        .output()?;
+    Command::new("tmux")
+        .args(&["set-option", "-t", &format!("{}:{}", session, win), "pane-border-format", " #{pane_title} "])
+        .output()?;
+    
+    // Discover panes and spawn modules
+    let panes = list_session_panes(session, win)?;
+    let exe = exe_path()?;
+    
+    for (i, (_, pane_id)) in panes.iter().enumerate() {
+        if i >= panes_data.len() { break; }
+        let (cmd, label) = panes_data[i];
+        
+        Command::new("tmux")
+            .args(&["select-pane", "-t", pane_id, "-T", label])
+            .output()?;
+        
+        let full_cmd = format!("{} {}", exe, cmd);
+        Command::new("tmux")
+            .args(&["respawn-pane", "-k", "-t", pane_id, &full_cmd])
+            .output()?;
+    }
+    
+    Ok(())
+}
 
+pub fn create_session() -> Result<()> {
+    state::ensure_dirs()?;
+    let _ = Command::new("tmux").args(&["kill-session", "-t", "los"]).output();
+
+    // Create conductor window
+    Command::new("tmux")
+        .args(&["new-session", "-d", "-s", "los", "-n", "conductor"])
+        .output()?;
+    
+    // Start conductor TUI in its pane
+    let panes = list_session_panes("los", "conductor")?;
+    let exe = exe_path()?;
+    if let Some((_, pane_id)) = panes.first() {
+        Command::new("tmux")
+            .args(&["respawn-pane", "-k", "-t", pane_id, &format!("{} conductor", exe)])
+            .output()?;
+    }
+    
+    // Spawn module panes
+    let modules = [("sequencer", "Sequencer"), ("voice", "Voice"), ("mixer", "Mixer"), ("scope", "Scope")];
+    spawn_session_panes(&modules)?;
+    
     // Select modules window and attach
     Command::new("tmux")
         .args(&["select-window", "-t", "los:modules"])
         .output()?;
-    
     Command::new("tmux")
         .args(&["attach-session", "-t", "los"])
         .status()?;
-
+    
     Ok(())
 }
 
-pub fn run_conductor() -> Result<()> {
-    println!("LOS Conductor");
-    println!("=============");
-    println!();
-    println!("Session: los");
-    println!("Windows:");
-    println!("  1. conductor - Session control");
-    println!("  2. modules   - Sequencer, Voice, Mixer, Scope");
-    println!();
-    println!("Press Ctrl+C to stop the session");
-
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(1));
+pub fn load_session(state_path: &str) -> Result<()> {
+    state::ensure_dirs()?;
+    
+    // Read the state file
+    let st = state::from_toml_file::<state::SessionState>(&std::path::Path::new(state_path))?;
+    
+    // Kill existing session
+    let _ = Command::new("tmux").args(&["kill-session", "-t", "los"]).output();
+    
+    // Create conductor window
+    Command::new("tmux")
+        .args(&["new-session", "-d", "-s", "los", "-n", "conductor"])
+        .output()?;
+    
+    let exe = exe_path()?;
+    
+    // Start conductor TUI
+    let panes = list_session_panes("los", "conductor")?;
+    if let Some((_, pane_id)) = panes.first() {
+        Command::new("tmux")
+            .args(&["respawn-pane", "-k", "-t", pane_id, &format!("{} conductor", exe)])
+            .output()?;
     }
+    
+    // Write module state files from the loaded session
+    let module_windows: Vec<&state::WindowState> = st.windows.iter()
+        .filter(|w| w.name != "conductor")
+        .collect();
+    
+    for win in &module_windows {
+        for pane in &win.panes {
+            if let Some(ref inline) = pane.patch_inline {
+                let path = state::module_state_path(&pane.module, pane.instance);
+                let toml_str = toml::to_string_pretty(inline)
+                    .context("serializing module params")?;
+                state::write_state_file(&path, &toml_str)?;
+            }
+        }
+    }
+    
+    // Build module list for spawning
+    let all_panes: Vec<(&str, &str)> = module_windows.iter()
+        .flat_map(|w| w.panes.iter())
+        .map(|p| (p.module.as_str(), "Module"))
+        .collect();
+    
+    if !all_panes.is_empty() {
+        spawn_session_panes(&all_panes)?;
+    }
+    
+    // Apply tmux settings from state
+    if !st.tmux.window_size.is_empty() {
+        let _ = Command::new("tmux")
+            .args(&["set-option", "-t", "los:modules", "window-size", &st.tmux.window_size])
+            .output();
+    }
+    
+    // Select modules window and attach
+    let active_win = if st.tmux.active_window.is_empty() { "modules" } else { &st.tmux.active_window };
+    Command::new("tmux")
+        .args(&["select-window", "-t", &format!("los:{}", active_win)])
+        .output()?;
+    Command::new("tmux")
+        .args(&["attach-session", "-t", "los"])
+        .status()?;
+    
+    Ok(())
+}
+
+// ── conductor TUI ───────────────────────────────────────────────────────────
+
+pub fn run_conductor() -> Result<()> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+    
+    let mut selected: usize = 0;
+    let mut show_help = false;
+    
+    // Refresh state list
+    let mut refresh_list = true;
+    
+    loop {
+        if refresh_list {
+            // Read state files from ~/.config/los/states/
+            let mut entries: Vec<String> = Vec::new();
+            if let Ok(dir) = std::fs::read_dir(state::states_dir()) {
+                for entry in dir.flatten() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        if name.ends_with(".toml") {
+                            entries.push(name.to_string());
+                        }
+                    }
+                }
+            }
+            entries.sort();
+            
+            terminal.draw(|f| {
+                let area = f.area();
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .margin(1)
+                    .constraints([Constraint::Length(3), Constraint::Min(0)])
+                    .split(area);
+                
+                let title = Paragraph::new("LOS Conductor")
+                    .style(Style::default().fg(Color::Cyan).add_modifier(ratatui::style::Modifier::BOLD))
+                    .block(Block::default().borders(Borders::ALL));
+                f.render_widget(title, chunks[0]);
+                
+                if entries.is_empty() {
+                    let empty = Paragraph::new("No saved states. Press ? for help.")
+                        .style(Style::default().fg(Color::Gray));
+                    f.render_widget(empty, chunks[1]);
+                } else {
+                    let items: Vec<ListItem> = entries.iter().enumerate().map(|(i, name)| {
+                        let style = if i == selected {
+                            Style::default().fg(Color::Yellow).add_modifier(ratatui::style::Modifier::BOLD)
+                        } else {
+                            Style::default()
+                        };
+                        ListItem::new(name.as_str()).style(style)
+                    }).collect();
+                    
+                    let list = List::new(items)
+                        .block(Block::default().borders(Borders::ALL).title("Saved States"))
+                        .highlight_style(Style::default().fg(Color::Yellow));
+                    f.render_widget(list, chunks[1]);
+                }
+            })?;
+            
+            refresh_list = false;
+        }
+        
+        if event::poll(Duration::from_millis(50))? {
+            if let Event::Key(key) = event::read()? {
+                if show_help {
+                    if let KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Esc = key.code {
+                        show_help = false;
+                        refresh_list = true;
+                    }
+                    continue;
+                }
+                
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => break,
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        selected += 1;
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        selected = selected.saturating_sub(1);
+                    }
+                    KeyCode::Char('s') => {
+                        // Save current session state
+                        // Collect module states from tmp directory
+                        let mut windows = Vec::new();
+                        
+                        let modules = ["sequencer", "voice", "mixer", "scope"];
+                        let _labels = ["Sequencer", "Voice", "Mixer", "Scope"];
+                        
+                        let mut panes = Vec::new();
+                        for (_i, mod_name) in modules.iter().enumerate() {
+                            let path = state::module_state_path(mod_name, 0);
+                            let inline = if path.exists() {
+                                std::fs::read_to_string(&path)
+                                    .ok()
+                                    .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
+                            } else {
+                                None
+                            };
+                            panes.push(state::PaneState {
+                                module: mod_name.to_string(),
+                                instance: 0,
+                                patch: None,
+                                patch_inline: inline,
+                            });
+                        }
+                        
+                        windows.push(state::WindowState {
+                            name: "modules".into(),
+                            layout: "tiled".into(),
+                            panes,
+                        });
+                        
+                        // Generate timestamp-based filename
+                        let now = chrono_or_fallback();
+                        let filename = format!("session-{}.toml", now);
+                        let save_path = state::states_dir().join(&filename);
+                        
+                        let session_state = state::SessionState {
+                            meta: state::Meta {
+                                name: filename.trim_end_matches(".toml").to_string(),
+                                created: now.clone(),
+                            },
+                            tmux: state::TmuxState::default(),
+                            windows,
+                        };
+                        
+                        if let Ok(toml_str) = state::to_toml_string(&session_state) {
+                            let _ = state::write_state_file(&save_path, &toml_str);
+                        }
+                        
+                        refresh_list = true;
+                    }
+                    KeyCode::Char('l') => {
+                        // Load selected state
+                        if let Ok(dir) = std::fs::read_dir(state::states_dir()) {
+                            let mut entries: Vec<String> = dir.flatten()
+                                .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+                                .filter(|n| n.ends_with(".toml"))
+                                .collect();
+                            entries.sort();
+                            if selected < entries.len() {
+                                let path = state::states_dir().join(&entries[selected]);
+                                let path_str = path.to_string_lossy().to_string();
+                                drop(terminal);
+                                disable_raw_mode()?;
+                                let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+                                let _ = load_session(&path_str);
+                                return Ok(());
+                            }
+                        }
+                    }
+                    KeyCode::Char('d') => {
+                        // Delete selected state
+                        if let Ok(dir) = std::fs::read_dir(state::states_dir()) {
+                            let mut entries: Vec<String> = dir.flatten()
+                                .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+                                .filter(|n| n.ends_with(".toml"))
+                                .collect();
+                            entries.sort();
+                            if selected < entries.len() {
+                                let path = state::states_dir().join(&entries[selected]);
+                                let _ = std::fs::remove_file(&path);
+                                if selected >= entries.len().saturating_sub(1) {
+                                    selected = selected.saturating_sub(1);
+                                }
+                                refresh_list = true;
+                            }
+                        }
+                    }
+                    KeyCode::Char('?') => {
+                        show_help = true;
+                        refresh_list = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        
+        if show_help {
+            terminal.draw(|f| {
+                let help_text = vec![
+                    Line::from("━━━ Conductor Help ━━━"),
+                    Line::from(""),
+                    Line::from("  j/k, ↑/↓  Navigate state list"),
+                    Line::from("  s          Save current session state"),
+                    Line::from("  l          Load selected state (creates new session)"),
+                    Line::from("  d          Delete selected state"),
+                    Line::from("  ?          Close this help"),
+                    Line::from("  q          Quit"),
+                ];
+                let help = Paragraph::new(help_text)
+                    .style(Style::default().fg(Color::White))
+                    .block(Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Cyan))
+                        .title("Help"));
+                f.render_widget(help, f.area());
+            })?;
+            
+            // Wait for key to close help
+            loop {
+                if event::poll(Duration::from_millis(100))? {
+                    if let Event::Key(k) = event::read()? {
+                        if let KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Esc = k.code {
+                            show_help = false;
+                            refresh_list = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    terminal.show_cursor()?;
+    
+    Ok(())
+}
+
+fn chrono_or_fallback() -> String {
+    // Simple timestamp without chrono dependency
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}", now.as_secs())
 }

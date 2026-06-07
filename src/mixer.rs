@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -20,6 +20,7 @@ use ratatui::{
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use crate::shm::{AudioRingbuf, ShmTransport};
+use crate::state;
 
 const NUM_TRACKS: usize = 4;
 const SHM_NAME: &str = "/los_mix_in";
@@ -248,6 +249,22 @@ pub fn run() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let state = Arc::new(Mutex::new(MixerState::default()));
+    
+    // Load saved state if available
+    if let Ok(params) = state::load_module_state::<state::MixerParams>("mixer", 0) {
+        let mut s = state.lock().unwrap();
+        if let Some(v) = params.master { s.master = v; }
+        for (i, tp) in params.tracks.iter().enumerate().take(s.tracks.len()) {
+            s.tracks[i] = TrackState {
+                level: tp.level,
+                pan: tp.pan,
+                mute: tp.mute,
+                solo: tp.solo,
+                meter: 0.0,
+            };
+        }
+    }
+    
     let state_clone = Arc::clone(&state);
 
     let (tx, rx) = std::sync::mpsc::channel();
@@ -266,6 +283,22 @@ pub fn run() -> Result<()> {
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
+                // Ctrl-s: save module state
+                if key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL {
+                    let s = state.lock().unwrap();
+                    let params = state::MixerParams {
+                        master: Some(s.master),
+                        tracks: s.tracks.iter().map(|t| state::MixerTrackParam {
+                            level: t.level,
+                            pan: t.pan,
+                            mute: t.mute,
+                            solo: t.solo,
+                        }).collect(),
+                    };
+                    drop(s);
+                    let _ = state::save_module_state("mixer", 0, &params);
+                    continue;
+                }
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
                     KeyCode::Char('h') | KeyCode::Left => {

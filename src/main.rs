@@ -1,11 +1,11 @@
 use anyhow::Result;
-use los::{conductor, voice, sequencer, mixer, scope};
+use los::{conductor, voice, sequencer, mixer, scope, state};
 
 fn main() -> Result<()> {
+    state::ensure_dirs()?;
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() < 2 {
-        // No arguments - start the tmux session
         conductor::create_session()
     } else {
         match args[1].as_str() {
@@ -22,6 +22,17 @@ fn main() -> Result<()> {
             "scope" => {
                 let instance = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
                 scope::run(instance)
+            }
+            "load" => {
+                let path = args.get(2).cloned().unwrap_or_default();
+                if path.is_empty() {
+                    eprintln!("Usage: los load <state-file.toml>");
+                    std::process::exit(1);
+                }
+                conductor::load_session(&path)
+            }
+            _ if args[1].ends_with(".toml") => {
+                conductor::load_session(&args[1])
             }
             _ => {
                 eprintln!("Unknown command: {}", args[1]);

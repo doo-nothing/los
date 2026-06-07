@@ -4,6 +4,7 @@ pub mod mixer;
 pub mod scope;
 pub mod sequencer;
 pub mod shm;
+pub mod state;
 pub mod tmux;
 pub mod tone;
 pub mod voice;

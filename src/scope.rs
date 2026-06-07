@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -19,6 +19,7 @@ use ratatui::{
 };
 
 use crate::shm::AudioRingbuf;
+use crate::state;
 
 const BUFFER_SIZE: usize = 512;
 const SHM_NAME: &str = "/los_mix_in";
@@ -195,7 +196,7 @@ fn draw_ui(
     Ok(())
 }
 
-pub fn run(_instance: usize) -> Result<()> {
+pub fn run(instance: usize) -> Result<()> {
     // Initialize terminal with retry logic (handles tmux PTY race)
     let mut last_err = String::new();
     for attempt in 0..20 {
@@ -217,6 +218,16 @@ pub fn run(_instance: usize) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let state = Arc::new(Mutex::new(ScopeState::default()));
+    
+    // Load saved state if available
+    if let Ok(params) = state::load_module_state::<state::ScopeParams>("scope", instance) {
+        let mut s = state.lock().unwrap();
+        if let Some(v) = params.mode { s.mode = v; }
+        if let Some(v) = params.channel { s.channel = v; }
+        if let Some(v) = params.zoom { s.zoom = v; }
+        if let Some(v) = params.gain { s.gain = v; }
+    }
+    
     let state_clone = Arc::clone(&state);
 
     let (tx, rx) = std::sync::mpsc::channel();
@@ -235,6 +246,19 @@ pub fn run(_instance: usize) -> Result<()> {
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
+                // Ctrl-s: save module state
+                if key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL {
+                    let s = state.lock().unwrap();
+                    let params = state::ScopeParams {
+                        mode: Some(s.mode),
+                        channel: Some(s.channel),
+                        zoom: Some(s.zoom),
+                        gain: Some(s.gain),
+                    };
+                    drop(s);
+                    let _ = state::save_module_state("scope", 0, &params);
+                    continue;
+                }
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
                     KeyCode::Char('m') => {

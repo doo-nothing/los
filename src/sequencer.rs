@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -18,6 +18,7 @@ use ratatui::{
 };
 
 use crate::shm::{AudioEvent, EventRingbuf, ShmTransport};
+use crate::state;
 
 const NUM_STEPS: usize = 16;
 
@@ -199,7 +200,6 @@ fn draw_ui(
         
         for i in 0..len {
             let step = &state.steps[i];
-            let step = &state.steps[i];
             let is_current = i == state.current_step;
             let is_selected = i == state.selected;
 
@@ -294,7 +294,7 @@ fn draw_ui(
     Ok(())
 }
 
-pub fn run(_instance: usize) -> Result<()> {
+pub fn run(instance: usize) -> Result<()> {
     use std::fs::OpenOptions;
     use std::io::Write;
     let mut log = OpenOptions::new()
@@ -371,6 +371,22 @@ pub fn run(_instance: usize) -> Result<()> {
     }
 
     let state = Arc::new(Mutex::new(SequencerState::default()));
+    
+    // Load saved state if available
+    if let Ok(params) = state::load_module_state::<state::SequencerParams>("sequencer", instance) {
+        let mut s = state.lock().unwrap();
+        if let Some(bpm) = params.bpm { s.bpm = bpm; }
+        if let Some(playing) = params.playing { s.playing = playing; }
+        if let Some(p) = params.euclidean_pulses { s.euclidean_pulses = p; }
+        if let Some(l) = params.euclidean_length { s.euclidean_length = l; }
+        if let Some(r) = params.euclidean_rotation { s.euclidean_rotation = r; }
+        if !params.steps.is_empty() {
+            for (i, step) in params.steps.iter().enumerate().take(s.steps.len()) {
+                s.steps[i] = Step { active: step.active, note: step.note, velocity: step.velocity };
+            }
+        }
+    }
+    
     let state_clone = Arc::clone(&state);
 
     let (tx, rx) = std::sync::mpsc::channel();
@@ -393,6 +409,25 @@ pub fn run(_instance: usize) -> Result<()> {
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
+                // Ctrl-s: save module state
+                if key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL {
+                    let s = state.lock().unwrap();
+                    let params = state::SequencerParams {
+                        bpm: Some(s.bpm),
+                        playing: Some(s.playing),
+                        euclidean_pulses: Some(s.euclidean_pulses),
+                        euclidean_length: Some(s.euclidean_length),
+                        euclidean_rotation: Some(s.euclidean_rotation),
+                        steps: s.steps.iter().map(|step| state::StepParam {
+                            active: step.active,
+                            note: step.note,
+                            velocity: step.velocity,
+                        }).collect(),
+                    };
+                    drop(s);
+                    let _ = state::save_module_state("sequencer", 0, &params);
+                    continue;
+                }
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc if input_mode == "normal" => break,
                     

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -18,6 +18,7 @@ use ratatui::{
 };
 
 use crate::shm::{AudioRingbuf, EventRingbuf, ShmTransport};
+use crate::state;
 
 #[derive(Clone, Copy)]
 struct VoiceState {
@@ -319,6 +320,19 @@ pub fn run(_instance: usize) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let state = Arc::new(Mutex::new(VoiceState::default()));
+    
+    // Load saved state if available
+    if let Ok(params) = state::load_module_state::<state::VoiceParams>("voice", _instance) {
+        let mut s = state.lock().unwrap();
+        if let Some(v) = params.shape { s.shape = v; }
+        if let Some(v) = params.sub { s.sub = v; }
+        if let Some(v) = params.fm { s.fm = v; }
+        if let Some(v) = params.output { s.output = v; }
+        if let Some(v) = params.freq { s.freq = v; }
+        if let Some(v) = params.gate { s.gate = v; }
+        if let Some(v) = params.level { s.level = v; }
+    }
+    
     let state_clone = Arc::clone(&state);
 
     let (tx, rx) = std::sync::mpsc::channel();
@@ -338,6 +352,22 @@ pub fn run(_instance: usize) -> Result<()> {
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
+                // Ctrl-s: save module state
+                if key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL {
+                    let s = state.lock().unwrap();
+                    let params = state::VoiceParams {
+                        shape: Some(s.shape),
+                        sub: Some(s.sub),
+                        fm: Some(s.fm),
+                        output: Some(s.output),
+                        freq: Some(s.freq),
+                        gate: Some(s.gate),
+                        level: Some(s.level),
+                    };
+                    drop(s);
+                    let _ = state::save_module_state("voice", 0, &params);
+                    continue;
+                }
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
                     KeyCode::Char('j') | KeyCode::Down => {
