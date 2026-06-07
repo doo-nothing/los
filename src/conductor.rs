@@ -45,7 +45,7 @@ fn list_session_panes(session: &str, window: &str) -> Result<Vec<(usize, String)
     Ok(panes)
 }
 
-fn spawn_session_panes(panes_data: &[(&str, &str)], active_pane_idx: i64) -> Result<()> {
+fn spawn_session_panes(panes_data: &[(&str, &str)]) -> Result<()> {
     let session = "los";
     let win = "modules";
     
@@ -90,13 +90,6 @@ fn spawn_session_panes(panes_data: &[(&str, &str)], active_pane_idx: i64) -> Res
             .output()?;
     }
     
-    // Select requested active pane by index
-    if let Some((_, pane_id)) = panes.get(active_pane_idx as usize) {
-        Command::new("tmux")
-            .args(["select-pane", "-t", pane_id])
-            .output()?;
-    }
-    
     Ok(())
 }
 
@@ -120,7 +113,7 @@ pub fn create_session() -> Result<()> {
     
     // Spawn module panes
     let modules = [("sequencer", "Sequencer"), ("voice", "Voice"), ("mixer", "Mixer"), ("scope", "Scope")];
-    spawn_session_panes(&modules, 0)?;
+    spawn_session_panes(&modules)?;
     
     // Select modules window and attach
     Command::new("tmux")
@@ -138,6 +131,7 @@ pub fn load_session(state_path: &str) -> Result<()> {
     
     // Read the state file
     let st = state::from_toml_file::<state::SessionState>(std::path::Path::new(state_path))?;
+    eprintln!("active_pane from file: {}", st.tmux.active_pane);
     
     // Kill existing session
     let _ = Command::new("tmux").args(["kill-session", "-t", "los"]).output();
@@ -180,7 +174,7 @@ pub fn load_session(state_path: &str) -> Result<()> {
         .collect();
     
     if !all_panes.is_empty() {
-        spawn_session_panes(&all_panes, st.tmux.active_pane)?;
+        spawn_session_panes(&all_panes)?;
     }
     
     // Apply tmux settings from state
@@ -190,7 +184,15 @@ pub fn load_session(state_path: &str) -> Result<()> {
             .output();
     }
     
-    // Attach to session (active pane already selected by spawn_session_panes)
+    // Select window and pane explicitly at the very end
+    Command::new("tmux")
+        .args(["select-window", "-t", "los:modules"])
+        .output()?;
+    let pane = st.tmux.active_pane;
+    eprintln!("selecting pane {}", pane);
+    Command::new("tmux")
+        .args(["select-pane", "-t", &format!("los:modules.{}", pane)])
+        .output()?;
     Command::new("tmux")
         .args(["attach-session", "-t", "los"])
         .status()?;
