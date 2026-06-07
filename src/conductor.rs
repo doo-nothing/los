@@ -80,9 +80,6 @@ fn spawn_session_panes(panes_data: &[(&str, &str)]) -> Result<()> {
             .args(["split-window", "-t", &format!("{}:{}", session, win)])
             .output()?;
     }
-    Command::new("tmux")
-        .args(["select-layout", "-t", &format!("{}:{}", session, win), "tiled"])
-        .output()?;
     
     // Enable pane borders
     Command::new("tmux")
@@ -141,7 +138,12 @@ pub fn create_session() -> Result<()> {
     // Spawn module panes
     let modules = [("sequencer", "Sequencer"), ("voice", "Voice"), ("mixer", "Mixer"), ("scope", "Scope"), ("envelope", "Envelope")];
     spawn_session_panes(&modules)?;
-    
+
+    // Apply default tiled layout
+    Command::new("tmux")
+        .args(["select-layout", "-t", "los:modules", "tiled"])
+        .output()?;
+
     // Attach (modules window already active from spawn_session_panes)
     Command::new("tmux")
         .args(["attach-session", "-t", "los"])
@@ -200,12 +202,21 @@ pub fn load_session(state_path: &str) -> Result<()> {
         spawn_session_panes(&all_panes)?;
     }
 
+    // Count actual panes after spawning and clamp active_pane
+    let actual_pane_count = list_session_panes("los", "modules")?.len();
+    let clamped_active = |saved: usize| -> usize {
+        saved.min(actual_pane_count.saturating_sub(1))
+    };
+
     // Apply saved layout if present
     for win in &st.windows {
         if win.name == "modules" && !win.layout.is_empty() {
-            let _ = Command::new("tmux")
+            let layout_result = Command::new("tmux")
                 .args(["select-layout", "-t", "los:modules", &win.layout])
                 .output();
+            if let Err(ref e) = layout_result {
+                eprintln!("Warning: failed to restore layout: {}", e);
+            }
         }
     }
 
@@ -216,10 +227,10 @@ pub fn load_session(state_path: &str) -> Result<()> {
             .output();
     }
 
-    // Restore active pane
+    // Restore active pane (clamp to actual pane count)
     for win in &st.windows {
         if win.name == "modules" {
-            let pane_idx = win.active_pane;
+            let pane_idx = clamped_active(win.active_pane);
             let _ = Command::new("tmux")
                 .args(["select-pane", "-t", &format!("los:modules.{}", pane_idx)])
                 .output();
@@ -371,7 +382,8 @@ pub fn run_conductor() -> Result<()> {
                         
                         // Capture current tmux layout and active pane
                         let layout = get_window_layout("los", "modules").unwrap_or_default();
-                        let active_pane = get_active_pane_index("los", "modules").unwrap_or(0);
+                        let raw_active = get_active_pane_index("los", "modules").unwrap_or(0);
+                        let active_pane = raw_active.min(panes.len().saturating_sub(1));
 
                         // Prompt for filename
                         let now = chrono_or_fallback();
