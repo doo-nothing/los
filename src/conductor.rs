@@ -115,6 +115,31 @@ fn get_active_pane_index(session: &str, window: &str) -> Result<usize> {
 // same number of panes.
 
 /// Recompute tmux's rotating-XOR checksum over `s`.
+/// Count leaf cells (panes with IDs) in a tmux layout string.
+fn count_layout_leaf_cells(layout: &str) -> usize {
+    let body = layout.split_once(',').map(|(_, b)| b).unwrap_or(layout);
+    let mut count = 0;
+    let mut depth = 0;
+    let mut bytes = body.bytes().peekable();
+
+    while let Some(b) = bytes.next() {
+        match b {
+            b'[' | b'{' => depth += 1,
+            b']' | b'}' => depth -= 1,
+            // A comma at depth 0 followed by a digit is a leaf ID separator
+            b',' if depth == 0 => {
+                if let Some(&next) = bytes.peek() {
+                    if next.is_ascii_digit() {
+                        count += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    count
+}
+
 fn tmux_checksum(s: &str) -> u32 {
     let mut csum: u32 = 0;
     for b in s.bytes() {
@@ -397,7 +422,7 @@ pub fn load_session(state_path: &str) -> Result<()> {
             if let Ok(stdout) = pane_ids_stdout {
                 let new_ids: Vec<u32> = stdout
                     .lines()
-                    .filter_map(|line| line.trim().parse().ok())
+                    .filter_map(|line| line.trim().strip_prefix('%').and_then(|s| s.parse().ok()))
                     .collect();
                 if let Some(portable) = make_layout_portable(&win.layout, &new_ids) {
                     match tmux_cmd(&["select-layout", "-t", "los:modules", &portable]) {
@@ -407,7 +432,11 @@ pub fn load_session(state_path: &str) -> Result<()> {
                         ),
                     }
                 } else {
-                    eprintln!("[load_session] failed to make layout portable, falling back to tiled");
+                    eprintln!(
+                        "[load_session] failed to make layout portable ({} pane IDs, {} leaf cells), falling back to tiled",
+                        new_ids.len(),
+                        count_layout_leaf_cells(&win.layout)
+                    );
                 }
             }
         }
@@ -495,7 +524,7 @@ fn reload_modules_from_state(state_path: &std::path::Path) -> Result<()> {
             if let Ok(stdout) = pane_ids_stdout {
                 let new_ids: Vec<u32> = stdout
                     .lines()
-                    .filter_map(|line| line.trim().parse().ok())
+                    .filter_map(|line| line.trim().strip_prefix('%').and_then(|s| s.parse().ok()))
                     .collect();
                 if let Some(portable) = make_layout_portable(&win.layout, &new_ids) {
                     match tmux_cmd(&["select-layout", "-t", "los:modules", &portable]) {
@@ -505,7 +534,11 @@ fn reload_modules_from_state(state_path: &std::path::Path) -> Result<()> {
                         ),
                     }
                 } else {
-                    eprintln!("[reload] failed to make layout portable, falling back to tiled");
+                    eprintln!(
+                        "[reload] failed to make layout portable ({} pane IDs, {} leaf cells), falling back to tiled",
+                        new_ids.len(),
+                        count_layout_leaf_cells(&win.layout)
+                    );
                 }
             }
         }
