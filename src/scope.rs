@@ -198,6 +198,7 @@ fn draw_ui(
 
 pub fn run(instance: usize) -> Result<()> {
     // Initialize terminal with retry logic (handles tmux PTY race)
+    state::setup_save_signal();
     let mut last_err = String::new();
     for attempt in 0..20 {
         match enable_raw_mode() {
@@ -241,6 +242,19 @@ pub fn run(instance: usize) -> Result<()> {
     let mut show_help = false;
 
     loop {
+        // Check for save-on-signal
+        if state::check_save_signal() {
+            let s = state.lock().unwrap();
+            let params = state::ScopeParams {
+                mode: Some(s.mode),
+                channel: Some(s.channel),
+                zoom: Some(s.zoom),
+                gain: Some(s.gain),
+            };
+            drop(s);
+            let _ = state::save_module_state("scope", instance, &params);
+        }
+        
         let current_state = state.lock().unwrap().clone();
         draw_ui(&mut terminal, &current_state, show_help)?;
 

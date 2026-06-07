@@ -229,6 +229,7 @@ fn draw_ui(
 
 pub fn run() -> Result<()> {
     // Initialize terminal with retry logic (handles tmux PTY race)
+    state::setup_save_signal();
     let mut last_err = String::new();
     for attempt in 0..20 {
         match enable_raw_mode() {
@@ -278,6 +279,22 @@ pub fn run() -> Result<()> {
     let mut show_help = false;
 
     loop {
+        // Check for save-on-signal
+        if state::check_save_signal() {
+            let s = state.lock().unwrap();
+            let params = state::MixerParams {
+                master: Some(s.master),
+                tracks: s.tracks.iter().map(|t| state::MixerTrackParam {
+                    level: t.level,
+                    pan: t.pan,
+                    mute: t.mute,
+                    solo: t.solo,
+                }).collect(),
+            };
+            drop(s);
+            let _ = state::save_module_state("mixer", 0, &params);
+        }
+        
         let current_state = state.lock().unwrap().clone();
         draw_ui(&mut terminal, &current_state, show_help)?;
 

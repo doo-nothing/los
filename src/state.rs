@@ -5,6 +5,35 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// ── SIGUSR1 save signal ──────────────────────────────────────────────────────
+
+static SAVE_FLAG: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn sigusr1_handler(_: i32) {
+    SAVE_FLAG.store(true, Ordering::SeqCst);
+}
+
+/// Install the SIGUSR1 handler. Call once at module startup.
+pub fn setup_save_signal() {
+    unsafe {
+        libc::signal(libc::SIGUSR1, sigusr1_handler as libc::sighandler_t);
+    }
+}
+
+/// Check if a save signal was received. Returns true once per signal.
+pub fn check_save_signal() -> bool {
+    SAVE_FLAG.swap(false, Ordering::SeqCst)
+}
+
+/// Send SIGUSR1 to a process.
+pub fn send_save_signal(pid: u32) {
+    unsafe {
+        libc::kill(pid as i32, libc::SIGUSR1);
+    }
+}
+
 // ── directory helpers ───────────────────────────────────────────────────────
 
 pub fn los_dir() -> PathBuf {

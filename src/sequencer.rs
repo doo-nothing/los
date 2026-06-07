@@ -320,6 +320,9 @@ pub fn run(instance: usize) -> Result<()> {
         }
     }
     
+    // Setup SIGUSR1 handler for save-on-signal
+    state::setup_save_signal();
+    
     let mut last_err = String::new();
     for attempt in 0..20 {
         match enable_raw_mode() {
@@ -404,6 +407,25 @@ pub fn run(instance: usize) -> Result<()> {
     let mut pending_count: Option<String> = None;
 
     loop {
+        // Check for save-on-signal
+        if state::check_save_signal() {
+            let s = state.lock().unwrap();
+            let params = state::SequencerParams {
+                bpm: Some(s.bpm),
+                playing: Some(s.playing),
+                euclidean_pulses: Some(s.euclidean_pulses),
+                euclidean_length: Some(s.euclidean_length),
+                euclidean_rotation: Some(s.euclidean_rotation),
+                steps: s.steps.iter().map(|step| state::StepParam {
+                    active: step.active,
+                    note: step.note,
+                    velocity: step.velocity,
+                }).collect(),
+            };
+            drop(s);
+            let _ = state::save_module_state("sequencer", instance, &params);
+        }
+        
         let current_state = state.lock().unwrap().clone();
         draw_ui(&mut terminal, &current_state, &input_mode, &input_buffer, show_help)?;
 

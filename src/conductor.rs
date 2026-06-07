@@ -276,20 +276,38 @@ pub fn run_conductor() -> Result<()> {
                     KeyCode::Char('q') | KeyCode::Esc => break,
                     KeyCode::Char('j') | KeyCode::Down => {
                         selected += 1;
+                        refresh_list = true;
                     }
                     KeyCode::Char('k') | KeyCode::Up => {
                         selected = selected.saturating_sub(1);
+                        refresh_list = true;
                     }
                     KeyCode::Char('s') => {
-                        // Save current session state
-                        // Collect module states from tmp directory
-                        let mut windows = Vec::new();
-                        
+                        // Save: send SIGUSR1 to all module processes, then collect
                         let modules = ["sequencer", "voice", "mixer", "scope"];
-                        let _labels = ["Sequencer", "Voice", "Mixer", "Scope"];
                         
+                        // Get PIDs of all module panes
+                        if let Ok(output) = Command::new("tmux")
+                            .args(&["list-panes", "-t", "los:modules", "-F", "#{pane_pid}"])
+                            .output()
+                        {
+                            let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
+                                .lines()
+                                .filter_map(|l| l.trim().parse().ok())
+                                .collect();
+                            
+                            // Send SIGUSR1 to all module processes
+                            for pid in &pids {
+                                state::send_save_signal(*pid);
+                            }
+                            
+                            // Wait for modules to write their state files
+                            std::thread::sleep(Duration::from_millis(500));
+                        }
+                        
+                        // Collect module state files from tmp
                         let mut panes = Vec::new();
-                        for (_i, mod_name) in modules.iter().enumerate() {
+                        for mod_name in modules.iter() {
                             let path = state::module_state_path(mod_name, 0);
                             let inline = if path.exists() {
                                 std::fs::read_to_string(&path)
@@ -306,24 +324,27 @@ pub fn run_conductor() -> Result<()> {
                             });
                         }
                         
-                        windows.push(state::WindowState {
-                            name: "modules".into(),
-                            layout: "tiled".into(),
-                            panes,
-                        });
-                        
-                        // Generate timestamp-based filename
+                        // Prompt for filename
                         let now = chrono_or_fallback();
-                        let filename = format!("session-{}.toml", now);
+                        let default_name = format!("session-{}", now);
+                        let filename = if let Ok(name) = prompt_string(&mut terminal, "Save as:", &default_name) {
+                            format!("{}.toml", name)
+                        } else {
+                            format!("{}.toml", default_name)
+                        };
                         let save_path = state::states_dir().join(&filename);
                         
                         let session_state = state::SessionState {
                             meta: state::Meta {
                                 name: filename.trim_end_matches(".toml").to_string(),
-                                created: now.clone(),
+                                created: now,
                             },
                             tmux: state::TmuxState::default(),
-                            windows,
+                            windows: vec![state::WindowState {
+                                name: "modules".into(),
+                                layout: "tiled".into(),
+                                panes,
+                            }],
                         };
                         
                         if let Ok(toml_str) = state::to_toml_string(&session_state) {
@@ -422,9 +443,40 @@ pub fn run_conductor() -> Result<()> {
 }
 
 fn chrono_or_fallback() -> String {
-    // Simple timestamp without chrono dependency
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     format!("{}", now.as_secs())
+}
+
+/// Show a text input prompt in the TUI, return the entered string.
+fn prompt_string(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, prompt: &str, default: &str) -> Result<String> {
+    let mut buf = String::new();
+    loop {
+        terminal.draw(|f| {
+            let area = f.area();
+            let text = format!("{} [{}]", prompt, if buf.is_empty() { default } else { &buf });
+            let para = Paragraph::new(text)
+                .style(Style::default().fg(Color::Yellow))
+                .block(Block::default().borders(Borders::ALL).title("Input"));
+            f.render_widget(para, area);
+        })?;
+        
+        if event::poll(Duration::from_millis(50))? {
+            if let Event::Key(key) = event::read()? {
+                match key.code {
+                    KeyCode::Enter => {
+                        if buf.is_empty() { return Ok(default.to_string()); }
+                        return Ok(buf);
+                    }
+                    KeyCode::Esc => return Ok(default.to_string()),
+                    KeyCode::Char(c) if c.is_ascii_alphanumeric() || c == '-' || c == '_' => {
+                        buf.push(c);
+                    }
+                    KeyCode::Backspace => { buf.pop(); }
+                    _ => {}
+                }
+            }
+        }
+    }
 }
