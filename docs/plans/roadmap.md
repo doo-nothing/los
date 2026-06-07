@@ -445,6 +445,7 @@ envelope generator with per-track rise/fall stages: https://www.makenoisemusic.c
 | Loop | 0/1 | Oneshot or cycle |
 | Mod Target | 0-3 | Where output routes (amp/pitch/shape/fm) |
 
+
 ### TUI
 
 Simple parameter display similar to the voice module:
