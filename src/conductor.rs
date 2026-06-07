@@ -1,5 +1,4 @@
 use std::io;
-use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::time::Duration;
 
@@ -364,24 +363,17 @@ pub fn run_conductor() -> Result<()> {
                         
                     }
                     KeyCode::Char('l') => {
-                        // Load selected state by exec-ing into 'los load <path>'
+                        // Load selected state: tell user to run from terminal
                         if selected < entries.len() {
-                            let path = state::states_dir().join(&entries[selected]);
-                            let path_str = path.to_string_lossy().to_string();
+                            let filename = &entries[selected];
                             
-                            // Clean up terminal before exec
                             drop(terminal);
                             disable_raw_mode()?;
                             let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
                             
-                            // exec replaces this process with 'los load <path>'
-                            let exe = exe_path()?;
-                            let err = std::process::Command::new(&exe)
-                                .args(&["load", &path_str])
-                                .exec();
-                            // If exec fails, show error and exit
-                            eprintln!("Failed to load: {}", err);
-                            std::process::exit(1);
+                            println!("\nlos: load '{}'", filename);
+                            println!("  Run: los load {}\n", state::states_dir().join(filename).display());
+                            return Ok(());
                         }
                     }
                     KeyCode::Char('d') => {
