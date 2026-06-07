@@ -67,7 +67,6 @@ fn scope_thread(
             let channel = s.channel;
             let gain = s.gain;
             
-            s.buffer.clear();
             for i in (0..slot_len).step_by(2) {
                 let sample = match channel {
                     0 => local_buffer[i],
@@ -79,9 +78,6 @@ fn scope_thread(
 
             while s.buffer.len() > BUFFER_SIZE {
                 s.buffer.remove(0);
-            }
-            while s.buffer.len() < BUFFER_SIZE {
-                s.buffer.insert(0, 0.0);
             }
         }
 
