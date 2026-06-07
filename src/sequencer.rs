@@ -494,6 +494,7 @@ pub fn run(instance: usize) -> Result<()> {
     let mut pending_count: Option<String> = None;
 
     loop {
+        
         // Check for save-on-signal
         if state::check_save_signal() {
             let s = state.lock().unwrap();
@@ -504,7 +505,7 @@ pub fn run(instance: usize) -> Result<()> {
                 euclidean_length: None,
                 euclidean_rotation: None,
                 steps: vec![],
-                tracks: s.tracks.iter().map(|trk| TrackParam {
+                tracks: s.tracks.iter().map(|trk| state::TrackParam {
                     steps: trk.steps.iter().map(|step| state::StepParam {
                         active: step.active,
                         note: step.note,
