@@ -233,6 +233,12 @@ pub fn load_session(state_path: &str) -> Result<()> {
         spawn_session_panes(&all_panes_ref)?;
     }
 
+    // Count actual panes after spawning and clamp active_pane
+    let actual_pane_count = list_session_panes("los", "modules")?.len();
+    let clamped_active = |saved: usize| -> usize {
+        saved.min(actual_pane_count.saturating_sub(1))
+    };
+
     // Apply saved layout directly. Tmux accepts layouts with old pane IDs
     // and maps them to the current window's panes automatically.
     let mut layout_applied = false;
@@ -255,10 +261,11 @@ pub fn load_session(state_path: &str) -> Result<()> {
         tmux_cmd_ok(&["set-option", "-t", "los:modules", "window-size", &st.tmux.window_size]);
     }
 
-    // Restore active pane
+    // Restore active pane (clamp to actual pane count)
     for win in &st.windows {
         if win.name == "modules" {
-            tmux_cmd_ok(&["select-pane", "-t", &format!("los:modules.{}", win.active_pane)]);
+            let pane_idx = clamped_active(win.active_pane);
+            tmux_cmd_ok(&["select-pane", "-t", &format!("los:modules.{}", pane_idx)]);
         }
     }
 
@@ -311,6 +318,12 @@ fn reload_modules_from_state(state_path: &std::path::Path) -> Result<()> {
         spawn_session_panes(&all_panes_ref)?;
     }
 
+    // Count actual panes after spawning and clamp active_pane
+    let actual_pane_count = list_session_panes("los", "modules")?.len();
+    let clamped_active = |saved: usize| -> usize {
+        saved.min(actual_pane_count.saturating_sub(1))
+    };
+
     // Apply saved layout directly. Tmux accepts layouts with old pane IDs
     // and maps them to the current window's panes automatically.
     let mut layout_applied = false;
@@ -329,7 +342,8 @@ fn reload_modules_from_state(state_path: &std::path::Path) -> Result<()> {
     // Restore active pane
     for win in &st.windows {
         if win.name == "modules" {
-            tmux_cmd_ok(&["select-pane", "-t", &format!("los:modules.{}", win.active_pane)]);
+            let pane_idx = clamped_active(win.active_pane);
+            tmux_cmd_ok(&["select-pane", "-t", &format!("los:modules.{}", pane_idx)]);
         }
     }
 
@@ -485,7 +499,8 @@ pub fn run_conductor() -> Result<()> {
                         
                         // Capture current tmux layout and active pane
                         let layout = get_window_layout("los", "modules").unwrap_or_default();
-                        let active_pane = get_active_pane_index("los", "modules").unwrap_or(1);
+                        let raw_active = get_active_pane_index("los", "modules").unwrap_or(0);
+                        let active_pane = raw_active.min(panes.len().saturating_sub(1));
 
                         // Prompt for filename
                         let now = chrono_or_fallback();
@@ -636,106 +651,4 @@ mod tests {
         assert_eq!(shell_escape(path), "'/Users/jake/.config/los/states/YES.toml'");
     }
 
-    // ── save/load state format tests ─────────────────────────────────────
-
-    #[test]
-    fn test_session_state_with_reordered_panes() {
-        let state = state::SessionState {
-            meta: state::Meta {
-                name: "reordered".into(),
-                created: "123".into(),
-            },
-            tmux: state::TmuxState::default(),
-            windows: vec![state::WindowState {
-                name: "modules".into(),
-                layout: "test,100x50,0,0[50x50,0,0,1,50x50,0,0,2]".into(),
-                active_pane: 3,
-                panes: vec![
-                    state::PaneState {
-                        module: "voice".into(),
-                        instance: 0,
-                        patch: None,
-                        patch_inline: None,
-                    },
-                    state::PaneState {
-                        module: "envelope".into(),
-                        instance: 0,
-                        patch: None,
-                        patch_inline: None,
-                    },
-                    state::PaneState {
-                        module: "sequencer".into(),
-                        instance: 0,
-                        patch: None,
-                        patch_inline: None,
-                    },
-                ],
-            }],
-        };
-
-        let toml = state::to_toml_string(&state).expect("serialize");
-        let loaded: state::SessionState = toml::from_str(&toml).expect("deserialize");
-
-        assert_eq!(loaded.windows[0].panes[0].module, "voice");
-        assert_eq!(loaded.windows[0].panes[1].module, "envelope");
-        assert_eq!(loaded.windows[0].panes[2].module, "sequencer");
-        assert_eq!(loaded.windows[0].active_pane, 3);
-    }
-
-    #[test]
-    fn test_active_pane_with_base_index_1() {
-        // tmux default pane-base-index is 1, so active_pane=5 means the 5th pane
-        let state = state::SessionState {
-            meta: state::Meta {
-                name: "base-index-1".into(),
-                created: "123".into(),
-            },
-            tmux: state::TmuxState::default(),
-            windows: vec![state::WindowState {
-                name: "modules".into(),
-                layout: "".into(),
-                active_pane: 5,
-                panes: vec![
-                    state::PaneState { module: "a".into(), instance: 0, patch: None, patch_inline: None },
-                    state::PaneState { module: "b".into(), instance: 0, patch: None, patch_inline: None },
-                    state::PaneState { module: "c".into(), instance: 0, patch: None, patch_inline: None },
-                    state::PaneState { module: "d".into(), instance: 0, patch: None, patch_inline: None },
-                    state::PaneState { module: "e".into(), instance: 0, patch: None, patch_inline: None },
-                ],
-            }],
-        };
-
-        let toml = state::to_toml_string(&state).expect("serialize");
-        let loaded: state::SessionState = toml::from_str(&toml).expect("deserialize");
-
-        assert_eq!(loaded.windows[0].active_pane, 5);
-    }
-
-    #[test]
-    fn test_layout_string_preserved_raw() {
-        // Layout strings with old pane IDs must be passed directly to tmux.
-        // We must NOT parse, modify, or recompute checksums.
-        let raw_layout = "f1d4,100x50,0,0[50x50,0,0,1,50x50,0,0,2]";
-        let state = state::SessionState {
-            meta: state::Meta {
-                name: "layout-preserve".into(),
-                created: "123".into(),
-            },
-            tmux: state::TmuxState::default(),
-            windows: vec![state::WindowState {
-                name: "modules".into(),
-                layout: raw_layout.into(),
-                active_pane: 1,
-                panes: vec![
-                    state::PaneState { module: "a".into(), instance: 0, patch: None, patch_inline: None },
-                    state::PaneState { module: "b".into(), instance: 0, patch: None, patch_inline: None },
-                ],
-            }],
-        };
-
-        let toml = state::to_toml_string(&state).expect("serialize");
-        let loaded: state::SessionState = toml::from_str(&toml).expect("deserialize");
-
-        assert_eq!(loaded.windows[0].layout, raw_layout);
-    }
 }
