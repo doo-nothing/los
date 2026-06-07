@@ -363,16 +363,16 @@ pub fn run_conductor() -> Result<()> {
                         
                     }
                     KeyCode::Char('l') => {
-                        // Load selected state: tell user to run from terminal
+                        // Load selected state
                         if selected < entries.len() {
                             let filename = &entries[selected];
+                            let full_path = state::states_dir().join(filename);
                             
+                            // Print load command and exit (user runs it from terminal)
                             drop(terminal);
                             disable_raw_mode()?;
                             let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
-                            
-                            println!("\nlos: load '{}'", filename);
-                            println!("  Run: los load {}\n", state::states_dir().join(filename).display());
+                            println!("\nTo load '{}', run:\n  los load {}\n", filename, full_path.display());
                             return Ok(());
                         }
                     }
