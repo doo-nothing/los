@@ -1,8 +1,18 @@
 use std::io;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+fn shell_escape(s: &str) -> String {
+    // Simple escaping: wrap in single quotes, escape embedded single quotes
+    if s.contains('\'') {
+        let escaped = s.replace('\'', "'\"'\"'");
+        format!("'{}'", escaped)
+    } else {
+        format!("'{}'", s)
+    }
+}
+
+use anyhow::{Context, Result, bail};
 use crossterm::{
     event::{self, EnableMouseCapture, Event, KeyCode},
     execute,
@@ -19,6 +29,39 @@ use ratatui::{
 
 use crate::state;
 
+// ── tmux command helpers ───────────────────────────────────────────────────
+
+/// Run a tmux command, check exit code, and capture stderr.
+/// Returns stdout on success, bails with stderr on failure.
+fn tmux_cmd(args: &[&str]) -> Result<String> {
+    let output = Command::new("tmux")
+        .args(args)
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .output()
+        .with_context(|| format!("failed to run tmux {}", args.join(" ")))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    if !output.status.success() {
+        if stderr.is_empty() {
+            bail!("tmux {} exited with code {:?}", args.join(" "), output.status.code());
+        } else {
+            bail!("tmux {}: {}", args.join(" "), stderr);
+        }
+    }
+
+    Ok(stdout)
+}
+
+/// Run a tmux command and ignore failure (log to stderr but don't bail).
+fn tmux_cmd_ok(args: &[&str]) {
+    if let Err(e) = tmux_cmd(args) {
+        eprintln!("[tmux warning] {}", e);
+    }
+}
+
 // ── session creation ───────────────────────────────────────────────────────
 
 fn exe_path() -> Result<String> {
@@ -29,10 +72,8 @@ fn exe_path() -> Result<String> {
 }
 
 fn list_session_panes(session: &str, window: &str) -> Result<Vec<(usize, String)>> {
-    let output = Command::new("tmux")
-        .args(["list-panes", "-t", &format!("{}:{}", session, window), "-F", "#{pane_index} #{pane_id}"])
-        .output()?;
-    let mut panes: Vec<(usize, String)> = String::from_utf8(output.stdout)?
+    let stdout = tmux_cmd(&["list-panes", "-t", &format!("{}:{}", session, window), "-F", "#{pane_index} #{pane_id}"])?;
+    let mut panes: Vec<(usize, String)> = stdout
         .lines()
         .filter_map(|line| {
             let mut parts = line.split_whitespace();
@@ -46,17 +87,13 @@ fn list_session_panes(session: &str, window: &str) -> Result<Vec<(usize, String)
 }
 
 fn get_window_layout(session: &str, window: &str) -> Result<String> {
-    let output = Command::new("tmux")
-        .args(["display-message", "-p", "-t", &format!("{}:{}", session, window), "#{window_layout}"])
-        .output()?;
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    let stdout = tmux_cmd(&["display-message", "-p", "-t", &format!("{}:{}", session, window), "#{window_layout}"])?;
+    Ok(stdout.trim().to_string())
 }
 
 fn get_active_pane_index(session: &str, window: &str) -> Result<usize> {
-    let output = Command::new("tmux")
-        .args(["list-panes", "-t", &format!("{}:{}", session, window), "-F", "#{pane_index} #{pane_active}"])
-        .output()?;
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
+    let stdout = tmux_cmd(&["list-panes", "-t", &format!("{}:{}", session, window), "-F", "#{pane_index} #{pane_active}"])?;
+    for line in stdout.lines() {
         let mut parts = line.split_whitespace();
         if let (Some(idx), Some("1")) = (parts.next(), parts.next()) {
             return idx.parse().context("invalid pane index");
@@ -68,71 +105,53 @@ fn get_active_pane_index(session: &str, window: &str) -> Result<usize> {
 fn spawn_session_panes(panes_data: &[(&str, &str)]) -> Result<()> {
     let session = "los";
     let win = "modules";
-    
+
     // Create window
-    Command::new("tmux")
-        .args(["new-window", "-t", session, "-n", win])
-        .output()?;
-    
+    tmux_cmd(&["new-window", "-t", session, "-n", win])?;
+
     // Create all required panes
     for _ in 1..panes_data.len() {
-        Command::new("tmux")
-            .args(["split-window", "-t", &format!("{}:{}", session, win)])
-            .output()?;
+        tmux_cmd(&["split-window", "-t", &format!("{}:{}", session, win)])?;
     }
-    
+
     // Enable pane borders
-    Command::new("tmux")
-        .args(["set-option", "-t", &format!("{}:{}", session, win), "pane-border-status", "top"])
-        .output()?;
-    Command::new("tmux")
-        .args(["set-option", "-t", &format!("{}:{}", session, win), "pane-border-format", " #{pane_title} "])
-        .output()?;
-    
+    tmux_cmd(&["set-option", "-t", &format!("{}:{}", session, win), "pane-border-status", "top"])?;
+    tmux_cmd(&["set-option", "-t", &format!("{}:{}", session, win), "pane-border-format", " #{pane_title} "])?;
+
     // Discover panes and spawn modules
     let panes = list_session_panes(session, win)?;
     let exe = exe_path()?;
-    
+
     for (i, (_, pane_id)) in panes.iter().enumerate() {
         if i >= panes_data.len() { break; }
         let (cmd, label) = panes_data[i];
-        
-        Command::new("tmux")
-            .args(["select-pane", "-t", pane_id, "-T", label])
-            .output()?;
-        
+
+        tmux_cmd(&["select-pane", "-t", pane_id, "-T", label])?;
+
         let full_cmd = format!("{} {}", exe, cmd);
-        Command::new("tmux")
-            .args(["respawn-pane", "-k", "-t", pane_id, &full_cmd])
-            .output()?;
+        tmux_cmd(&["respawn-pane", "-k", "-t", pane_id, &full_cmd])?;
     }
-    
+
     // Select first pane by ID (reliable from outside tmux)
     if let Some((_, pane_id)) = panes.first() {
-        Command::new("tmux")
-            .args(["select-pane", "-t", pane_id])
-            .output()?;
+        tmux_cmd(&["select-pane", "-t", pane_id])?;
     }
-    
+
     Ok(())
 }
 
 pub fn create_session() -> Result<()> {
     state::ensure_dirs()?;
-    let _ = Command::new("tmux").args(["kill-session", "-t", "los"]).output();
+    let _ = tmux_cmd(&["kill-session", "-t", "los"]);
 
     // Create conductor window
-    Command::new("tmux")
-        .args(["new-session", "-d", "-s", "los", "-n", "conductor"])
-        .output()?;
+    tmux_cmd(&["new-session", "-d", "-s", "los", "-n", "conductor"])?;
     
     // Start conductor TUI in its pane
     let panes = list_session_panes("los", "conductor")?;
     let exe = exe_path()?;
     if let Some((_, pane_id)) = panes.first() {
-        Command::new("tmux")
-            .args(["respawn-pane", "-k", "-t", pane_id, &format!("{} conductor", exe)])
-            .output()?;
+        tmux_cmd(&["respawn-pane", "-k", "-t", pane_id, &format!("{} conductor", exe)])?;
     }
     
     // Spawn module panes
@@ -140,47 +159,41 @@ pub fn create_session() -> Result<()> {
     spawn_session_panes(&modules)?;
 
     // Apply default tiled layout
-    Command::new("tmux")
-        .args(["select-layout", "-t", "los:modules", "tiled"])
-        .output()?;
+    tmux_cmd(&["select-layout", "-t", "los:modules", "tiled"])?;
 
-    // Attach (modules window already active from spawn_session_panes)
-    Command::new("tmux")
+    // Attach (blocks until detached; use raw .status())
+    let _ = Command::new("tmux")
         .args(["attach-session", "-t", "los"])
-        .status()?;
-    
+        .status();
+
     Ok(())
 }
 
 pub fn load_session(state_path: &str) -> Result<()> {
     state::ensure_dirs()?;
-    
+
     // Read the state file
     let st = state::from_toml_file::<state::SessionState>(std::path::Path::new(state_path))?;
-    
-    // Kill existing session
-    let _ = Command::new("tmux").args(["kill-session", "-t", "los"]).output();
-    
+
+    // Kill existing session (ignore error if none exists)
+    let _ = tmux_cmd(&["kill-session", "-t", "los"]);
+
     // Create conductor window
-    Command::new("tmux")
-        .args(["new-session", "-d", "-s", "los", "-n", "conductor"])
-        .output()?;
-    
+    tmux_cmd(&["new-session", "-d", "-s", "los", "-n", "conductor"])?;
+
     let exe = exe_path()?;
-    
+
     // Start conductor TUI
     let panes = list_session_panes("los", "conductor")?;
     if let Some((_, pane_id)) = panes.first() {
-        Command::new("tmux")
-            .args(["respawn-pane", "-k", "-t", pane_id, &format!("{} conductor", exe)])
-            .output()?;
+        tmux_cmd(&["respawn-pane", "-k", "-t", pane_id, &format!("{} conductor", exe)])?;
     }
-    
+
     // Write module state files from the loaded session
     let module_windows: Vec<&state::WindowState> = st.windows.iter()
         .filter(|w| w.name != "conductor")
         .collect();
-    
+
     for win in &module_windows {
         for pane in &win.panes {
             if let Some(ref inline) = pane.patch_inline {
@@ -191,15 +204,21 @@ pub fn load_session(state_path: &str) -> Result<()> {
             }
         }
     }
-    
-    // Build module list for spawning
-    let all_panes: Vec<(&str, &str)> = module_windows.iter()
+
+    // Build module list for spawning with real labels
+    let all_panes: Vec<(String, String)> = module_windows.iter()
         .flat_map(|w| w.panes.iter())
-        .map(|p| (p.module.as_str(), "Module"))
+        .map(|p| {
+            let label = p.module.chars().next().unwrap().to_uppercase().to_string() + &p.module[1..];
+            (p.module.clone(), label)
+        })
         .collect();
-    
-    if !all_panes.is_empty() {
-        spawn_session_panes(&all_panes)?;
+    let all_panes_ref: Vec<(&str, &str)> = all_panes.iter()
+        .map(|(m, l)| (m.as_str(), l.as_str()))
+        .collect();
+
+    if !all_panes_ref.is_empty() {
+        spawn_session_panes(&all_panes_ref)?;
     }
 
     // Count actual panes after spawning and clamp active_pane
@@ -208,40 +227,42 @@ pub fn load_session(state_path: &str) -> Result<()> {
         saved.min(actual_pane_count.saturating_sub(1))
     };
 
-    // Apply saved layout if present
+    // Apply saved layout if present, fall back to tiled on failure
+    let mut layout_applied = false;
     for win in &st.windows {
         if win.name == "modules" && !win.layout.is_empty() {
-            let layout_result = Command::new("tmux")
-                .args(["select-layout", "-t", "los:modules", &win.layout])
-                .output();
-            if let Err(ref e) = layout_result {
-                eprintln!("Warning: failed to restore layout: {}", e);
+            match tmux_cmd(&["select-layout", "-t", "los:modules", &win.layout]) {
+                Ok(_) => {
+                    layout_applied = true;
+                }
+                Err(e) => {
+                    eprintln!("[load_session] layout failed ({}), falling back to tiled", e);
+                }
             }
         }
+    }
+    if !layout_applied {
+        tmux_cmd_ok(&["select-layout", "-t", "los:modules", "tiled"]);
     }
 
     // Apply tmux settings from state
     if !st.tmux.window_size.is_empty() {
-        let _ = Command::new("tmux")
-            .args(["set-option", "-t", "los:modules", "window-size", &st.tmux.window_size])
-            .output();
+        tmux_cmd_ok(&["set-option", "-t", "los:modules", "window-size", &st.tmux.window_size]);
     }
 
     // Restore active pane (clamp to actual pane count)
     for win in &st.windows {
         if win.name == "modules" {
             let pane_idx = clamped_active(win.active_pane);
-            let _ = Command::new("tmux")
-                .args(["select-pane", "-t", &format!("los:modules.{}", pane_idx)])
-                .output();
+            tmux_cmd_ok(&["select-pane", "-t", &format!("los:modules.{}", pane_idx)]);
         }
     }
 
-    // Attach (modules window already active from spawn_session_panes)
-    Command::new("tmux")
+    // Attach (blocks until detached; use raw .status() since tmux_cmd would hang)
+    let _ = Command::new("tmux")
         .args(["attach-session", "-t", "los"])
-        .status()?;
-    
+        .status();
+
     Ok(())
 }
 
@@ -416,33 +437,31 @@ pub fn run_conductor() -> Result<()> {
                         
                     }
                     KeyCode::Char('l') if selected < entries.len() => {
-                        // Load selected state: write module state files, send SIGUSR2
+                        // Full session reload: spawn a detached process that will
+                        // recreate the tmux session after this conductor exits.
                         let path = state::states_dir().join(&entries[selected]);
-                        
-                        // Read the saved state file
-                        if let Ok(st) = state::from_toml_file::<state::SessionState>(&path) {
-                            // Write module state files from the loaded session
-                            for win in &st.windows {
-                                for pane in &win.panes {
-                                    if let Some(ref inline) = pane.patch_inline {
-                                        let filepath = state::module_state_path(&pane.module, pane.instance);
-                                        let toml_str = toml::to_string_pretty(inline)
-                                            .unwrap_or_default();
-                                        let _ = state::write_state_file(&filepath, &toml_str);
-                                    }
-                                }
-                            }
-                            
-                            // Send SIGUSR2 to all module processes to trigger reload
-                            let modules = ["sequencer", "voice", "mixer", "scope", "envelope"];
-                            for mod_name in &modules {
-                                if let Some(pid) = state::read_pid_file(mod_name, 0) {
-                                    state::send_reload_signal(pid);
-                                }
-                            }
-                            
-                            needs_refresh = true;
-                        }
+                        let path_str = path.to_string_lossy().to_string();
+
+                        // Write reload marker so the helper knows what to load
+                        let marker = state::tmp_dir().join(".reload_request");
+                        let _ = std::fs::write(&marker, &path_str);
+
+                        // Spawn a detached shell that waits for the old tmux session
+                        // to die, then runs `los load <path>` to create the new one.
+                        let script = format!(
+                            "while tmux has-session -t los 2>/dev/null; do sleep 0.2; done; {} load {}",
+                            exe_path().unwrap_or_else(|_| "los".into()),
+                            shell_escape(&path_str)
+                        );
+                        let _ = Command::new("sh")
+                            .args(["-c", &script])
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .spawn();
+
+                        // Exit the conductor so tmux session can be killed/recreated
+                        return Ok(());
                     }
                     KeyCode::Char('d') if selected < entries.len() => {
                         // Delete selected state
@@ -466,7 +485,7 @@ pub fn run_conductor() -> Result<()> {
                     Line::from(""),
                     Line::from("  j/k, ↑/↓  Navigate state list"),
                     Line::from("  s          Save current session state"),
-                    Line::from("  l          Load selected state (creates new session)"),
+                    Line::from("  l          Load selected state (full session reload)"),
                     Line::from("  d          Delete selected state"),
                 Line::from("  ?          Toggle this help"),
                 Line::from("  Close pane: tmux prefix + x"),
@@ -532,5 +551,26 @@ fn prompt_string(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, prompt: 
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_shell_escape_no_quotes() {
+        assert_eq!(shell_escape("hello"), "'hello'");
+    }
+
+    #[test]
+    fn test_shell_escape_with_quotes() {
+        assert_eq!(shell_escape("it's"), "'it'\"'\"'s'");
+    }
+
+    #[test]
+    fn test_shell_escape_path() {
+        let path = "/Users/jake/.config/los/states/YES.toml";
+        assert_eq!(shell_escape(path), "'/Users/jake/.config/los/states/YES.toml'");
     }
 }
