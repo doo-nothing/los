@@ -17,7 +17,7 @@ use ratatui::{
     Terminal,
 };
 
-use crate::shm::{AudioRingbuf, EventRingbuf, ShmTransport};
+use crate::shm::{AudioRingbuf, EventRingbuf, ModulationBus, ShmTransport};
 use crate::state;
 
 #[derive(Clone, Copy)]
@@ -29,6 +29,7 @@ struct VoiceState {
     freq: f32,
     gate: bool,
     level: f32,
+    velocity: f32, // 0.0-1.0 from last note_on
 }
 
 impl Default for VoiceState {
@@ -41,6 +42,7 @@ impl Default for VoiceState {
             freq: 440.0,
             gate: false,
             level: 0.0,
+            velocity: 0.0,
         }
     }
 }
@@ -52,15 +54,14 @@ fn voice_thread(
     let mut ringbuf = AudioRingbuf::open("/los_mix_in")
         .or_else(|_| AudioRingbuf::create("/los_mix_in"))?;
 
-    let mut events = EventRingbuf::open().ok();
-    
+    let mut events = EventRingbuf::open(0).ok();
+    let mut modbus = ModulationBus::open().or_else(|_| ModulationBus::create()).ok();
+
     let _transport = ShmTransport::open()
         .or_else(|_| ShmTransport::create(48000))?;
 
     let mut phase = 0.0f64;
     let mut sub_phase = 0.0f64;
-    let mut adsr_level = 0.0f32;
-    let mut adsr_state = 0u8; // 0=off, 1=attack, 2=decay, 3=sustain, 4=release
 
     let sample_rate = 48000.0;
     let block_size = 64;
@@ -70,25 +71,27 @@ fn voice_thread(
             break;
         }
 
-        // Try to open events if not available
+        // Reconnect to shared resources if disconnected
         if events.is_none() {
-            events = EventRingbuf::open().ok();
+            events = EventRingbuf::open(0).ok();
+        }
+        if modbus.is_none() {
+            modbus = ModulationBus::open().or_else(|_| ModulationBus::create()).ok();
         }
 
-        // Read events
+        // Read events (note_on sets pitch + velocity, note_off sets gate=false)
         if let Some(ref mut ev) = events {
             while let Some(event) = ev.read_event() {
                 let mut s = state.lock().unwrap();
                 match event.event_type {
                     0 => { // Note on
-                        s.freq = 440.0 * 2.0f32.powf((event.note as f32 - 69.0) / 12.0);
+                        s.freq = event.value; // frequency from note
+                        s.velocity = event.param as f32 / 127.0;
                         s.gate = true;
-                        adsr_state = 1; // attack
-                        adsr_level = 0.0;
                     }
                     1 => { // Note off
                         s.gate = false;
-                        adsr_state = 4; // release
+                        // velocity stays as last value for release tail
                     }
                     _ => {}
                 }
@@ -98,46 +101,34 @@ fn voice_thread(
         // Generate audio
         let s = state.lock().unwrap();
         let freq = s.freq as f64;
-        let shape = s.shape;
-        let sub_mix = s.sub;
-        let fm_amount = s.fm;
         let output_mode = s.output;
+        let velocity = s.velocity;
 
-        // ADSR
-        match adsr_state {
-            1 => { // Attack
-                adsr_level += 0.01;
-                if adsr_level >= 1.0 {
-                    adsr_level = 1.0;
-                    adsr_state = 2;
-                }
-            }
-            2 => { // Decay
-                adsr_level -= 0.005;
-                if adsr_level <= 0.7 {
-                    adsr_level = 0.7;
-                    adsr_state = 3;
-                }
-            }
-            3 => { // Sustain
-                adsr_level = 0.7;
-            }
-            4 => { // Release
-                adsr_level -= 0.01;
-                if adsr_level <= 0.0 {
-                    adsr_level = 0.0;
-                    adsr_state = 0;
-                }
-            }
-            _ => {}
-        }
+        // Read modulation from bus
+        // ch0  = envelope ch1 output (primary amplitude control)
+        // ch12 = param mod: voice shape
+        // ch13 = param mod: voice sub
+        // ch14 = param mod: voice fm
+        let envelope_level = modbus.as_ref().map(|m| m.get(0)).unwrap_or(0.0);
+        let mod_shape = modbus.as_ref().map(|m| m.get(12)).unwrap_or(0.0);
+        let mod_sub = modbus.as_ref().map(|m| m.get(13)).unwrap_or(0.0);
+        let mod_fm = modbus.as_ref().map(|m| m.get(14)).unwrap_or(0.0);
+
+        let shape = (s.shape + mod_shape).clamp(0.0, 1.0);
+        let sub_mix = (s.sub + mod_sub).clamp(0.0, 1.0);
+        let fm_amount = (s.fm + mod_fm).clamp(0.0, 1.0);
+
+        // Final amplitude: envelope × velocity
+        // envelope_level comes from envelope module (modbus ch0)
+        // velocity comes from sequencer step (0.0-1.0)
+        let level = envelope_level * velocity;
 
         let mut block = vec![0.0f32; block_size * 2];
-        
+
         for i in 0..block_size {
             // FM
             let fm_mod = (phase * fm_amount as f64 * 2.0 * std::f64::consts::PI).sin() * 0.1;
-            
+
             // Main oscillator with shape morphing
             let main_phase = (phase + fm_mod).fract();
             let sine = (main_phase * 2.0 * std::f64::consts::PI).sin() as f32;
@@ -160,7 +151,7 @@ fn voice_thread(
                 _ => main * (1.0 - sub_mix) + sub * sub_mix * 0.5,
             };
 
-            let output = sample * adsr_level * 0.5;
+            let output = sample * level * 0.5;
             block[i * 2] = output;
             block[i * 2 + 1] = output;
 
@@ -170,10 +161,10 @@ fn voice_thread(
 
         drop(s);
 
-        // Update level meter
+        // Update level meter for TUI
         {
             let mut s = state.lock().unwrap();
-            s.level = adsr_level;
+            s.level = level;
         }
 
         // Write to ringbuffer — retry when full, don't drop blocks
@@ -181,7 +172,6 @@ fn voice_thread(
             match ringbuf.write(&block) {
                 Ok(()) => break,
                 Err(_) => {
-                    // Ringbuffer full — yield and retry
                     std::thread::yield_now();
                 }
             }
@@ -216,10 +206,12 @@ fn draw_ui(
         // Status
         let gate_str = if state.gate { "●" } else { "○" };
         let status = format!(
-            "{} {:.1} Hz | Output: {} | Level: {:.0}%",
+            "{} {:.1} Hz | Output: {} | Env: {:.0}% | Vel: {:.0}% | Level: {:.0}%",
             gate_str,
             state.freq,
             match state.output { 0 => "Main", 1 => "Main+Sub", _ => "Mix" },
+            state.level / state.velocity.max(0.001) * 100.0, // env = level / velocity
+            state.velocity * 100.0,
             state.level * 100.0
         );
         let status_widget = Paragraph::new(status).style(Style::default().fg(Color::Cyan));

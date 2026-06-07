@@ -101,6 +101,11 @@ impl Default for Layout {
                     count: 1,
                     command: None,
                 },
+                ModuleDef {
+                    kind: "envelope".into(),
+                    count: 1,
+                    command: None,
+                },
             ],
         }
     }

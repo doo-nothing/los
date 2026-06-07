@@ -1,5 +1,5 @@
 use anyhow::Result;
-use los::{conductor, voice, sequencer, mixer, scope, state};
+use los::{conductor, voice, sequencer, mixer, scope, envelope, state};
 
 fn main() -> Result<()> {
     state::ensure_dirs()?;
@@ -22,6 +22,10 @@ fn main() -> Result<()> {
             "scope" => {
                 let instance = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
                 scope::run(instance)
+            }
+            "envelope" => {
+                let instance = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+                envelope::run(instance)
             }
             "load" => {
                 let path = args.get(2).cloned().unwrap_or_default();

@@ -54,7 +54,7 @@ fn spawn_session_panes(panes_data: &[(&str, &str)]) -> Result<()> {
         .args(["new-window", "-t", session, "-n", win])
         .output()?;
     
-    // Split into required number of panes
+    // Create all required panes
     for _ in 1..panes_data.len() {
         Command::new("tmux")
             .args(["split-window", "-t", &format!("{}:{}", session, win)])
@@ -119,7 +119,7 @@ pub fn create_session() -> Result<()> {
     }
     
     // Spawn module panes
-    let modules = [("sequencer", "Sequencer"), ("voice", "Voice"), ("mixer", "Mixer"), ("scope", "Scope")];
+    let modules = [("sequencer", "Sequencer"), ("voice", "Voice"), ("mixer", "Mixer"), ("scope", "Scope"), ("envelope", "Envelope")];
     spawn_session_panes(&modules)?;
     
     // Attach (modules window already active from spawn_session_panes)
@@ -292,7 +292,7 @@ pub fn run_conductor() -> Result<()> {
                     }
                     KeyCode::Char('s') => {
                         // Save: send SIGUSR1 to all module processes, then collect
-                        let modules = ["sequencer", "voice", "mixer", "scope"];
+                        let modules = ["sequencer", "voice", "mixer", "scope", "envelope"];
                         
                         // Read module PIDs from their pid files (written at startup)
                         let mut pids = Vec::new();
@@ -378,7 +378,7 @@ pub fn run_conductor() -> Result<()> {
                             }
                             
                             // Send SIGUSR2 to all module processes to trigger reload
-                            let modules = ["sequencer", "voice", "mixer", "scope"];
+                            let modules = ["sequencer", "voice", "mixer", "scope", "envelope"];
                             for mod_name in &modules {
                                 if let Some(pid) = state::read_pid_file(mod_name, 0) {
                                     state::send_reload_signal(pid);

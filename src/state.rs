@@ -190,6 +190,8 @@ pub struct TrackParam {
     pub rotation: Option<usize>,
     #[serde(default)]
     pub muted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mod_dest: Option<ModDest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -213,6 +215,52 @@ pub struct ScopeParams {
     pub channel: Option<usize>,
     pub zoom: Option<f32>,
     pub gain: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EnvelopeParams {
+    #[serde(default)]
+    pub channels: Vec<EnvelopeChannelParams>,
+    #[serde(default)]
+    pub logic_outputs: LogicOutputConfig,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct EnvelopeChannelParams {
+    pub rise: f32,
+    pub fall: f32,
+    pub shape: f32,
+    pub loop_mode: bool,
+    pub attenuverter: f32,
+    #[serde(default)]
+    pub trigger_track: i32,
+}
+
+impl Default for EnvelopeChannelParams {
+    fn default() -> Self {
+        Self {
+            rise: 0.5,
+            fall: 0.5,
+            shape: 0.5,
+            loop_mode: false,
+            attenuverter: 1.0,
+            trigger_track: -1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LogicOutputConfig {
+    pub sum_enabled: bool,
+    pub or_enabled: bool,
+    pub and_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModDest {
+    pub target_module: String,
+    pub target_instance: usize,
+    pub target_param: String,
 }
 
 // ── write helpers ────────────────────────────────────────────────────────────

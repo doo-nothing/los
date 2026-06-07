@@ -441,37 +441,68 @@ impl ShmTransport {
     }
 }
 
-// ── AudioEvent ──────────────────────────────────────────────────────────────
-
-/// A single event message (32 bytes fixed size) in shared memory.
-#[repr(C)]
-#[derive(Default, Clone, Copy, Debug)]
-pub struct AudioEvent {
-    pub event_type: u8,  // 0 = note_on, 1 = note_off, 2 = param
-    pub note: u8,        // MIDI note 0–127, or param ID for param events
-    pub velocity: u8,    // 0–127, or param value for param events
-    pub value: u8,       // extra param value byte (UNUSED for note events)
-    pub step: u32,       // step index that triggered this
-    _reserved: [u8; 24],
-}
+// ── AudioEvent v2 ────────────────────────────────────────────────────────────
 
 pub const EVENT_NOTE_ON: u8 = 0;
 pub const EVENT_NOTE_OFF: u8 = 1;
 pub const EVENT_PARAM: u8 = 2;
+pub const EVENT_MOD: u8 = 3;
+pub const EVENT_TRIGGER: u8 = 4;
 
 pub const PARAM_SHAPE: u8 = 0;
 pub const PARAM_SUB: u8 = 1;
 pub const PARAM_FM: u8 = 2;
 pub const PARAM_OUTPUT: u8 = 3;
+pub const PARAM_LEVEL: u8 = 4;
+pub const PARAM_RISE: u8 = 5;
+pub const PARAM_FALL: u8 = 6;
+
+/// A single event message (32 bytes fixed size) in shared memory.
+///
+/// Layout:
+///   event_type: u8   — 0=note_on, 1=note_off, 2=param, 3=mod, 4=trigger
+///   source:     u8   — encoded source module + instance
+///   target:     u8   — encoded target module + instance
+///   param:      u8   — target parameter ID
+///   value:      f32  — note frequency, modulation amount, or trigger level
+///   step:       u32  — step index / timestamp
+///   reserved:   [u8; 16]
+#[repr(C)]
+#[derive(Default, Clone, Copy, Debug)]
+pub struct AudioEvent {
+    pub event_type: u8,
+    pub source: u8,
+    pub target: u8,
+    pub param: u8,
+    pub value: f32,
+    pub step: u32,
+    _reserved: [u8; 20],
+}
 
 const _: [(); 1] = [(); (core::mem::size_of::<AudioEvent>() == 32) as usize];
 
 impl AudioEvent {
     pub fn note_on(note: u8, velocity: u8, step: u32) -> Self {
+        let freq = 440.0 * 2.0f32.powf((note as f32 - 69.0) / 12.0);
         Self {
             event_type: EVENT_NOTE_ON,
-            note,
-            velocity,
+            source: 0,
+            target: 0,
+            param: velocity,
+            value: freq,
+            step,
+            ..Default::default()
+        }
+    }
+
+    pub fn note_on_source(note: u8, velocity: u8, source: u8, step: u32) -> Self {
+        let freq = 440.0 * 2.0f32.powf((note as f32 - 69.0) / 12.0);
+        Self {
+            event_type: EVENT_NOTE_ON,
+            source,
+            target: 0,
+            param: velocity,
+            value: freq,
             step,
             ..Default::default()
         }
@@ -480,44 +511,97 @@ impl AudioEvent {
     pub fn note_off(note: u8, step: u32) -> Self {
         Self {
             event_type: EVENT_NOTE_OFF,
-            note,
+            source: 0,
+            target: 0,
+            param: note,
             step,
             ..Default::default()
         }
     }
 
-    pub fn param(id: u8, value: u8) -> Self {
+    pub fn note_off_source(note: u8, source: u8, step: u32) -> Self {
+        Self {
+            event_type: EVENT_NOTE_OFF,
+            source,
+            target: 0,
+            param: note,
+            step,
+            ..Default::default()
+        }
+    }
+
+    pub fn param(id: u8, value: f32) -> Self {
         Self {
             event_type: EVENT_PARAM,
-            note: id,
-            velocity: value,
+            source: 0,
+            target: 0,
+            param: id,
+            value,
+            ..Default::default()
+        }
+    }
+
+    pub fn modulation(target: u8, param: u8, value: f32, step: u32) -> Self {
+        Self {
+            event_type: EVENT_MOD,
+            source: 0,
+            target,
+            param,
+            value,
+            step,
+            ..Default::default()
+        }
+    }
+
+    pub fn trigger(source: u8, target: u8, value: f32, step: u32) -> Self {
+        Self {
+            event_type: EVENT_TRIGGER,
+            source,
+            target,
+            value,
+            step,
             ..Default::default()
         }
     }
 
     pub fn is_note_on(&self) -> bool {
-        self.event_type == 0
+        self.event_type == EVENT_NOTE_ON
     }
 
     pub fn is_note_off(&self) -> bool {
-        self.event_type == 1
+        self.event_type == EVENT_NOTE_OFF
+    }
+
+    pub fn is_mod(&self) -> bool {
+        self.event_type == EVENT_MOD
+    }
+
+    pub fn is_trigger(&self) -> bool {
+        self.event_type == EVENT_TRIGGER
     }
 }
 
-// ── EventRingbuf ───────────────────────────────────────────────────────────
+// ── EventRingbuf (MPMC) ────────────────────────────────────────────────────
 
 const EVENT_SIZE: usize = 32;
+const NUM_CONSUMERS: usize = 4;
 
-/// Lock-free SPSC ringbuffer for fixed-size events backed by POSIX SHM.
+/// Lock-free multi-producer multi-consumer ringbuffer for fixed-size events
+/// backed by POSIX SHM.
 ///
 /// Layout:
-///   [0..8)    write_index : u64
-///   [8..16)   read_index  : u64
-///   [16..64)  reserved
-///   [64..)    event data  (EVENT_SIZE bytes each)
+///   [0..8)     write_index    : u64
+///   [8..16)    reserved
+///   [16..24)   read_index_0   : u64  (voice consumer)
+///   [24..32)   read_index_1   : u64  (envelope consumer)
+///   [32..40)   read_index_2   : u64  (reserved)
+///   [40..48)   read_index_3   : u64  (reserved)
+///   [48..64)   reserved
+///   [64..)     event data  (EVENT_SIZE bytes each)
 pub struct EventRingbuf {
     fd: i32,
     ptr: *mut u8,
+    consumer_id: usize,
     num_slots: u32,
     total_size: usize,
     owned: bool,
@@ -542,21 +626,32 @@ impl Drop for EventRingbuf {
 
 impl EventRingbuf {
     fn name() -> &'static str {
-        "/los_events"
+        "/los_events_v2"
     }
 
     fn write_idx_ptr(&self) -> *mut u64 {
         self.ptr as *mut u64
     }
 
-    fn read_idx_ptr(&self) -> *mut u64 {
-        unsafe { self.ptr.add(8) as *mut u64 }
+    fn read_idx_ptr(&self, consumer_id: usize) -> *mut u64 {
+        unsafe { self.ptr.add(16 + consumer_id * 8) as *mut u64 }
     }
 
     fn slot_ptr(&self, index: u64) -> *mut u8 {
         let slot = index as usize % self.num_slots as usize;
         let offset = DATA_OFFSET + slot * EVENT_SIZE;
         unsafe { self.ptr.add(offset) }
+    }
+
+    fn min_read_index(&self) -> u64 {
+        let mut min = u64::MAX;
+        for i in 0..NUM_CONSUMERS {
+            let r = atomic_load_acquire(self.read_idx_ptr(i));
+            if r < min {
+                min = r;
+            }
+        }
+        min
     }
 
     pub fn create() -> Result<Self> {
@@ -600,14 +695,26 @@ impl EventRingbuf {
         };
 
         unsafe {
-            ptr::write_unaligned(ptr as *mut u64, 0);
-            ptr::write_unaligned(ptr.add(8) as *mut u64, 0);
+            ptr::write_unaligned(ptr as *mut u64, 0);            // write_index
+            // Initialize read indices to MAX so unopened consumers don't block the producer.
+            // Each consumer sets its index to the current write_index on open().
+            for i in 0..NUM_CONSUMERS {
+                ptr::write_unaligned(ptr.add(16 + i * 8) as *mut u64, u64::MAX);
+            }
         }
 
-        Ok(Self { fd, ptr, num_slots, total_size, owned: true })
+        Ok(Self {
+            fd,
+            ptr,
+            consumer_id: NUM_CONSUMERS, // creator is producer, not a consumer
+            num_slots,
+            total_size,
+            owned: true,
+        })
     }
 
-    pub fn open() -> Result<Self> {
+    /// Open as a producer (no consumer read pointer — write only).
+    pub fn open_producer() -> Result<Self> {
         let num_slots = 256u32;
         let data_bytes = num_slots as usize * EVENT_SIZE;
         let total_size = DATA_OFFSET + data_bytes;
@@ -637,14 +744,70 @@ impl EventRingbuf {
             p as *mut u8
         };
 
-        Ok(Self { fd, ptr, num_slots, total_size, owned: false })
+        Ok(Self {
+            fd,
+            ptr,
+            consumer_id: NUM_CONSUMERS, // sentinel: producer
+            num_slots,
+            total_size,
+            owned: false,
+        })
+    }
+
+    pub fn open(consumer_id: usize) -> Result<Self> {
+        anyhow::ensure!(consumer_id < NUM_CONSUMERS, "consumer_id must be < {}", NUM_CONSUMERS);
+        let num_slots = 256u32;
+        let data_bytes = num_slots as usize * EVENT_SIZE;
+        let total_size = DATA_OFFSET + data_bytes;
+        let cname = CString::new(Self::name()).unwrap();
+
+        let fd = unsafe {
+            let fd = libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0);
+            if fd < 0 {
+                anyhow::bail!("shm_open({}) failed: {}", Self::name(), std::io::Error::last_os_error());
+            }
+            fd
+        };
+
+        let ptr = unsafe {
+            let p = libc::mmap(
+                ptr::null_mut(),
+                total_size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            );
+            if p == libc::MAP_FAILED {
+                libc::close(fd);
+                anyhow::bail!("mmap({}) failed: {}", Self::name(), std::io::Error::last_os_error());
+            }
+            p as *mut u8
+        };
+
+        // Initialize this consumer's read index to the current write index
+        // so it only sees events written after it joins, and doesn't block
+        // the producer with stale state.
+        unsafe {
+            let w = ptr::read_volatile(ptr as *const u64);
+            ptr::write_volatile(ptr.add(16 + consumer_id * 8) as *mut u64, w);
+        }
+
+        Ok(Self {
+            fd,
+            ptr,
+            consumer_id,
+            num_slots,
+            total_size,
+            owned: false,
+        })
     }
 
     pub fn write_event(&mut self, event: &AudioEvent) -> Result<()> {
         let w = atomic_load_acquire(self.write_idx_ptr());
-        let r = atomic_load_acquire(self.read_idx_ptr());
+        let min_r = self.min_read_index();
 
-        if w - r >= self.num_slots as u64 {
+        if w - min_r >= self.num_slots as u64 {
             anyhow::bail!("event buffer full");
         }
 
@@ -662,7 +825,7 @@ impl EventRingbuf {
 
     pub fn read_event(&mut self) -> Option<AudioEvent> {
         let w = atomic_load_acquire(self.write_idx_ptr());
-        let r = atomic_load_acquire(self.read_idx_ptr());
+        let r = atomic_load_acquire(self.read_idx_ptr(self.consumer_id));
 
         if w <= r {
             return None;
@@ -677,7 +840,418 @@ impl EventRingbuf {
                 EVENT_SIZE,
             );
         }
-        atomic_store_release(self.read_idx_ptr(), r + 1);
+        atomic_store_release(self.read_idx_ptr(self.consumer_id), r + 1);
         Some(event)
+    }
+
+    pub fn available(&self) -> u64 {
+        let w = atomic_load_acquire(self.write_idx_ptr());
+        let r = atomic_load_acquire(self.read_idx_ptr(self.consumer_id));
+        w.saturating_sub(r)
+    }
+}
+
+// ── ModulationBus ────────────────────────────────────────────────────────────
+
+/// Shared modulation values: 32 atomic f32 channels backed by POSIX SHM.
+///
+/// Layout:
+///   [0..4)     version      : u32 = 1
+///   [4..8)     num_channels : u32 = 32
+///   [8..64)    reserved
+///   [64..4160) 32 x f32 channels (aligned 4)
+const MODBUS_NUM_CHANNELS: usize = 32;
+const MODBUS_DATA_OFFSET: usize = 64;
+const MODBUS_TOTAL_SIZE: usize = MODBUS_DATA_OFFSET + MODBUS_NUM_CHANNELS * size_of::<f32>();
+
+pub struct ModulationBus {
+    ptr: *mut u8,
+    fd: i32,
+    owned: bool,
+}
+
+unsafe impl Send for ModulationBus {}
+
+impl Drop for ModulationBus {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe { libc::munmap(self.ptr as *mut libc::c_void, MODBUS_TOTAL_SIZE) };
+        }
+        if self.fd >= 0 {
+            unsafe { libc::close(self.fd) };
+        }
+        if self.owned {
+            let cname = CString::new("/los_mod").unwrap();
+            unsafe { libc::shm_unlink(cname.as_ptr()) };
+        }
+    }
+}
+
+impl ModulationBus {
+    fn name() -> &'static str {
+        "/los_mod"
+    }
+
+    fn channel_ptr(&self, channel: usize) -> *mut f32 {
+        unsafe { self.ptr.add(MODBUS_DATA_OFFSET + channel * size_of::<f32>()) as *mut f32 }
+    }
+
+    pub fn create() -> Result<Self> {
+        let cname = CString::new(Self::name()).unwrap();
+        let total = MODBUS_TOTAL_SIZE;
+
+        let fd = unsafe {
+            let fd = libc::shm_open(cname.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o644);
+            if fd < 0 {
+                anyhow::bail!("shm_open({}) failed: {}", Self::name(), std::io::Error::last_os_error());
+            }
+            let r = libc::ftruncate(fd, total as libc::off_t);
+            if r < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() != Some(libc::EINVAL) {
+                    libc::close(fd);
+                    libc::shm_unlink(cname.as_ptr());
+                    anyhow::bail!("ftruncate({}) failed: {}", Self::name(), err);
+                }
+            }
+            fd
+        };
+
+        let ptr = unsafe {
+            let p = libc::mmap(
+                ptr::null_mut(),
+                total,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            );
+            if p == libc::MAP_FAILED {
+                libc::close(fd);
+                libc::shm_unlink(cname.as_ptr());
+                anyhow::bail!("mmap({}) failed: {}", Self::name(), std::io::Error::last_os_error());
+            }
+            p as *mut u8
+        };
+
+        unsafe {
+            ptr::write_unaligned(ptr as *mut u32, 1); // version
+            ptr::write_unaligned(ptr.add(4) as *mut u32, MODBUS_NUM_CHANNELS as u32);
+            // Zero all channel values
+            for i in 0..MODBUS_NUM_CHANNELS {
+                ptr::write_unaligned(
+                    ptr.add(MODBUS_DATA_OFFSET + i * size_of::<f32>()) as *mut f32,
+                    0.0f32,
+                );
+            }
+        }
+
+        Ok(Self { ptr, fd, owned: true })
+    }
+
+    pub fn open() -> Result<Self> {
+        let cname = CString::new(Self::name()).unwrap();
+        let total = MODBUS_TOTAL_SIZE;
+
+        let fd = unsafe {
+            let fd = libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0);
+            if fd < 0 {
+                anyhow::bail!("shm_open({}) failed: {}", Self::name(), std::io::Error::last_os_error());
+            }
+            fd
+        };
+
+        let ptr = unsafe {
+            let p = libc::mmap(
+                ptr::null_mut(),
+                total,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            );
+            if p == libc::MAP_FAILED {
+                libc::close(fd);
+                anyhow::bail!("mmap({}) failed: {}", Self::name(), std::io::Error::last_os_error());
+            }
+            p as *mut u8
+        };
+
+        Ok(Self { ptr, fd, owned: false })
+    }
+
+    /// Read a channel value (volatile, atomic on aligned f32).
+    pub fn get(&self, channel: usize) -> f32 {
+        if channel >= MODBUS_NUM_CHANNELS {
+            return 0.0;
+        }
+        unsafe { ptr::read_volatile(self.channel_ptr(channel)) }
+    }
+
+    /// Write a channel value (volatile, atomic on aligned f32).
+    pub fn set(&mut self, channel: usize, value: f32) {
+        if channel >= MODBUS_NUM_CHANNELS {
+            return;
+        }
+        unsafe {
+            ptr::write_volatile(self.channel_ptr(channel), value);
+        }
+        compiler_fence(Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+mod shm_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // All SHM tests must run serially because they use fixed SHM names.
+    static SHM_TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn audio_event_size_is_32_bytes() {
+        assert_eq!(core::mem::size_of::<AudioEvent>(), 32);
+    }
+
+    #[test]
+    fn audio_event_note_on_computes_frequency() {
+        let ev = AudioEvent::note_on(69, 100, 0);
+        assert_eq!(ev.event_type, EVENT_NOTE_ON);
+        assert!((ev.value - 440.0).abs() < 0.01, "A4 should be ~440 Hz, got {}", ev.value);
+        assert_eq!(ev.param, 100);
+        assert_eq!(ev.step, 0);
+    }
+
+    #[test]
+    fn audio_event_note_on_c4_frequency() {
+        let ev = AudioEvent::note_on(60, 127, 5);
+        assert!((ev.value - 261.63).abs() < 0.1, "C4 should be ~261.63 Hz, got {}", ev.value);
+    }
+
+    #[test]
+    fn audio_event_modulation_carries_f32_value() {
+        let ev = AudioEvent::modulation(1, 2, 0.75, 10);
+        assert_eq!(ev.event_type, EVENT_MOD);
+        assert_eq!(ev.target, 1);
+        assert_eq!(ev.param, 2);
+        assert!((ev.value - 0.75).abs() < 0.001);
+        assert_eq!(ev.step, 10);
+    }
+
+    #[test]
+    fn audio_event_trigger_fields() {
+        let ev = AudioEvent::trigger(0, 1, 1.0, 3);
+        assert_eq!(ev.event_type, EVENT_TRIGGER);
+        assert_eq!(ev.source, 0);
+        assert_eq!(ev.target, 1);
+        assert!((ev.value - 1.0).abs() < 0.001);
+        assert_eq!(ev.step, 3);
+    }
+
+    #[test]
+    fn event_ringbuf_create_and_single_consumer() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ = unsafe { libc::shm_unlink(CString::new(EventRingbuf::name()).unwrap().as_ptr()) };
+        let mut rb = EventRingbuf::create().expect("create failed");
+        let mut consumer = EventRingbuf::open(0).expect("open consumer 0 failed");
+
+        let ev = AudioEvent::note_on(60, 100, 0);
+        rb.write_event(&ev).expect("write failed");
+
+        let read = consumer.read_event();
+        assert!(read.is_some(), "consumer should see the event");
+        let read_ev = read.unwrap();
+        assert_eq!(read_ev.event_type, EVENT_NOTE_ON);
+        assert_eq!(read_ev.param, 100);
+    }
+
+    #[test]
+    fn event_ringbuf_multi_consumer_independent_reads() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ = unsafe { libc::shm_unlink(CString::new(EventRingbuf::name()).unwrap().as_ptr()) };
+        let mut rb = EventRingbuf::create().expect("create failed");
+        let mut c0 = EventRingbuf::open(0).expect("open consumer 0");
+        let mut c1 = EventRingbuf::open(1).expect("open consumer 1");
+
+        let ev1 = AudioEvent::note_on(60, 100, 0);
+        let ev2 = AudioEvent::note_on(64, 80, 1);
+        rb.write_event(&ev1).unwrap();
+        rb.write_event(&ev2).unwrap();
+
+        // Both consumers should independently read both events
+        let c0_ev1 = c0.read_event().expect("c0 first event");
+        let c1_ev1 = c1.read_event().expect("c1 first event");
+        assert_eq!(c0_ev1.param, 100);
+        assert_eq!(c1_ev1.param, 100);
+
+        let c0_ev2 = c0.read_event().expect("c0 second event");
+        let c1_ev2 = c1.read_event().expect("c1 second event");
+        assert_eq!(c0_ev2.param, 80);
+        assert_eq!(c1_ev2.param, 80);
+
+        // No more events for either
+        assert!(c0.read_event().is_none());
+        assert!(c1.read_event().is_none());
+    }
+
+    #[test]
+    fn event_ringbuf_producer_blocks_on_full() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ = unsafe { libc::shm_unlink(CString::new(EventRingbuf::name()).unwrap().as_ptr()) };
+        let mut rb = EventRingbuf::create().expect("create failed");
+        let _c0 = EventRingbuf::open(0).expect("open consumer 0");
+
+        // Consumer 0 doesn't read. Fill the buffer.
+        for i in 0..256u64 {
+            let ev = AudioEvent::note_on(60, 100, i as u32);
+            rb.write_event(&ev).expect("write should succeed");
+        }
+
+        let ev = AudioEvent::note_on(60, 100, 256);
+        assert!(rb.write_event(&ev).is_err(), "producer should block when buffer full");
+    }
+
+    #[test]
+    fn event_ringbuf_producer_unblocks_after_consumer_reads() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ = unsafe { libc::shm_unlink(CString::new(EventRingbuf::name()).unwrap().as_ptr()) };
+        let mut rb = EventRingbuf::create().expect("create failed");
+        let mut c0 = EventRingbuf::open(0).expect("open consumer 0");
+
+        for i in 0..256u64 {
+            let ev = AudioEvent::note_on(60, 100, i as u32);
+            rb.write_event(&ev).unwrap();
+        }
+
+        let _ = c0.read_event();
+
+        let ev = AudioEvent::note_on(60, 100, 256);
+        assert!(rb.write_event(&ev).is_ok(), "producer should unblock after consumer reads");
+    }
+
+    #[test]
+    fn modulation_bus_create_and_rw() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ = unsafe { libc::shm_unlink(CString::new("/los_mod").unwrap().as_ptr()) };
+        let mut bus = ModulationBus::create().expect("create modbus");
+
+        bus.set(0, 0.75);
+        bus.set(31, -0.5);
+
+        assert!((bus.get(0) - 0.75).abs() < 0.001);
+        assert!((bus.get(31) - (-0.5)).abs() < 0.001);
+    }
+
+    #[test]
+    fn modulation_bus_open_reads_existing() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ = unsafe { libc::shm_unlink(CString::new("/los_mod").unwrap().as_ptr()) };
+        let mut bus1 = ModulationBus::create().expect("create");
+        bus1.set(5, 0.42);
+
+        let bus2 = ModulationBus::open().expect("open");
+        assert!((bus2.get(5) - 0.42).abs() < 0.001);
+    }
+
+    #[test]
+    fn modulation_bus_out_of_bounds_returns_zero() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ = unsafe { libc::shm_unlink(CString::new("/los_mod").unwrap().as_ptr()) };
+        let bus = ModulationBus::create().expect("create");
+        assert_eq!(bus.get(32), 0.0);
+        assert_eq!(bus.get(1000), 0.0);
+    }
+
+    #[test]
+    fn modulation_bus_set_out_of_bounds_is_noop() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ = unsafe { libc::shm_unlink(CString::new("/los_mod").unwrap().as_ptr()) };
+        let mut bus = ModulationBus::create().expect("create");
+        bus.set(32, 1.0);
+        bus.set(100, 1.0);
+    }
+
+    #[test]
+    fn modulation_bus_initially_zero() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ = unsafe { libc::shm_unlink(CString::new("/los_mod").unwrap().as_ptr()) };
+        let bus = ModulationBus::create().expect("create");
+        for ch in 0..MODBUS_NUM_CHANNELS {
+            assert_eq!(bus.get(ch), 0.0, "channel {} should be zero", ch);
+        }
+    }
+
+    #[test]
+    fn full_signal_chain_note_on_to_modbus() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+
+        // Clean up both SHM objects
+        let _ = unsafe { libc::shm_unlink(CString::new(EventRingbuf::name()).unwrap().as_ptr()) };
+        let _ = unsafe { libc::shm_unlink(CString::new("/los_mod").unwrap().as_ptr()) };
+
+        // Set up IPC
+        let mut producer = EventRingbuf::create().expect("create events");
+        let mut voice_consumer = EventRingbuf::open(0).expect("open voice consumer");
+        let mut env_consumer = EventRingbuf::open(1).expect("open envelope consumer");
+        let mut modbus = ModulationBus::create().expect("create modbus");
+
+        // Step 1: Sequencer sends note_on (pitch + velocity)
+        let note_ev = AudioEvent::note_on(60, 100, 0);
+        producer.write_event(&note_ev).unwrap();
+
+        // Step 2: Both voice and envelope receive the note_on
+        let voice_ev = voice_consumer.read_event().expect("voice should receive note_on");
+        let env_ev = env_consumer.read_event().expect("envelope should receive note_on");
+
+        assert_eq!(voice_ev.event_type, EVENT_NOTE_ON);
+        assert!((voice_ev.value - 261.63).abs() < 0.1, "voice gets C4 frequency");
+        assert_eq!(voice_ev.param, 100, "voice gets velocity");
+
+        assert_eq!(env_ev.event_type, EVENT_NOTE_ON);
+
+        // Step 3: Envelope generates output and writes to modbus ch0
+        modbus.set(0, 0.75); // envelope at 75%
+
+        // Step 4: Voice reads envelope from modbus ch0
+        let envelope_level = modbus.get(0);
+        assert!((envelope_level - 0.75).abs() < 0.001, "voice reads envelope level");
+
+        // Step 5: Voice amplitude = envelope × velocity
+        let velocity = voice_ev.param as f32 / 127.0;
+        let level = envelope_level * velocity;
+        assert!((level - (0.75 * 100.0 / 127.0)).abs() < 0.01,
+            "amplitude = envelope * velocity");
+
+        // Step 6: Sequencer sends note_off
+        let off_ev = AudioEvent::note_off(60, 1);
+        producer.write_event(&off_ev).unwrap();
+
+        let voice_off = voice_consumer.read_event().expect("voice gets note_off");
+        let env_off = env_consumer.read_event().expect("envelope gets note_off");
+        assert_eq!(voice_off.event_type, EVENT_NOTE_OFF);
+        assert_eq!(env_off.event_type, EVENT_NOTE_OFF);
+    }
+
+    #[test]
+    fn modulation_bus_open_then_create_fallback() {
+        // This test verifies the bug fix: modules that only call open()
+        // fail silently when modbus doesn't exist. They MUST fall back to create().
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ = unsafe { libc::shm_unlink(CString::new("/los_mod").unwrap().as_ptr()) };
+
+        // open() without create() should fail
+        assert!(ModulationBus::open().is_err(), "open() should fail when modbus doesn't exist");
+
+        // But create() should succeed
+        let mut bus = ModulationBus::create().expect("create should succeed");
+        bus.set(0, 0.42);
+
+        // And now open() should succeed
+        let bus2 = ModulationBus::open().expect("open should succeed after create");
+        assert!((bus2.get(0) - 0.42).abs() < 0.001);
+
+        // And the fallback pattern used in modules: open().or_else(|_| create())
+        let bus3 = ModulationBus::open().or_else(|_| ModulationBus::create()).expect("fallback works");
+        assert!((bus3.get(0) - 0.42).abs() < 0.001);
     }
 }

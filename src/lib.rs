@@ -1,4 +1,5 @@
 pub mod conductor;
+pub mod envelope;
 pub mod layout;
 pub mod mixer;
 pub mod scope;

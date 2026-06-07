@@ -18,7 +18,7 @@ use ratatui::{
     Terminal,
 };
 
-use crate::shm::AudioRingbuf;
+use crate::shm::{AudioRingbuf, ModulationBus};
 use crate::state;
 
 const BUFFER_SIZE: usize = 512;
@@ -32,6 +32,8 @@ struct ScopeState {
     zoom: f32,
     gain: f32,
     trigger_level: f32,
+    source: usize,        // 0=audio, 1=modbus
+    modbus_channel: usize,
 }
 
 impl Default for ScopeState {
@@ -43,6 +45,8 @@ impl Default for ScopeState {
             zoom: 1.0,
             gain: 1.0,
             trigger_level: 0.0,
+            source: 0,
+            modbus_channel: 0,
         }
     }
 }
@@ -51,10 +55,10 @@ fn scope_thread(
     state: Arc<Mutex<ScopeState>>,
     shutdown: std::sync::mpsc::Receiver<()>,
 ) -> Result<()> {
-    let ringbuf = AudioRingbuf::open(SHM_NAME)
-        .map_err(|e| anyhow::anyhow!("Failed to open audio ringbuffer: {}", e))?;
+    let ringbuf = AudioRingbuf::open(SHM_NAME).ok();
+    let modbus = ModulationBus::open().or_else(|_| ModulationBus::create()).ok();
 
-    let slot_len = ringbuf.slot_len();
+    let slot_len = ringbuf.as_ref().map(|r| r.slot_len()).unwrap_or(128);
     let mut local_buffer = vec![0.0f32; slot_len];
 
     loop {
@@ -62,26 +66,35 @@ fn scope_thread(
             break;
         }
 
-        if let Ok(true) = ringbuf.peek_latest(&mut local_buffer) {
-            let mut s = state.lock().unwrap();
-            
-            let channel = s.channel;
-            let gain = s.gain;
-            
-            for i in (0..slot_len).step_by(2) {
-                let sample = match channel {
-                    0 => local_buffer[i],
-                    1 => local_buffer[i + 1],
-                    _ => (local_buffer[i] + local_buffer[i + 1]) / 2.0,
-                };
-                s.buffer.push(sample * gain);
-            }
+        let mut s = state.lock().unwrap();
+        let source = s.source;
+        let gain = s.gain;
 
-            while s.buffer.len() > BUFFER_SIZE {
-                s.buffer.remove(0);
+        if source == 0 {
+            if let Some(ref rb) = ringbuf {
+                if let Ok(true) = rb.peek_latest(&mut local_buffer) {
+                    let channel = s.channel;
+                    for i in (0..slot_len).step_by(2) {
+                        let sample = match channel {
+                            0 => local_buffer[i],
+                            1 => local_buffer[i + 1],
+                            _ => (local_buffer[i] + local_buffer[i + 1]) / 2.0,
+                        };
+                        s.buffer.push(sample * gain);
+                    }
+                }
             }
+        } else if let Some(ref bus) = modbus {
+            let ch = s.modbus_channel;
+            let sample = bus.get(ch) * gain;
+            s.buffer.push(sample);
         }
 
+        while s.buffer.len() > BUFFER_SIZE {
+            s.buffer.remove(0);
+        }
+
+        drop(s);
         std::thread::sleep(Duration::from_millis(16));
     }
 
@@ -115,9 +128,10 @@ fn draw_ui(
             1 => "R",
             _ => "S",
         };
+        let source_str = if state.source == 0 { "Audio" } else { "Mod" };
         let status = format!(
-            "Mode: {} | Ch: {} | Zoom: {:.1}x | Gain: {:.1}x | Trig: {:.2}",
-            mode_str, channel_str, state.zoom, state.gain, state.trigger_level
+            "Src: {} | Mode: {} | Ch: {} | Zoom: {:.1}x | Gain: {:.1}x | Trig: {:.2}",
+            source_str, mode_str, channel_str, state.zoom, state.gain, state.trigger_level
         );
         let status_widget = Paragraph::new(status).style(Style::default().fg(Color::Cyan));
         f.render_widget(status_widget, chunks[1]);
@@ -174,6 +188,10 @@ fn draw_ui(
                 Line::from("  m          Cycle render mode"),
                 Line::from("             (Braille/HalfBlock/Bars/Dots)"),
                 Line::from("  c          Cycle channel (L/R/Stereo)"),
+                Line::from(""),
+                Line::from("Source:"),
+                Line::from("  b          Toggle audio/modbus source"),
+                Line::from("  n/N        Next/prev modbus channel"),
                 Line::from(""),
                 Line::from("Controls:"),
                 Line::from("  +/-        Zoom in/out"),
@@ -316,6 +334,18 @@ pub fn run(instance: usize) -> Result<()> {
                     KeyCode::Char('T') => {
                         let mut s = state.lock().unwrap();
                         s.trigger_level = (s.trigger_level - 0.1).max(-1.0);
+                    }
+                    KeyCode::Char('b') => {
+                        let mut s = state.lock().unwrap();
+                        s.source = (s.source + 1) % 2;
+                    }
+                    KeyCode::Char('n') => {
+                        let mut s = state.lock().unwrap();
+                        s.modbus_channel = (s.modbus_channel + 1) % 32;
+                    }
+                    KeyCode::Char('N') => {
+                        let mut s = state.lock().unwrap();
+                        s.modbus_channel = s.modbus_channel.saturating_sub(1);
                     }
                     KeyCode::Char('?') => {
                         show_help = !show_help;
