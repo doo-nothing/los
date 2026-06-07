@@ -114,7 +114,7 @@ fn sequencer_thread(
             break;
         }
 
-        let (bpm, playing, track_count) = {
+        let (bpm, playing, _track_count) = {
             let s = state.lock().unwrap();
             (s.bpm, s.playing, s.tracks.len())
         };
@@ -124,7 +124,7 @@ fn sequencer_thread(
 
         let mut s = state.lock().unwrap();
         
-        let tidx = s.current_track;
+        let _tidx = s.current_track;
                 // Extend tracking vectors if tracks were added
         while last_steps.len() < s.tracks.len() {
             last_steps.push(-1);
@@ -333,7 +333,7 @@ fn draw_ui(
                 Line::from("  p          Paste step from clipboard"),
                 Line::from("  k/K        Raise note (semitone/octave)"),
                 Line::from("  j/J        Lower note (semitone/octave)"),
-                Line::from("  n<NUM>     Set note (e.g. n60 for C4)"),
+                Line::from("  N<NUM>     Set note (e.g. N60 for C4)"),
                 Line::from("  t<NUM>     Set BPM (e.g. t140)"),
                 Line::from(""),
                 Line::from("Euclidean:"),
@@ -448,7 +448,7 @@ pub fn run(instance: usize) -> Result<()> {
     // Load saved state if available
     if let Ok(params) = state::load_module_state::<state::SequencerParams>("sequencer", instance) {
         let mut s = state.lock().unwrap();
-        let tidx = s.current_track;
+        let _tidx = s.current_track;
                 if let Some(bpm) = params.bpm { s.bpm = bpm; }
         if let Some(playing) = params.playing { s.playing = playing; }
         for (ti, tp) in params.tracks.iter().enumerate() {
@@ -515,7 +515,7 @@ pub fn run(instance: usize) -> Result<()> {
         if state::check_reload_signal() {
             if let Ok(params) = state::load_module_state::<state::SequencerParams>("sequencer", instance) {
                 let mut s = state.lock().unwrap();
-                let tidx = s.current_track;
+                let _tidx = s.current_track;
                 if let Some(bpm) = params.bpm { s.bpm = bpm; }
                 if let Some(playing) = params.playing { s.playing = playing; }
                 for (ti, tp) in params.tracks.iter().enumerate() {
@@ -572,7 +572,7 @@ pub fn run(instance: usize) -> Result<()> {
                     KeyCode::Char(c) if input_mode == "normal" && c.is_ascii_digit() => {
                         if c == '0' && pending_count.is_none() {
                             let mut s = state.lock().unwrap();
-                            let tidx = s.current_track;
+                            let _tidx = s.current_track;
                 s.selected = 0;
                         } else {
                             pending_count.get_or_insert(String::new()).push(c);
@@ -656,35 +656,10 @@ pub fn run(instance: usize) -> Result<()> {
                     }
                     
                     // Non-count commands (clear pending_count)
-                    KeyCode::Char('P') if input_mode == "normal" => {
-                        pending_count = None;
-                        let mut s = state.lock().unwrap();
-                        let tidx = s.current_track;
-                let (p, l, r) = (s.tracks[tidx].pulses, s.tracks[tidx].length, s.tracks[tidx].rotation);
-                        euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
-                    }
-                    KeyCode::Char('L') if input_mode == "normal" => {
-                        pending_count = None;
-                        let mut s = state.lock().unwrap();
-                        let tidx = s.current_track;
-                s.selected = s.selected.min(s.tracks[tidx].length - 1);
-                        let (p, l, r) = (s.tracks[tidx].pulses, s.tracks[tidx].length, s.tracks[tidx].rotation);
-                        euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
-                    }
-                    KeyCode::Char('R') if input_mode == "normal" => {
-                        pending_count = None;
-                        let mut s = state.lock().unwrap();
-                        let tidx = s.current_track;
-                s.tracks[tidx].rotation = (s.tracks[tidx].rotation + 1) % s.tracks[tidx].length;
-                        let (p, l, r) = (s.tracks[tidx].pulses, s.tracks[tidx].length, s.tracks[tidx].rotation);
-                        euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
-                    }
-                    
-                    // Clear pending_count on any other action key
                     KeyCode::Char(' ') if input_mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
-                        let tidx = s.current_track;
+                        let _tidx = s.current_track;
                 s.playing = !s.playing;
                     }
                     KeyCode::Enter if input_mode == "normal" => {
@@ -743,7 +718,7 @@ pub fn run(instance: usize) -> Result<()> {
                     KeyCode::Char('s') if input_mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
-                        let tidx = s.current_track;
+                        let _tidx = s.current_track;
                 s.playing = false;
                     }
                     KeyCode::Char('+') | KeyCode::Char('=') if input_mode == "normal" => {
@@ -802,14 +777,14 @@ pub fn run(instance: usize) -> Result<()> {
                         pending_count = None;
                         if pending_g {
                             let mut s = state.lock().unwrap();
-                            let tidx = s.current_track;
+                            let _tidx = s.current_track;
                 s.selected = 0;
                             pending_g = false;
                         } else {
                             pending_g = true;
                         }
                     }
-                    KeyCode::Char('n') if input_mode == "normal" => {
+                    KeyCode::Char('N') if input_mode == "normal" => {
                         pending_count = None;
                         input_mode = String::from("note");
                         input_buffer.clear();
@@ -820,6 +795,22 @@ pub fn run(instance: usize) -> Result<()> {
                         input_buffer.clear();
                     }
                     // Track operations
+                    KeyCode::Char('R') if input_mode == "normal" => {
+                        pending_count = None;
+                        let mut s = state.lock().unwrap();
+                        let tidx = s.current_track;
+                        s.tracks[tidx].rotation = (s.tracks[tidx].rotation + 1) % s.tracks[tidx].length;
+                        let (p, l, r) = (s.tracks[tidx].pulses, s.tracks[tidx].length, s.tracks[tidx].rotation);
+                        euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
+                    }
+                    KeyCode::Char('L') if input_mode == "normal" => {
+                        pending_count = None;
+                        let mut s = state.lock().unwrap();
+                        let tidx = s.current_track;
+                        s.selected = s.selected.min(s.tracks[tidx].length - 1);
+                        let (p, l, r) = (s.tracks[tidx].pulses, s.tracks[tidx].length, s.tracks[tidx].rotation);
+                        euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
+                    }
                     KeyCode::Char('n') if input_mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
