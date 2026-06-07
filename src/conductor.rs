@@ -364,7 +364,7 @@ pub fn run_conductor() -> Result<()> {
                                 s.lines()
                                     .find(|l| l.starts_with('1'))
                                     .and_then(|l| l.split_whitespace().nth(1))
-                                    .and_then(|idx| idx.parse::<usize>().ok())
+                                    .and_then(|idx| idx.parse::<i64>().ok())
                             });
                         
                         let session_state = state::SessionState {
