@@ -233,12 +233,6 @@ pub fn load_session(state_path: &str) -> Result<()> {
         spawn_session_panes(&all_panes_ref)?;
     }
 
-    // Count actual panes after spawning and clamp active_pane
-    let actual_pane_count = list_session_panes("los", "modules")?.len();
-    let clamped_active = |saved: usize| -> usize {
-        saved.min(actual_pane_count.saturating_sub(1))
-    };
-
     // Apply saved layout directly. Tmux accepts layouts with old pane IDs
     // and maps them to the current window's panes automatically.
     let mut layout_applied = false;
@@ -261,11 +255,10 @@ pub fn load_session(state_path: &str) -> Result<()> {
         tmux_cmd_ok(&["set-option", "-t", "los:modules", "window-size", &st.tmux.window_size]);
     }
 
-    // Restore active pane (clamp to actual pane count)
+    // Restore active pane
     for win in &st.windows {
         if win.name == "modules" {
-            let pane_idx = clamped_active(win.active_pane);
-            tmux_cmd_ok(&["select-pane", "-t", &format!("los:modules.{}", pane_idx)]);
+            tmux_cmd_ok(&["select-pane", "-t", &format!("los:modules.{}", win.active_pane)]);
         }
     }
 
@@ -318,12 +311,6 @@ fn reload_modules_from_state(state_path: &std::path::Path) -> Result<()> {
         spawn_session_panes(&all_panes_ref)?;
     }
 
-    // Count actual panes after spawning and clamp active_pane
-    let actual_pane_count = list_session_panes("los", "modules")?.len();
-    let clamped_active = |saved: usize| -> usize {
-        saved.min(actual_pane_count.saturating_sub(1))
-    };
-
     // Apply saved layout directly. Tmux accepts layouts with old pane IDs
     // and maps them to the current window's panes automatically.
     let mut layout_applied = false;
@@ -342,8 +329,7 @@ fn reload_modules_from_state(state_path: &std::path::Path) -> Result<()> {
     // Restore active pane
     for win in &st.windows {
         if win.name == "modules" {
-            let pane_idx = clamped_active(win.active_pane);
-            tmux_cmd_ok(&["select-pane", "-t", &format!("los:modules.{}", pane_idx)]);
+            tmux_cmd_ok(&["select-pane", "-t", &format!("los:modules.{}", win.active_pane)]);
         }
     }
 
@@ -499,8 +485,7 @@ pub fn run_conductor() -> Result<()> {
                         
                         // Capture current tmux layout and active pane
                         let layout = get_window_layout("los", "modules").unwrap_or_default();
-                        let raw_active = get_active_pane_index("los", "modules").unwrap_or(0);
-                        let active_pane = raw_active.min(panes.len().saturating_sub(1));
+                        let active_pane = get_active_pane_index("los", "modules").unwrap_or(0);
 
                         // Prompt for filename
                         let now = chrono_or_fallback();
