@@ -823,8 +823,7 @@ pub fn run(instance: usize) -> Result<()> {
                     KeyCode::Char('n') if input_mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
-                        let len = s.tracks[s.current_track].length;
-                        s.tracks.push(Track::new(len));
+                        s.tracks.push(Track::new(16));
                         s.current_steps.push(0);
                         s.last_notes.push(None);
                         s.current_track = s.tracks.len() - 1;
@@ -866,10 +865,11 @@ pub fn run(instance: usize) -> Result<()> {
                         pending_count = None;
                         pending_d = false;
                         pending_y = false;
-                        if let Some(ref clip) = state.lock().unwrap().track_clipboard.clone() {
+                        let clip = state.lock().unwrap().track_clipboard.clone();
+                        if let Some(track) = clip {
                             let mut s = state.lock().unwrap();
                             let insert_at = s.current_track + 1;
-                            s.tracks.insert(insert_at, clip.clone());
+                            s.tracks.insert(insert_at, track);
                             s.current_steps.insert(insert_at, 0);
                             s.last_notes.insert(insert_at, None);
                             s.current_track = insert_at;
@@ -889,14 +889,6 @@ pub fn run(instance: usize) -> Result<()> {
                         let mut s = state.lock().unwrap();
                         if s.current_track + 1 < s.tracks.len() {
                             s.current_track += 1;
-                        }
-                        s.selected = 0;
-                    }
-                    KeyCode::Char(c @ '1'..='9') if input_mode == "normal" && pending_count.is_none() => {
-                        let idx = (c as usize - '1' as usize).min(8);
-                        let mut s = state.lock().unwrap();
-                        if idx < s.tracks.len() {
-                            s.current_track = idx;
                         }
                         s.selected = 0;
                     }
