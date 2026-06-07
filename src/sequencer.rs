@@ -18,7 +18,7 @@ use ratatui::{
 };
 
 use crate::shm::{AudioEvent, EventRingbuf, ShmTransport};
-use crate::state;
+use crate::state::{self, TrackParam};
 
 const NUM_STEPS: usize = 16;
 
@@ -36,37 +36,60 @@ impl Default for Step {
 }
 
 #[derive(Clone)]
-struct SequencerState {
+struct Track {
     steps: Vec<Step>,
-    bpm: f64,
-    playing: bool,
-    current_step: usize,
-    selected: usize,
-    last_note: Option<u8>,
-    clipboard: Option<Step>,
-    euclidean_pulses: usize,
-    euclidean_length: usize,
-    euclidean_rotation: usize,
+    length: usize,
+    pulses: usize,
+    rotation: usize,
+    muted: bool,
 }
 
-impl Default for SequencerState {
-    fn default() -> Self {
+impl Track {
+    fn new() -> Self {
         let mut steps = vec![Step::default(); NUM_STEPS];
         for i in (0..NUM_STEPS).step_by(4) {
             steps[i].active = true;
         }
+        Self { steps, length: 16, pulses: 5, rotation: 0, muted: false }
+    }
+}
+
+#[derive(Clone)]
+struct SequencerState {
+    tracks: Vec<Track>,
+    current_track: usize,
+    bpm: f64,
+    playing: bool,
+    current_steps: Vec<usize>,
+    selected: usize,
+    last_notes: Vec<Option<u8>>,
+    clipboard: Option<Step>,
+    track_clipboard: Option<Track>,
+}
+
+impl Default for SequencerState {
+    fn default() -> Self {
+        let track_count = 1;
         Self {
-            steps,
+            tracks: vec![Track::new(); track_count],
+            current_track: 0,
             bpm: 120.0,
             playing: true,
-            current_step: 0,
+            current_steps: vec![0; track_count],
             selected: 0,
-            last_note: None,
+            last_notes: vec![None; track_count],
             clipboard: None,
-            euclidean_pulses: 5,
-            euclidean_length: 16,
-            euclidean_rotation: 0,
+            track_clipboard: None,
         }
+    }
+}
+
+impl SequencerState {
+    fn track(&self) -> &Track {
+        &self.tracks[self.current_track]
+    }
+    fn track_mut(&mut self) -> &mut Track {
+        &mut self.tracks[self.current_track]
     }
 }
 
@@ -86,44 +109,60 @@ fn sequencer_thread(
         Err(_) => ShmTransport::create(sample_rate as u32)?,
     };
 
-    let mut last_step: i32 = -1;
+    let mut last_steps: Vec<i32> = vec![-1];
 
     loop {
         if shutdown.try_recv().is_ok() {
             break;
         }
 
-        let (bpm, playing, length) = {
+        let (bpm, playing) = {
             let s = state.lock().unwrap();
-            (s.bpm, s.playing, s.euclidean_length)
+            (s.bpm, s.playing)
         };
 
         let clock = transport.clock();
         let samples_per_step = (60.0 / bpm * sample_rate / 4.0) as u64;
-        let current_step = if samples_per_step > 0 && playing {
-            (clock / samples_per_step) as usize % length
-        } else {
-            last_step.max(0) as usize
-        };
 
-        if current_step as i32 != last_step {
-            let mut s = state.lock().unwrap();
-            s.current_step = current_step;
+        let mut s = state.lock().unwrap();
+        
+        // Grow tracking vectors as tracks are added
+        while last_steps.len() < s.tracks.len() {
+            last_steps.push(-1);
+        }
+        while s.current_steps.len() < s.tracks.len() {
+            s.current_steps.push(0);
+        }
+        while s.last_notes.len() < s.tracks.len() {
+            s.last_notes.push(None);
+        }
 
-            if playing {
-                if let Some(n) = s.last_note {
-                    let _ = events.write_event(&AudioEvent::note_off(n, last_step as u32));
+        for t in 0..s.tracks.len() {
+            let len = s.tracks[t].length;
+            let current_step = if samples_per_step > 0 && playing {
+                (clock / samples_per_step) as usize % len
+            } else {
+                last_steps[t].max(0) as usize
+            };
+
+            if current_step as i32 != last_steps[t] {
+                s.current_steps[t] = current_step;
+
+                if playing && !s.tracks[t].muted {
+                    if let Some(n) = s.last_notes[t] {
+                        let _ = events.write_event(&AudioEvent::note_off(n, last_steps[t] as u32));
+                    }
+                    if s.tracks[t].steps[current_step].active {
+                        let note = s.tracks[t].steps[current_step].note;
+                        let vel = s.tracks[t].steps[current_step].velocity;
+                        let _ = events.write_event(&AudioEvent::note_on(note, vel, current_step as u32));
+                        s.last_notes[t] = Some(note);
+                    } else {
+                        s.last_notes[t] = None;
+                    }
                 }
-                if s.steps[current_step].active {
-                    let note = s.steps[current_step].note;
-                    let vel = s.steps[current_step].velocity;
-                    let _ = events.write_event(&AudioEvent::note_on(note, vel, current_step as u32));
-                    s.last_note = Some(note);
-                } else {
-                    s.last_note = None;
-                }
+                last_steps[t] = current_step as i32;
             }
-            last_step = current_step as i32;
         }
 
         std::thread::sleep(Duration::from_millis(10));
@@ -183,12 +222,13 @@ fn draw_ui(
             ])
             .split(area);
 
+        let len = state.track().length;
         let play_str = if state.playing { "▶" } else { "■" };
-        let len = state.euclidean_length;
+        let cstep = state.current_steps[state.current_track];
         let status = format!(
             "{} {} BPM | Step {}/{} | Sel {} | P:{} L:{} R:{} | {}",
-            play_str, state.bpm as u32, state.current_step, len, state.selected,
-            state.euclidean_pulses, len, state.euclidean_rotation,
+            play_str, state.bpm as u32, cstep, len, state.selected,
+            state.track().pulses, len, state.track().rotation,
             input_mode
         );
         let status_widget = Paragraph::new(status)
@@ -199,8 +239,8 @@ fn draw_ui(
         let step_width = step_width.max(3).min(10);
         
         for i in 0..len {
-            let step = &state.steps[i];
-            let is_current = i == state.current_step;
+            let step = &state.track().steps[i];
+            let is_current = i == cstep;
             let is_selected = i == state.selected;
 
             let x = (i * step_width) as u16;
@@ -232,7 +272,7 @@ fn draw_ui(
             f.render_widget(step_widget, rect);
         }
 
-        let sel_step = &state.steps[state.selected];
+        let sel_step = &state.track().steps[state.selected];
         let note_info = format!(
             "Step {}: {} | Note: {} ({}) | Vel: {} | {}",
             state.selected,
@@ -382,12 +422,37 @@ pub fn run(instance: usize) -> Result<()> {
         let mut s = state.lock().unwrap();
         if let Some(bpm) = params.bpm { s.bpm = bpm; }
         if let Some(playing) = params.playing { s.playing = playing; }
-        if let Some(p) = params.euclidean_pulses { s.euclidean_pulses = p; }
-        if let Some(l) = params.euclidean_length { s.euclidean_length = l; }
-        if let Some(r) = params.euclidean_rotation { s.euclidean_rotation = r; }
-        if !params.steps.is_empty() {
-            for (i, step) in params.steps.iter().enumerate().take(s.steps.len()) {
-                s.steps[i] = Step { active: step.active, note: step.note, velocity: step.velocity };
+        // Load from tracks, falling back to flat fields for backward compat
+        if !params.tracks.is_empty() {
+            for (ti, tp) in params.tracks.iter().enumerate() {
+                if ti >= s.tracks.len() {
+                    s.tracks.push(Track {
+                        steps: vec![Step::default(); NUM_STEPS],
+                        length: tp.length.unwrap_or(16),
+                        pulses: tp.pulses.unwrap_or(5),
+                        rotation: tp.rotation.unwrap_or(0),
+                        muted: tp.muted,
+                    });
+                    s.current_steps.push(0);
+                    s.last_notes.push(None);
+                }
+                let trk = &mut s.tracks[ti];
+                if let Some(l) = tp.length { trk.length = l; }
+                if let Some(p) = tp.pulses { trk.pulses = p; }
+                if let Some(r) = tp.rotation { trk.rotation = r; }
+                trk.muted = tp.muted;
+                for (i, step) in tp.steps.iter().enumerate().take(trk.steps.len()) {
+                    trk.steps[i] = Step { active: step.active, note: step.note, velocity: step.velocity };
+                }
+            }
+        } else {
+            // Fallback: load flat fields into first track
+            let trk = &mut s.tracks[0];
+            if let Some(p) = params.euclidean_pulses { trk.pulses = p; }
+            if let Some(l) = params.euclidean_length { trk.length = l; }
+            if let Some(r) = params.euclidean_rotation { trk.rotation = r; }
+            for (i, step) in params.steps.iter().enumerate().take(trk.steps.len()) {
+                trk.steps[i] = Step { active: step.active, note: step.note, velocity: step.velocity };
             }
         }
     }
@@ -415,13 +480,20 @@ pub fn run(instance: usize) -> Result<()> {
             let params = state::SequencerParams {
                 bpm: Some(s.bpm),
                 playing: Some(s.playing),
-                euclidean_pulses: Some(s.euclidean_pulses),
-                euclidean_length: Some(s.euclidean_length),
-                euclidean_rotation: Some(s.euclidean_rotation),
-                steps: s.steps.iter().map(|step| state::StepParam {
-                    active: step.active,
-                    note: step.note,
-                    velocity: step.velocity,
+                euclidean_pulses: None,
+                euclidean_length: None,
+                euclidean_rotation: None,
+                steps: vec![],
+                tracks: s.tracks.iter().map(|trk| TrackParam {
+                    steps: trk.steps.iter().map(|step| state::StepParam {
+                        active: step.active,
+                        note: step.note,
+                        velocity: step.velocity,
+                    }).collect(),
+                    length: Some(trk.length),
+                    pulses: Some(trk.pulses),
+                    rotation: Some(trk.rotation),
+                    muted: trk.muted,
                 }).collect(),
             };
             drop(s);
@@ -434,12 +506,14 @@ pub fn run(instance: usize) -> Result<()> {
                 let mut s = state.lock().unwrap();
                 if let Some(bpm) = params.bpm { s.bpm = bpm; }
                 if let Some(playing) = params.playing { s.playing = playing; }
-                if let Some(p) = params.euclidean_pulses { s.euclidean_pulses = p; }
-                if let Some(l) = params.euclidean_length { s.euclidean_length = l; }
-                if let Some(r) = params.euclidean_rotation { s.euclidean_rotation = r; }
-                if !params.steps.is_empty() {
-                    for (i, step) in params.steps.iter().enumerate().take(s.steps.len()) {
-                        s.steps[i] = Step { active: step.active, note: step.note, velocity: step.velocity };
+                if !params.tracks.is_empty() {
+                    let ti = 0.min(s.tracks.len() - 1);
+                    let trk = &mut s.tracks[ti];
+                    if let Some(l) = params.tracks[0].length { trk.length = l; }
+                    if let Some(p) = params.tracks[0].pulses { trk.pulses = p; }
+                    if let Some(r) = params.tracks[0].rotation { trk.rotation = r; }
+                    for (i, step) in params.tracks[0].steps.iter().enumerate().take(trk.steps.len()) {
+                        trk.steps[i] = Step { active: step.active, note: step.note, velocity: step.velocity };
                     }
                 }
             }
@@ -456,13 +530,20 @@ pub fn run(instance: usize) -> Result<()> {
                     let params = state::SequencerParams {
                         bpm: Some(s.bpm),
                         playing: Some(s.playing),
-                        euclidean_pulses: Some(s.euclidean_pulses),
-                        euclidean_length: Some(s.euclidean_length),
-                        euclidean_rotation: Some(s.euclidean_rotation),
-                        steps: s.steps.iter().map(|step| state::StepParam {
-                            active: step.active,
-                            note: step.note,
-                            velocity: step.velocity,
+                        euclidean_pulses: None,
+                        euclidean_length: None,
+                        euclidean_rotation: None,
+                        steps: vec![],
+                        tracks: s.tracks.iter().map(|trk| TrackParam {
+                            steps: trk.steps.iter().map(|step| state::StepParam {
+                                active: step.active,
+                                note: step.note,
+                                velocity: step.velocity,
+                            }).collect(),
+                            length: Some(trk.length),
+                            pulses: Some(trk.pulses),
+                            rotation: Some(trk.rotation),
+                            muted: trk.muted,
                         }).collect(),
                     };
                     drop(s);
@@ -486,50 +567,53 @@ pub fn run(instance: usize) -> Result<()> {
                     KeyCode::Char('P') if pending_count.is_some() => {
                         let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(0);
                         let mut s = state.lock().unwrap();
-                        if count > 0 { s.euclidean_pulses = count.min(16); }
-                        let (p, l, r) = (s.euclidean_pulses, s.euclidean_length, s.euclidean_rotation);
-                        euclidean_apply(&mut s.steps, p, l, r);
+                let tidx = s.current_track;
+                        if count > 0 { s.track_mut().pulses = count.min(16); }
+                        let (p, l, r) = (s.track_mut().pulses, s.track_mut().length, s.track_mut().rotation);
+                        euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
                     }
                     KeyCode::Char('L') if pending_count.is_some() => {
                         let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(0);
                         let mut s = state.lock().unwrap();
-                        if count > 0 { s.euclidean_length = count.min(16).max(1); }
-                        s.selected = s.selected.min(s.euclidean_length - 1);
-                        let (p, l, r) = (s.euclidean_pulses, s.euclidean_length, s.euclidean_rotation);
-                        euclidean_apply(&mut s.steps, p, l, r);
+                let tidx = s.current_track;
+                        if count > 0 { s.track_mut().length = count.min(16).max(1); }
+                        s.selected = s.selected.min(s.track_mut().length - 1);
+                        let (p, l, r) = (s.track_mut().pulses, s.track_mut().length, s.track_mut().rotation);
+                        euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
                     }
                     KeyCode::Char('R') if pending_count.is_some() => {
                         let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(0);
                         let mut s = state.lock().unwrap();
+                let tidx = s.current_track;
                         if count > 0 {
-                            s.euclidean_rotation = count.min(255);
+                            s.track_mut().rotation = count.min(255);
                         } else {
-                            s.euclidean_rotation = (s.euclidean_rotation + 1) % s.euclidean_length;
+                            s.track_mut().rotation = (s.track_mut().rotation + 1) % s.track_mut().length;
                         }
-                        let (p, l, r) = (s.euclidean_pulses, s.euclidean_length, s.euclidean_rotation);
-                        euclidean_apply(&mut s.steps, p, l, r);
+                        let (p, l, r) = (s.track_mut().pulses, s.track_mut().length, s.track_mut().rotation);
+                        euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
                     }
                     // Count-prefixed navigation
                     KeyCode::Char('l') | KeyCode::Right if pending_count.is_some() => {
                         let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
                         let mut s = state.lock().unwrap();
-                        let len = s.euclidean_length;
+                        let len = s.track_mut().length;
                         s.selected = (s.selected + count) % len;
                     }
                     KeyCode::Char('h') | KeyCode::Left if pending_count.is_some() => {
                         let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
                         let mut s = state.lock().unwrap();
-                        let len = s.euclidean_length;
+                        let len = s.track_mut().length;
                         s.selected = s.selected.saturating_sub(count).min(len - 1);
                     }
                     KeyCode::Char('w') if pending_count.is_some() => {
                         let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
                         let mut s = state.lock().unwrap();
-                        let len = s.euclidean_length;
+                        let len = s.track_mut().length;
                         for _ in 0..count {
                             for i in 1..=len {
                                 let idx = (s.selected + i) % len;
-                                if s.steps[idx].active {
+                                if s.track_mut().steps[idx].active {
                                     s.selected = idx;
                                     break;
                                 }
@@ -539,11 +623,11 @@ pub fn run(instance: usize) -> Result<()> {
                     KeyCode::Char('b') if pending_count.is_some() => {
                         let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
                         let mut s = state.lock().unwrap();
-                        let len = s.euclidean_length;
+                        let len = s.track_mut().length;
                         for _ in 0..count {
                             for i in 1..=len {
                                 let idx = (s.selected + len - i) % len;
-                                if s.steps[idx].active {
+                                if s.track_mut().steps[idx].active {
                                     s.selected = idx;
                                     break;
                                 }
@@ -555,22 +639,25 @@ pub fn run(instance: usize) -> Result<()> {
                     KeyCode::Char('P') if input_mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
-                        let (p, l, r) = (s.euclidean_pulses, s.euclidean_length, s.euclidean_rotation);
-                        euclidean_apply(&mut s.steps, p, l, r);
+                let tidx = s.current_track;
+                        let (p, l, r) = (s.track_mut().pulses, s.track_mut().length, s.track_mut().rotation);
+                        euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
                     }
                     KeyCode::Char('L') if input_mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
-                        s.selected = s.selected.min(s.euclidean_length - 1);
-                        let (p, l, r) = (s.euclidean_pulses, s.euclidean_length, s.euclidean_rotation);
-                        euclidean_apply(&mut s.steps, p, l, r);
+                let tidx = s.current_track;
+                        s.selected = s.selected.min(s.track_mut().length - 1);
+                        let (p, l, r) = (s.track_mut().pulses, s.track_mut().length, s.track_mut().rotation);
+                        euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
                     }
                     KeyCode::Char('R') if input_mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
-                        s.euclidean_rotation = (s.euclidean_rotation + 1) % s.euclidean_length;
-                        let (p, l, r) = (s.euclidean_pulses, s.euclidean_length, s.euclidean_rotation);
-                        euclidean_apply(&mut s.steps, p, l, r);
+                let tidx = s.current_track;
+                        s.track_mut().rotation = (s.track_mut().rotation + 1) % s.track_mut().length;
+                        let (p, l, r) = (s.track_mut().pulses, s.track_mut().length, s.track_mut().rotation);
+                        euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
                     }
                     
                     // Clear pending_count on any other action key
@@ -583,47 +670,47 @@ pub fn run(instance: usize) -> Result<()> {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
                         let sel = s.selected;
-                        s.steps[sel].active = !s.steps[sel].active;
+                        s.track_mut().steps[sel].active = !s.track_mut().steps[sel].active;
                     }
                     KeyCode::Char('x') if input_mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
                         let sel = s.selected;
-                        s.clipboard = Some(s.steps[sel].clone());
-                        s.steps[sel].active = false;
+                        s.clipboard = Some(s.track_mut().steps[sel].clone());
+                        s.track_mut().steps[sel].active = false;
                     }
                     KeyCode::Char('p') if input_mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
                         let sel = s.selected;
                         if let Some(ref clip) = s.clipboard {
-                            s.steps[sel] = clip.clone();
-                            s.steps[sel].active = true;
+                            s.track_mut().steps[sel] = clip.clone();
+                            s.track_mut().steps[sel].active = true;
                         }
                     }
                     KeyCode::Char('k') if input_mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
                         let sel = s.selected;
-                        s.steps[sel].note = (s.steps[sel].note + 1).min(127);
+                        s.track_mut().steps[sel].note = (s.track_mut().steps[sel].note + 1).min(127);
                     }
                     KeyCode::Char('j') if input_mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
                         let sel = s.selected;
-                        s.steps[sel].note = s.steps[sel].note.saturating_sub(1).max(0);
+                        s.track_mut().steps[sel].note = s.track_mut().steps[sel].note.saturating_sub(1).max(0);
                     }
                     KeyCode::Char('K') if input_mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
                         let sel = s.selected;
-                        s.steps[sel].note = (s.steps[sel].note + 12).min(127);
+                        s.track_mut().steps[sel].note = (s.track_mut().steps[sel].note + 12).min(127);
                     }
                     KeyCode::Char('J') if input_mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
                         let sel = s.selected;
-                        s.steps[sel].note = s.steps[sel].note.saturating_sub(12).max(0);
+                        s.track_mut().steps[sel].note = s.track_mut().steps[sel].note.saturating_sub(12).max(0);
                     }
                     KeyCode::Char('s') if input_mode == "normal" => {
                         pending_count = None;
@@ -639,27 +726,27 @@ pub fn run(instance: usize) -> Result<()> {
                     KeyCode::Char('$') if input_mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
-                        s.selected = s.euclidean_length - 1;
+                        s.selected = s.track_mut().length - 1;
                     }
                     KeyCode::Char('l') | KeyCode::Right if input_mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
-                        let len = s.euclidean_length;
+                        let len = s.track_mut().length;
                         s.selected = (s.selected + 1) % len;
                     }
                     KeyCode::Char('h') | KeyCode::Left if input_mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
-                        let len = s.euclidean_length;
+                        let len = s.track_mut().length;
                         s.selected = s.selected.saturating_sub(1).min(len - 1);
                     }
                     KeyCode::Char('w') if input_mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
-                        let len = s.euclidean_length;
+                        let len = s.track_mut().length;
                         for i in 1..=len {
                             let idx = (s.selected + i) % len;
-                            if s.steps[idx].active {
+                            if s.track_mut().steps[idx].active {
                                 s.selected = idx;
                                 break;
                             }
@@ -668,10 +755,10 @@ pub fn run(instance: usize) -> Result<()> {
                     KeyCode::Char('b') if input_mode == "normal" => {
                         pending_count = None;
                         let mut s = state.lock().unwrap();
-                        let len = s.euclidean_length;
+                        let len = s.track_mut().length;
                         for i in 1..=len {
                             let idx = (s.selected + len - i) % len;
-                            if s.steps[idx].active {
+                            if s.track_mut().steps[idx].active {
                                 s.selected = idx;
                                 break;
                             }
@@ -712,7 +799,7 @@ pub fn run(instance: usize) -> Result<()> {
                             "note" => {
                                 if let Ok(note) = input_buffer.parse::<u8>() {
                                     let sel = s.selected;
-                                    s.steps[sel].note = note.clamp(0, 127);
+                                    s.track_mut().steps[sel].note = note.clamp(0, 127);
                                 }
                             }
                             "bpm" => {

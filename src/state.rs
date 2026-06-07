@@ -170,6 +170,8 @@ pub struct SequencerParams {
     pub euclidean_rotation: Option<usize>,
     #[serde(default)]
     pub steps: Vec<StepParam>,
+    #[serde(default)]
+    pub tracks: Vec<TrackParam>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -177,6 +179,17 @@ pub struct StepParam {
     pub active: bool,
     pub note: u8,
     pub velocity: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackParam {
+    #[serde(default)]
+    pub steps: Vec<StepParam>,
+    pub length: Option<usize>,
+    pub pulses: Option<usize>,
+    pub rotation: Option<usize>,
+    #[serde(default)]
+    pub muted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
