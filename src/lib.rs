@@ -9,3 +9,5 @@ pub mod state;
 pub mod tmux;
 pub mod tone;
 pub mod voice;
+
+pub const NUM_TRACKS: usize = 1;

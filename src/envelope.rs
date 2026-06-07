@@ -60,7 +60,7 @@ struct ChannelParams {
     shape_param: f32,  // 0.0-1.0 → curve exponent 0.05 to 20.0
     loop_mode: bool,
     attenuverter: f32, // -1.0 to 1.0
-    trigger_track: i32, // -1 = global (any track), 0-15 = specific track
+    trigger_track: i32, // -1 = off, 0..NUM_TRACKS-1 = specific track
 }
 
 /// Exponential parameter → real time in seconds.
@@ -118,9 +118,15 @@ struct EnvelopeState {
 
 impl Default for EnvelopeState {
     fn default() -> Self {
+        let mut params = vec![ChannelParams::default(); NUM_CHANNELS];
+        // Channel 1 defaults to Track 1; channels 2-4 default to Off
+        params[0].trigger_track = 0;
+        for p in params.iter_mut().skip(1) {
+            p.trigger_track = -1;
+        }
         Self {
             channels: vec![EnvelopeChannel::default(); NUM_CHANNELS],
-            params: vec![ChannelParams::default(); NUM_CHANNELS],
+            params,
             current_channel: 0,
             gate: false,
         }
@@ -164,19 +170,17 @@ fn env_thread(
         // Read events (triggers)
         let mut triggers = [false; NUM_CHANNELS];
 
-        let mut global_trigger = false;
-        let mut global_release = false;
         let mut track_trigger: Option<u8> = None;
+        let mut release_track: Option<u8> = None;
 
         if let Some(ref mut ev) = events {
             while let Some(event) = ev.read_event() {
                 match event.event_type {
                     0 => { // note_on
-                        global_trigger = true;
                         track_trigger = Some(event.source);
                     }
                     1 => { // note_off
-                        global_release = true;
+                        release_track = Some(event.source);
                     }
                     4 => { // trigger
                         let ch = (event.target as usize).min(NUM_CHANNELS - 1);
@@ -196,21 +200,22 @@ fn env_thread(
             let params = s.params[i];
             let ch = &mut s.channels[i];
 
-            // Determine if this channel should trigger
-            let should_trigger = if params.trigger_track < 0 {
-                // Global: trigger on any note
-                global_trigger || triggers[i]
-            } else if let Some(t) = track_trigger {
-                // Track-specific: only trigger if source track matches
-                (t as i32 == params.trigger_track) || triggers[i]
+            let should_trigger = if params.trigger_track >= 0 {
+                if let Some(t) = track_trigger {
+                    (t as i32 == params.trigger_track) || triggers[i]
+                } else {
+                    triggers[i]
+                }
             } else {
                 triggers[i]
             };
 
-            let should_release = if params.trigger_track < 0 {
-                global_release
-            } else if let Some(t) = track_trigger {
-                t as i32 == params.trigger_track
+            let should_release = if params.trigger_track >= 0 {
+                if let Some(t) = release_track {
+                    t as i32 == params.trigger_track
+                } else {
+                    false
+                }
             } else {
                 false
             };
@@ -360,7 +365,7 @@ fn draw_ui(
         let env_ch = state.channels[ch];
 
         let trigger_str = if params.trigger_track < 0 {
-            "Global".to_string()
+            "Off".to_string()
         } else {
             format!("Track {}", params.trigger_track + 1)
         };
@@ -625,12 +630,13 @@ pub fn run(instance: usize) -> Result<()> {
                     KeyCode::Char('T') => {
                         let mut s = state.lock().unwrap();
                         let ch = s.current_channel;
-                        // Cycle: Global (-1) → Track1 (0) → Track2 (1) → ... → Track8 (7) → Global
-                        s.params[ch].trigger_track = if s.params[ch].trigger_track >= 7 {
-                            -1
-                        } else {
-                            s.params[ch].trigger_track + 1
+                        let max_track = crate::NUM_TRACKS as i32 - 1;
+                        let next = match s.params[ch].trigger_track {
+                            -1 if max_track >= 0 => 0,
+                            x if x >= max_track => -1,
+                            x => x + 1,
                         };
+                        s.params[ch].trigger_track = next;
                     }
                     KeyCode::Char('c') => {
                         let mut s = state.lock().unwrap();

@@ -70,7 +70,7 @@ struct SequencerState {
 
 impl Default for SequencerState {
     fn default() -> Self {
-        let track_count = 1;
+        let track_count = crate::NUM_TRACKS;
         Self {
             tracks: vec![Track::new(); track_count],
             current_track: 0,
