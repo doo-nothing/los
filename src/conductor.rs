@@ -45,7 +45,7 @@ fn list_session_panes(session: &str, window: &str) -> Result<Vec<(usize, String)
     Ok(panes)
 }
 
-fn spawn_session_panes(panes_data: &[(&str, &str)], active_pane_idx: i64) -> Result<()> {
+fn spawn_session_panes(panes_data: &[(&str, &str)]) -> Result<()> {
     let session = "los";
     let win = "modules";
     
@@ -90,9 +90,9 @@ fn spawn_session_panes(panes_data: &[(&str, &str)], active_pane_idx: i64) -> Res
             .output()?;
     }
     
-    // Select active pane — last operation
+    // Select first pane
     Command::new("tmux")
-        .args(["select-pane", "-t", &format!("{}:{}.{}", session, win, active_pane_idx)])
+        .args(["select-pane", "-t", &format!("{}:{}.0", session, win)])
         .output()?;
     
     Ok(())
@@ -118,9 +118,12 @@ pub fn create_session() -> Result<()> {
     
     // Spawn module panes
     let modules = [("sequencer", "Sequencer"), ("voice", "Voice"), ("mixer", "Mixer"), ("scope", "Scope")];
-    spawn_session_panes(&modules, 0)?;
+    spawn_session_panes(&modules)?;
     
-    // Attach to session
+    // Select modules window and attach
+    Command::new("tmux")
+        .args(["select-window", "-t", "los:modules"])
+        .output()?;
     Command::new("tmux")
         .args(["attach-session", "-t", "los"])
         .status()?;
@@ -175,7 +178,7 @@ pub fn load_session(state_path: &str) -> Result<()> {
         .collect();
     
     if !all_panes.is_empty() {
-        spawn_session_panes(&all_panes, st.tmux.active_pane)?;
+        spawn_session_panes(&all_panes)?;
     }
     
     // Apply tmux settings from state
@@ -185,7 +188,10 @@ pub fn load_session(state_path: &str) -> Result<()> {
             .output();
     }
     
-    // Attach to session (pane already selected by spawn_session_panes)
+    // Select modules window and attach
+    Command::new("tmux")
+        .args(["select-window", "-t", "los:modules"])
+        .output()?;
     Command::new("tmux")
         .args(["attach-session", "-t", "los"])
         .status()?;
@@ -338,29 +344,12 @@ pub fn run_conductor() -> Result<()> {
                         };
                         let save_path = state::states_dir().join(&filename);
                         
-                        // Capture active pane from modules window
-                        let active_pane = Command::new("tmux")
-                            .args(["list-panes", "-t", "los:modules", "-F", "#{pane_active} #{pane_index}"])
-                            .output()
-                            .ok()
-                            .and_then(|o| String::from_utf8(o.stdout).ok())
-                            .and_then(|s| {
-                                s.lines()
-                                    .find(|l| l.starts_with('1'))
-                                    .and_then(|l| l.split_whitespace().nth(1))
-                                    .and_then(|idx| idx.parse::<i64>().ok())
-                            })
-                            .unwrap_or(0);
-                        
                         let session_state = state::SessionState {
                             meta: state::Meta {
                                 name: filename.trim_end_matches(".toml").to_string(),
                                 created: now,
                             },
-                            tmux: state::TmuxState {
-                                active_pane,
-                                ..state::TmuxState::default()
-                            },
+                            tmux: state::TmuxState::default(),
                             windows: vec![state::WindowState {
                                 name: "modules".into(),
                                 layout: "tiled".into(),
