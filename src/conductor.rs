@@ -122,9 +122,12 @@ pub fn create_session() -> Result<()> {
     let modules = [("sequencer", "Sequencer"), ("voice", "Voice"), ("mixer", "Mixer"), ("scope", "Scope")];
     spawn_session_panes(&modules)?;
     
-    // Attach to session, targeting first pane of modules
+    // Select modules window and attach
     Command::new("tmux")
-        .args(["attach-session", "-t", "los:modules.0"])
+        .args(["select-window", "-t", "los:modules"])
+        .output()?;
+    Command::new("tmux")
+        .args(["attach-session", "-t", "los"])
         .status()?;
     
     Ok(())
@@ -187,11 +190,17 @@ pub fn load_session(state_path: &str) -> Result<()> {
             .output();
     }
     
-    // Attach to session, targeting the saved pane
+    // Select saved pane in modules window, then attach
     let active_win = if st.tmux.active_window.trim().is_empty() { "modules" } else { st.tmux.active_window.trim() };
+    Command::new("tmux")
+        .args(["select-window", "-t", &format!("los:{}", active_win)])
+        .output()?;
     let pane_idx = st.tmux.active_pane;
     Command::new("tmux")
-        .args(["attach-session", "-t", &format!("los:{}.{}", active_win, pane_idx)])
+        .args(["select-pane", "-t", &format!("los:{}.{}", active_win, pane_idx)])
+        .output()?;
+    Command::new("tmux")
+        .args(["attach-session", "-t", "los"])
         .status()?;
     
     Ok(())
