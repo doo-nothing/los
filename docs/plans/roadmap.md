@@ -42,6 +42,8 @@ a single module's parameters (for loading patches on individual modules).
 
 ## Phase 1: Save/Load State + Conductor TUI
 
+**Status: ✅ Complete**
+
 ### Directory Structure
 
 ```
@@ -358,6 +360,8 @@ pub struct ScopeParams {
 
 ## Phase 2: Merge tmux-arch → master
 
+**Status: ✅ Complete** (merged, `tmux-arch` fully integrated)
+
 Once Phase 1 is stable and reviewed, merge the `tmux-arch` branch to `master`.
 
 - Resolve any conflicts
@@ -368,6 +372,8 @@ Once Phase 1 is stable and reviewed, merge the `tmux-arch` branch to `master`.
 ---
 
 ## Phase 3: Multi-Track Sequencer
+
+**Status: ✅ Complete**
 
 The sequencer grows from 1 track to N tracks. Each track is a self-contained
 step pattern with its own length, pulses, rotation, and step data.
@@ -431,6 +437,8 @@ The sequencer TUI shows:
 
 ## Phase 4: Envelope Module
 
+**Status: ✅ Complete**
+
 A new `los envelope` module running in its own tmux pane. eurorack make noise Maths module-inspired
 envelope generator with per-track rise/fall stages: https://www.makenoisemusic.com/wp-content/uploads/2024/03/MATHSmanual2013.pdf
 
@@ -464,6 +472,8 @@ the modulation to the specified parameter.
 
 ## Phase 5: Track Routing / Modulation UI
 
+**Status: ✅ Complete** (basic routing via `@N` syntax and envelope modulation)
+
 Once the envelope module exists and the sequencer has multiple tracks, users
 need a way to assign routing.
 
@@ -496,6 +506,8 @@ the target string.
 
 ## Phase 6: Module Lifecycle
 
+**Status: 🔜 Future**
+
 ### Adding a new module at runtime
 
 User wants: "I need a second voice" or "I want another envelope."
@@ -527,23 +539,21 @@ The mixer detects the manifest removal and cleans up the channel.
 
 ## File & Doc Updates
 
-After all phases are complete:
-
-- `README.md` — rewrite with full architecture, keybindings, module reference
-- `DESIGN.md` — update architecture diagram, add IPC details
-- `docs/plans/roadmap.md` — update progress, remove completed phases
-- New docs as needed per phase
+- `README.md` — ✅ Updated with current status
+- `DESIGN.md` — ✅ Updated phase table
+- `TUI_MIGRATION.md` — ✅ Updated with envelope module
+- `docs/plans/roadmap.md` — ✅ Updated progress
 
 ---
 
 ## Summary of Priorities
 
 ```
-Phase 1: Save/Load + Conductor TUI  ← IMPLEMENT NOW
-Phase 2: Merge to master             ← After Phase 1 review
-Phase 3: Multi-track sequencer       ← Next
-Phase 4: Envelope module             ← Next
-Phase 5: Track routing / modulation  ← After Phase 3+4
-Phase 6: Module lifecycle            ← After Phase 5
+Phase 1: Save/Load + Conductor TUI   ✅ Complete
+Phase 2: Merge to master             ✅ Complete
+Phase 3: Multi-track sequencer       ✅ Complete
+Phase 4: Envelope module             ✅ Complete
+Phase 5: Track routing / modulation  ✅ Complete
+Phase 6: Module lifecycle            🔜 Future
 ```
 

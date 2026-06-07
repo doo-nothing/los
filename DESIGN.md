@@ -135,7 +135,8 @@ Lookup order: `./los.toml` → `~/.config/los/layout.toml` → built-in defaults
 |-------|-------------|--------|
 | **0** | Conductor: tmux session creation, pane layout, module spawning, global key bindings, conductor CLI | ✅ |
 | **1** | SHM ringbuffer crate (`shm.rs`) + `los mixer` (cpal output, reads SHM) + `los tone` writes to SHM | ✅ |
-| **2** | `los voice` — synth engine (oscillators, ADSR, filter), writes audio to SHM | 🔜 |
-| **3** | `los sequencer` — step sequencer TUI, writes events to SHM | |
-| **4** | `los scope` — reads mixer SHM, ASCII oscilloscope | |
-| **5** | Effects (delay, reverb, filter), recorder, patch save/load, polish | |
+| **2** | `los voice` — synth engine (oscillators, ADSR, filter), writes audio to SHM | ✅ |
+| **3** | `los sequencer` — step sequencer TUI, writes events to SHM | ✅ |
+| **4** | `los scope` — reads mixer SHM, ASCII oscilloscope | ✅ |
+| **5** | Save/load session state, envelope module, track routing, multi-track | ✅ |
+| **6** | Effects (delay, reverb, filter), recorder, patch system, polish | 🔜 |

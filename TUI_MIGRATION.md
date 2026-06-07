@@ -9,11 +9,11 @@ All modules have been converted from raw stdout printing to proper ratatui termi
 
 ### 1. Conductor (Pane 1)
 - **Status**: ✅ Working
-- **UI**: Simple text-based command interface
+- **UI**: File list of saved states
 - **Controls**:
   - `j/k`, `↑/↓`: Navigate state list
   - `s`: Save current session state
-  - `l`: Load selected state (creates new session)
+  - `l`: Load selected state (reloads modules in-place)
   - `d`: Delete selected state
   - `?`: Toggle help
   - `q`: Quit module
@@ -62,11 +62,12 @@ All modules have been converted from raw stdout printing to proper ratatui termi
   - Sub oscillator level
   - FM amount
   - Output routing (sine, sine+sub, shaped+sub)
-  - ADSR envelope visualization
+  - Track assignment via `@N` syntax
 - **Controls**:
   - `j/k`, `↑/↓`: Select parameter
   - `h/l`, `←/→`: Adjust value
   - `1/2/3`: Set output mode directly
+  - `@N`: Set track assignment (e.g., `@1`)
   - `?`: Toggle help
   - `q`: Quit module
 
@@ -86,7 +87,26 @@ All modules have been converted from raw stdout printing to proper ratatui termi
   - `?`: Toggle help
   - `q`: Quit module
 
-### 5. Scope (Pane 5)
+### 5. Envelope (Pane 5)
+- **Status**: ✅ Working
+- **UI**: Per-channel envelope generator with rise/fall controls
+- **Features**:
+  - Rise/fall time per channel
+  - Shape control (exponential ↔ logarithmic)
+  - Cycle mode
+  - Attenuverter (output scaling/inversion)
+  - Modulation targets via `@N` syntax
+- **Controls**:
+  - `h/l`, `←/→`: Select parameter
+  - `j/k`, `↓/↑`: Adjust value
+  - `1`..`8`: Jump to channel
+  - `c`: Toggle cycle mode
+  - `a`: Toggle attenuverter
+  - `@N`: Set modulation target (e.g., `@1`)
+  - `?`: Toggle help
+  - `q`: Quit module
+
+### 6. Scope (Pane 6)
 - **Status**: ✅ Working
 - **UI**: Waveform visualization with multiple render modes
 - **Features**:
@@ -120,7 +140,8 @@ Modules communicate through POSIX shared memory:
 
 ### tmux Session
 - Session name: `los`
-- Layout: 5 panes in even-vertical arrangement
+- Windows: `conductor` (control), `modules` (synth grid)
+- Layout: Dynamic — saved/restored with full state
 - Window size: Tracks largest attached client
 - Pane borders: Show module names
 - **Modules never close on Esc** — use tmux to manage panes
@@ -129,13 +150,16 @@ Modules communicate through POSIX shared memory:
 
 Run the system:
 ```bash
-./target/release/los
+los
 ```
 
 This will:
 1. Create a tmux session named "los"
-2. Spawn all 5 modules in separate panes
+2. Spawn all modules in separate panes
 3. Attach to the session
+
+Auto-load: `los` with no arguments loads the most recent save.
+Load specific: `los <file.toml>` loads that save.
 
 To quit a module: Press `q`
 To detach from tmux: `Ctrl-b d`

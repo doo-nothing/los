@@ -35,10 +35,17 @@ Module-specific keybindings work when that pane is focused.
 
 ## Project status
 
-**Phase 0** — Conductor infrastructure. Session creation, pane layout, module
-spawning, global key bindings. Modules are placeholders.
+**Phase 1 complete** — Full modular synth workstation with save/load.
 
-See [DESIGN.md](DESIGN.md) for the full architecture and roadmap.
+- ✅ Conductor with session management TUI
+- ✅ Sequencer with 8 tracks, Euclidean rhythms, step editing
+- ✅ Voice (STO-style waveshaping, sub osc, FM)
+- ✅ Mixer (4-track + master)
+- ✅ Scope (Braille/HalfBlock/Bars/Dots render modes)
+- ✅ Envelope (per-channel rise/fall with modulation)
+- ✅ Save/load: full session state (pane order, layout, active pane, params)
+
+See [DESIGN.md](DESIGN.md) for architecture details and [docs/plans/roadmap.md](docs/plans/roadmap.md) for future phases.
 
 ## License
 
