@@ -446,8 +446,20 @@ pub fn run_conductor() -> Result<()> {
                         needs_refresh = true;
                     }
                     KeyCode::Char('s') => {
-                        // Save: send SIGUSR1 to all module processes, then collect
-                        let modules = ["sequencer", "voice", "mixer", "scope", "envelope"];
+                        // Save: query tmux for actual pane order, send SIGUSR1, collect
+                        let mut modules = Vec::new();
+                        if let Ok(titles) = tmux_cmd(&["list-panes", "-t", "los:modules", "-F", "#{pane_title}"]) {
+                            for title in titles.lines() {
+                                let module_name = title.trim().to_lowercase();
+                                if ["sequencer", "voice", "mixer", "scope", "envelope"].contains(&module_name.as_str()) {
+                                    modules.push(module_name);
+                                }
+                            }
+                        }
+                        // Fallback to default order if tmux query fails or returns nothing
+                        if modules.is_empty() {
+                            modules = vec!["sequencer".into(), "voice".into(), "mixer".into(), "scope".into(), "envelope".into()];
+                        }
                         
                         // Read module PIDs from their pid files (written at startup)
                         let mut pids = Vec::new();
@@ -465,7 +477,7 @@ pub fn run_conductor() -> Result<()> {
                         // Wait for modules to write their state files
                         std::thread::sleep(Duration::from_millis(500));
                         
-                        // Collect module state files from tmp
+                        // Collect module state files from tmp in pane order
                         let mut panes = Vec::new();
                         for mod_name in modules.iter() {
                             let path = state::module_state_path(mod_name, 0);
