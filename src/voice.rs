@@ -263,7 +263,7 @@ fn draw_ui(
             };
 
             let track_str = if param_tracks[i] >= 0 {
-                format!(" @T{}", param_tracks[i])
+                format!(" @T{}", param_tracks[i] + 1)
             } else {
                 String::new()
             };

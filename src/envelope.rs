@@ -389,7 +389,7 @@ fn draw_ui(
         let env_ch = state.channels[ch];
 
         let track_label = |t: i32| -> String {
-            if t >= 0 { format!(" @T{}", t) } else { String::new() }
+            if t >= 0 { format!(" @T{}", t + 1) } else { String::new() }
         };
 
         let trigger_str = if params.trigger_track < 0 {
