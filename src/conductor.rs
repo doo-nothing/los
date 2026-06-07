@@ -1,4 +1,5 @@
 use std::io;
+use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::time::Duration;
 
@@ -207,13 +208,13 @@ pub fn run_conductor() -> Result<()> {
     let mut selected: usize = 0;
     let mut show_help = false;
     
-    // Refresh state list
-    let mut refresh_list = true;
+    // Shared state entries list
+    let mut entries: Vec<String> = Vec::new();
+    let mut needs_refresh = true;
     
     loop {
-        if refresh_list {
-            // Read state files from ~/.config/los/states/
-            let mut entries: Vec<String> = Vec::new();
+        if needs_refresh || entries.is_empty() {
+            entries.clear();
             if let Ok(dir) = std::fs::read_dir(state::states_dir()) {
                 for entry in dir.flatten() {
                     if let Some(name) = entry.file_name().to_str() {
@@ -224,6 +225,14 @@ pub fn run_conductor() -> Result<()> {
                 }
             }
             entries.sort();
+            // Clamp selection to list bounds
+            if entries.is_empty() {
+                selected = 0;
+            } else if selected >= entries.len() {
+                selected = entries.len().saturating_sub(1);
+            }
+            
+            needs_refresh = false;
             
             terminal.draw(|f| {
                 let area = f.area();
@@ -259,7 +268,6 @@ pub fn run_conductor() -> Result<()> {
                 }
             })?;
             
-            refresh_list = false;
         }
         
         if event::poll(Duration::from_millis(50))? {
@@ -267,7 +275,7 @@ pub fn run_conductor() -> Result<()> {
                 if show_help {
                     if let KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Esc = key.code {
                         show_help = false;
-                        refresh_list = true;
+                        needs_refresh = true;
                     }
                     continue;
                 }
@@ -275,12 +283,16 @@ pub fn run_conductor() -> Result<()> {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
                     KeyCode::Char('j') | KeyCode::Down => {
-                        selected += 1;
-                        refresh_list = true;
+                        if selected + 1 < entries.len() {
+                            selected += 1;
+                        }
+                        needs_refresh = true;
                     }
                     KeyCode::Char('k') | KeyCode::Up => {
-                        selected = selected.saturating_sub(1);
-                        refresh_list = true;
+                        if selected > 0 {
+                            selected -= 1;
+                        }
+                        needs_refresh = true;
                     }
                     KeyCode::Char('s') => {
                         // Save: send SIGUSR1 to all module processes, then collect
@@ -350,49 +362,41 @@ pub fn run_conductor() -> Result<()> {
                         if let Ok(toml_str) = state::to_toml_string(&session_state) {
                             let _ = state::write_state_file(&save_path, &toml_str);
                         }
+                        needs_refresh = true;
                         
-                        refresh_list = true;
                     }
                     KeyCode::Char('l') => {
-                        // Load selected state
-                        if let Ok(dir) = std::fs::read_dir(state::states_dir()) {
-                            let mut entries: Vec<String> = dir.flatten()
-                                .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
-                                .filter(|n| n.ends_with(".toml"))
-                                .collect();
-                            entries.sort();
-                            if selected < entries.len() {
-                                let path = state::states_dir().join(&entries[selected]);
-                                let path_str = path.to_string_lossy().to_string();
-                                drop(terminal);
-                                disable_raw_mode()?;
-                                let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
-                                let _ = load_session(&path_str);
-                                return Ok(());
-                            }
+                        // Load selected state by exec-ing into 'los load <path>'
+                        if selected < entries.len() {
+                            let path = state::states_dir().join(&entries[selected]);
+                            let path_str = path.to_string_lossy().to_string();
+                            
+                            // Clean up terminal before exec
+                            drop(terminal);
+                            disable_raw_mode()?;
+                            let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+                            
+                            // exec replaces this process with 'los load <path>'
+                            let exe = exe_path()?;
+                            let err = std::process::Command::new(&exe)
+                                .args(&["load", &path_str])
+                                .exec();
+                            // If exec fails, show error and exit
+                            eprintln!("Failed to load: {}", err);
+                            std::process::exit(1);
                         }
                     }
                     KeyCode::Char('d') => {
                         // Delete selected state
-                        if let Ok(dir) = std::fs::read_dir(state::states_dir()) {
-                            let mut entries: Vec<String> = dir.flatten()
-                                .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
-                                .filter(|n| n.ends_with(".toml"))
-                                .collect();
-                            entries.sort();
-                            if selected < entries.len() {
-                                let path = state::states_dir().join(&entries[selected]);
-                                let _ = std::fs::remove_file(&path);
-                                if selected >= entries.len().saturating_sub(1) {
-                                    selected = selected.saturating_sub(1);
-                                }
-                                refresh_list = true;
-                            }
+                        if selected < entries.len() {
+                            let path = state::states_dir().join(&entries[selected]);
+                            let _ = std::fs::remove_file(&path);
+                            needs_refresh = true;
                         }
                     }
                     KeyCode::Char('?') => {
                         show_help = true;
-                        refresh_list = true;
+                        needs_refresh = true;
                     }
                     _ => {}
                 }
@@ -426,7 +430,7 @@ pub fn run_conductor() -> Result<()> {
                     if let Event::Key(k) = event::read()? {
                         if let KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Esc = k.code {
                             show_help = false;
-                            refresh_list = true;
+                            needs_refresh = true;
                             break;
                         }
                     }
