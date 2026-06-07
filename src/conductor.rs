@@ -194,7 +194,7 @@ pub fn load_session(state_path: &str) -> Result<()> {
     }
     
     // Select active window, saved pane (or first), and attach
-    let active_win = if st.tmux.active_window.is_empty() { "modules" } else { &st.tmux.active_window };
+    let active_win = if st.tmux.active_window.trim().is_empty() { "modules" } else { st.tmux.active_window.trim() };
     Command::new("tmux")
         .args(["select-window", "-t", &format!("los:{}", active_win)])
         .output()?;

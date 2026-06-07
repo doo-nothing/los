@@ -432,7 +432,8 @@ The sequencer TUI shows:
 ## Phase 4: Envelope Module
 
 A new `los envelope` module running in its own tmux pane. eurorack make noise Maths module-inspired
-envelope generator with per-track rise/fall stages.
+envelope generator with per-track rise/fall stages: https://www.makenoisemusic.com/wp-content/uploads/2024/03/MATHSmanual2013.pdf
+
 
 ### Params (per-track, up to 4 tracks)
 
