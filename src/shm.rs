@@ -1532,4 +1532,86 @@ mod shm_tests {
         // Next registration should fail
         assert!(m.register("overflow", 0, None).is_err());
     }
+
+    #[test]
+    fn audio_ringbuf_write_and_read_separate_handles() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let name = "/los_audio_test";
+        let _ = unsafe { libc::shm_unlink(CString::new(name).unwrap().as_ptr()) };
+
+        let mut writer = AudioRingbuf::create(name).expect("create ringbuf");
+        let mut reader = AudioRingbuf::open(name).expect("open ringbuf");
+
+        // Write a known pattern
+        let data: Vec<f32> = (0..writer.slot_len()).map(|i| i as f32 * 0.01).collect();
+        writer.write(&data).expect("write should succeed");
+
+        // Read it back from the other handle
+        let mut buf = vec![0.0f32; reader.slot_len()];
+        let result = reader.read(&mut buf).expect("read should succeed");
+        assert!(result, "read should return true (data available)");
+        assert_eq!(buf, data, "read data should match written data");
+
+        // Second read should return false (no more data)
+        let result = reader.read(&mut buf).expect("second read should succeed");
+        assert!(!result, "second read should return false (empty)");
+    }
+
+    #[test]
+    fn audio_ringbuf_multiple_slots() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let name = "/los_audio_test_multi";
+        let _ = unsafe { libc::shm_unlink(CString::new(name).unwrap().as_ptr()) };
+
+        let mut writer = AudioRingbuf::create(name).expect("create ringbuf");
+        let mut reader = AudioRingbuf::open(name).expect("open ringbuf");
+
+        // Write multiple slots
+        for slot in 0..5u32 {
+            let data: Vec<f32> = (0..writer.slot_len()).map(|i| (slot as f32 * 100.0 + i as f32) * 0.01).collect();
+            writer.write(&data).expect("write should succeed");
+        }
+
+        // Read them back
+        let mut buf = vec![0.0f32; reader.slot_len()];
+        for slot in 0..5u32 {
+            let result = reader.read(&mut buf).expect("read should succeed");
+            assert!(result, "read {} should return true", slot);
+            let expected: Vec<f32> = (0..reader.slot_len()).map(|i| (slot as f32 * 100.0 + i as f32) * 0.01).collect();
+            assert_eq!(buf, expected, "read {} data mismatch", slot);
+        }
+    }
+
+    #[test]
+    fn audio_ringbuf_empty_read_returns_false() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let name = "/los_audio_test_empty";
+        let _ = unsafe { libc::shm_unlink(CString::new(name).unwrap().as_ptr()) };
+
+        let _writer = AudioRingbuf::create(name).expect("create ringbuf");
+        let mut reader = AudioRingbuf::open(name).expect("open ringbuf");
+
+        let mut buf = vec![0.0f32; reader.slot_len()];
+        let result = reader.read(&mut buf).expect("read should succeed");
+        assert!(!result, "read should return false (empty)");
+    }
+
+    #[test]
+    fn audio_ringbuf_full_blocks_writer() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let name = "/los_audio_test_full";
+        let _ = unsafe { libc::shm_unlink(CString::new(name).unwrap().as_ptr()) };
+
+        let mut writer = AudioRingbuf::create(name).expect("create ringbuf");
+        let _reader = AudioRingbuf::open(name).expect("open ringbuf");
+
+        // Fill all slots
+        let data = vec![1.0f32; writer.slot_len()];
+        for i in 0..writer.num_slots() {
+            writer.write(&data).unwrap_or_else(|_| panic!("write {} should succeed", i));
+        }
+
+        // Next write should fail (full)
+        assert!(writer.write(&data).is_err(), "write should fail when ringbuf is full");
+    }
 }

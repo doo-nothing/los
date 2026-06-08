@@ -161,6 +161,7 @@ pub struct VoiceParams {
     pub freq: Option<f32>,
     pub gate: Option<bool>,
     pub level: Option<f32>,
+    pub velocity: Option<f32>,
     #[serde(default)]
     pub shape_track: i32,
     #[serde(default)]

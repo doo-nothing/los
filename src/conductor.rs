@@ -148,10 +148,14 @@ fn spawn_session_panes(panes_data: &[(&str, &str)]) -> Result<()> {
         if i >= panes_data.len() { break; }
         let (cmd, label) = panes_data[i];
 
-        tmux_cmd(&["select-pane", "-t", pane_id, "-T", label])?;
+        let _ = tmux_cmd(&["select-pane", "-t", pane_id, "-T", label]);
 
         let full_cmd = format!("{} {}", exe, cmd);
-        tmux_cmd(&["respawn-pane", "-k", "-t", pane_id, &full_cmd])?;
+        if let Err(e) = tmux_cmd(&["respawn-pane", "-k", "-t", pane_id, &full_cmd]) {
+            // A single pane failure shouldn't prevent other modules from starting.
+            // The pane might still have its default shell; user can check it.
+            eprintln!("[spawn] failed to respawn pane {} ({}): {}", pane_id, label, e);
+        }
     }
 
     // Select first pane by ID (reliable from outside tmux)

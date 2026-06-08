@@ -116,7 +116,10 @@ fn voice_thread(
         let s = state.lock().unwrap();
         let freq = s.freq as f64;
         let output_mode = s.output;
-        let velocity = s.velocity;
+        // If gate is on but velocity hasn't been set (no note_on received),
+        // default to full velocity so the voice produces sound immediately
+        // on session load or when the sequencer hasn't started yet.
+        let velocity = if s.gate && s.velocity < 0.001 { 1.0 } else { s.velocity };
 
         // Read modulation from bus
         // ch0       = envelope ch1 output (primary amplitude control)
@@ -402,6 +405,7 @@ pub fn run(instance: usize) -> Result<()> {
                 freq: Some(s.freq),
                 gate: Some(s.gate),
                 level: Some(s.level),
+                velocity: Some(s.velocity),
                 shape_track: s.shape_track,
                 sub_track: s.sub_track,
                 fm_track: s.fm_track,
@@ -422,6 +426,7 @@ pub fn run(instance: usize) -> Result<()> {
                 if let Some(v) = params.freq { s.freq = v; }
                 if let Some(v) = params.gate { s.gate = v; }
                 if let Some(v) = params.level { s.level = v; }
+                if let Some(v) = params.velocity { s.velocity = v; }
                 s.shape_track = params.shape_track;
                 s.sub_track = params.sub_track;
                 s.fm_track = params.fm_track;
@@ -445,6 +450,7 @@ pub fn run(instance: usize) -> Result<()> {
                         freq: Some(s.freq),
                         gate: Some(s.gate),
                         level: Some(s.level),
+                        velocity: Some(s.velocity),
                         shape_track: s.shape_track,
                         sub_track: s.sub_track,
                         fm_track: s.fm_track,
