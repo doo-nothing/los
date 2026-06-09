@@ -323,6 +323,15 @@ Total size: 64 bytes
 
 ### 7.4 ModulationBus (`/los_mod`)
 
+> **v2 (dynamic allocation):** the bus has **64 channels** and no fixed map.
+> Modules claim a channel range at registration (`Manifest::register` with a
+> channel count; a monotonic allocator in the manifest header hands out
+> bases). Inputs reference outputs by **source address**
+> (`module/instance/output`, see `src/routing.rs`) and resolve to live
+> channels through the manifest — a restarted module claims a fresh range and
+> bindings re-resolve. Output labels per module: sequencer `t1`–`t8`,
+> envelope `ch1`–`ch4`,`sum`,`or`,`and`,`inv`.
+
 32 atomic f32 channels. Multiple writers (sequencer, envelope), many readers
 (voices, scope).
 
@@ -361,6 +370,12 @@ Total size: 64 + (32 × 4) = 192 bytes
   0-7. Channels 16-31 are unused/unallocated.
 
 ### 7.5 Manifest (`/los_manifest`)
+
+> **v2:** entry size grew 64 → 96 bytes: offsets 56–59 hold `mod_base` (u32,
+> `u32::MAX` = none) and 60–63 `mod_count`. Header offset 12–15 is the
+> atomic next-free-channel allocator. Header version = 2. Event-ringbuf
+> consumer slots are assigned by `shm::consumer_id`: voices 0–7,
+> envelopes 8–11, 12–15 reserved.
 
 Lock-free fixed-size module registry. 16 entries, two-phase atomic claim protocol.
 

@@ -35,6 +35,7 @@ struct ScopeState {
     source: usize,        // 0=audio, 1=modbus
     modbus_channel: usize,
     selected: usize,      // selected param row (not persisted)
+    modbus_label: Option<String>, // live source label for modbus_channel
 }
 
 impl Default for ScopeState {
@@ -49,6 +50,7 @@ impl Default for ScopeState {
             source: 0,
             modbus_channel: 0,
             selected: 0,
+            modbus_label: None,
         }
     }
 }
@@ -100,7 +102,10 @@ fn row_display(s: &ScopeState, row: usize) -> String {
                 _ => "S",
             }
         ),
-        ROW_MODBUS_CH => format!("ModCh:{}", s.modbus_channel),
+        ROW_MODBUS_CH => match &s.modbus_label {
+            Some(label) => format!("ModCh:{} ({})", s.modbus_channel, label),
+            None => format!("ModCh:{}", s.modbus_channel),
+        },
         ROW_ZOOM => format!("Zoom:{:.1}x", s.zoom),
         ROW_GAIN => format!("Gain:{:.1}x", s.gain),
         ROW_TRIGGER => format!("Trig:{:+.2}", s.trigger_level),
@@ -179,6 +184,7 @@ fn draw_ui(
     state: &ScopeState,
     show_help: bool,
     overlay: Option<&str>,
+    picker: Option<(Vec<String>, usize)>,
 ) -> Result<()> {
     terminal.draw(|f| {
         let area = f.area();
@@ -282,6 +288,37 @@ fn draw_ui(
                     .title("Help"));
             f.render_widget(help, area);
         }
+
+        if let Some((rows, sel)) = picker {
+            let h = (rows.len() as u16 + 2).min(area.height);
+            let w = rows.iter().map(|r| r.len()).max().unwrap_or(10).max(20) as u16 + 4;
+            let r = ratatui::layout::Rect::new(
+                (area.width.saturating_sub(w)) / 2,
+                (area.height.saturating_sub(h)) / 2,
+                w.min(area.width),
+                h,
+            );
+            f.render_widget(ratatui::widgets::Clear, r);
+            let items: Vec<ratatui::widgets::ListItem> = rows
+                .iter()
+                .enumerate()
+                .map(|(i, row)| {
+                    let style = if i == sel {
+                        Style::default().fg(Color::Black).bg(Color::Yellow)
+                    } else {
+                        Style::default().fg(Color::White)
+                    };
+                    ratatui::widgets::ListItem::new(row.clone()).style(style)
+                })
+                .collect();
+            let list = ratatui::widgets::List::new(items).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Yellow))
+                    .title("View source (Enter selects, Esc cancels)"),
+            );
+            f.render_widget(list, r);
+        }
     })?;
 
     Ok(())
@@ -293,7 +330,7 @@ pub fn run(instance: usize) -> Result<()> {
     state::setup_reload_signal();
     state::write_pid_file("scope", instance);
     let mut manifest = Manifest::open().or_else(|_| Manifest::create())?;
-    let _ = manifest.register("scope", instance, None);
+    let _ = manifest.register("scope", instance, None, 0);
     for attempt in 0..20 {
         match enable_raw_mode() {
             Ok(()) => break,
@@ -331,6 +368,7 @@ pub fn run(instance: usize) -> Result<()> {
     let mut show_help = false;
     let mut count = crate::keys::Count::default();
     let mut pending_g = false;
+    let mut picker = crate::picker::Picker::default();
     let mut ex = crate::excmd::ExLine::default();
     let mut ex_msg: Option<String> = None;
     let mut patch_name: Option<String> = None;
@@ -353,17 +391,34 @@ pub fn run(instance: usize) -> Result<()> {
             }
         }
         
+        {
+            // refresh the live label for the selected modbus channel
+            let entries = manifest.entries();
+            let mut s = state.lock().unwrap();
+            s.modbus_label = crate::routing::label_for_channel(&entries, s.modbus_channel)
+                .map(|a| a.to_string());
+        }
         let current_state = state.lock().unwrap().clone();
         let overlay = if ex.is_active() {
             Some(ex.display())
         } else {
             ex_msg.clone()
         };
-        draw_ui(&mut terminal, &current_state, show_help, overlay.as_deref())?;
+        let picker_rows = if picker.is_active() { Some(picker.rows()) } else { None };
+        draw_ui(&mut terminal, &current_state, show_help, overlay.as_deref(), picker_rows)?;
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 ex_msg = None;
+                if picker.is_active() {
+                    if let crate::picker::PickerEvent::Chosen(Some(addr)) = picker.handle_key(key.code) {
+                        let entries = manifest.entries();
+                        if let Some(ch) = crate::routing::resolve(&entries, &addr) {
+                            state.lock().unwrap().modbus_channel = ch;
+                        }
+                    }
+                    continue;
+                }
                 if ex.is_active() {
                     let candidates = crate::excmd::patch_names(&state::patches_dir());
                     if let crate::excmd::ExEvent::Submit(cmd) = ex.handle_key(key.code, &candidates) {
@@ -463,6 +518,18 @@ pub fn run(instance: usize) -> Result<()> {
                         }
                         if let Some(ref mut t) = transport_ui {
                             t.toggle_playing();
+                        }
+                    }
+                    KeyCode::Char('@') => {
+                        count.clear();
+                        let mut s = state.lock().unwrap();
+                        if s.selected == ROW_MODBUS_CH || s.selected == ROW_SOURCE {
+                            s.source = 1; // switch to modbus viewing
+                            let entries = manifest.entries();
+                            let current = crate::routing::label_for_channel(&entries, s.modbus_channel);
+                            let sources = crate::routing::live_sources(&entries);
+                            drop(s);
+                            picker.open(sources, current.as_ref());
                         }
                     }
                     KeyCode::Char(':') => {

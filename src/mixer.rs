@@ -360,7 +360,7 @@ pub fn run() -> Result<()> {
     state::setup_reload_signal();
     state::write_pid_file("mixer", 0);
     let mut manifest = Manifest::open().or_else(|_| Manifest::create())?;
-    manifest.register("mixer", 0, None)?;
+    manifest.register("mixer", 0, None, 0)?;
 
     for attempt in 0..20 {
         match enable_raw_mode() {

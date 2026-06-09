@@ -17,7 +17,7 @@ Status markers: **✅ today** · **🔜 v1** (see `docs/plans/v1-polish.md`) ·
 | `Ctrl-s` | Save module state. ✅ |
 | `Space` | Global transport play/pause (except sequencer insert mode); also `Ctrl-b p`/`Ctrl-b s` and `los ctl`. ✅ |
 | `u` / `Ctrl-r` | Undo / redo, count-prefixed. ✅ sequencer · 🔜 all modules |
-| `@` | Open source picker on a bindable param. 🔜 (✅ today as `@N` track digit) |
+| `@` | Open the source picker on a bindable param (live sources from the manifest; Enter binds, x unbinds). ✅ |
 | `:` | Ex command line (`:w :e :q :q! :x :set`); not in conductor (session save/load lives there). ✅ |
 | `gg` / `G` | First / last of the module's primary collection (sequencer tracks, envelope/mixer channels, voice/scope params, conductor states). ✅ |
 
@@ -139,14 +139,15 @@ Requires a per-module dirty flag (changed since last save) for `:q` vs `:q!`.
 
 ### Voice
 `j/k` select param · `h/l` adjust · `H/L` coarse · counts · `gg/G` (✅) ·
-`1/2/3` output shortcuts removed — digits are counts (✅) ·
-`@` source picker on any row 🔜 · new bindable rows: `notes` (source track
-filter), `amp` (default env ch 1) 🔜 · `:` (✅) · undo 🔜
+`1/2/3` output shortcuts removed — digits are counts ·
+`@` source picker on bindable rows · new rows: `notes` (which seq track's
+notes to play; unbound = all) and `amp` (amplitude source, default
+`envelope/0/ch1`; unbound = 1.0) (✅) · `:` (✅) · undo 🔜
 
 ### Envelope
 `j/k` select · `h/l` adjust · `H/L` coarse · `[`/`]` channel (counts) ·
 `gg/G` first/last channel · `t` trigger · `c` cycle · `o` gate (moved off `g`
-to free the gg chord) · `:` (✅) · undo/picker 🔜
+to free the gg chord) · `@` source picker per param + trigger · `:` (✅) · undo 🔜
 
 ### Mixer
 `h/l` select channel (counts) · `j/k` level down/up · `J/K` coarse ·
@@ -156,8 +157,9 @@ to free the gg chord) · `:` (✅) · undo/picker 🔜
 ### Scope
 Rebuilt as a vertical param list (✅): `j/k` select (mode, source, channel,
 modbus ch, zoom, gain, trigger) · `h/l` adjust · `H/L` coarse · counts ·
-`gg/G` · the old `g/G t/T n/N m c b +/-` keys are gone. `@` picker for the
-modbus source row 🔜. `:` ✅.
+`gg/G` · the old `g/G t/T n/N m c b +/-` keys are gone. `@` on the source /
+modbus rows opens the picker; the channel row shows the live source label
+(`envelope/0/sum`). `:` ✅.
 
 ### Conductor
 `j/k` list nav (counts) · `gg/G` · `Enter` load (`l` alias) · `s` save

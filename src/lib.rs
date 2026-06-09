@@ -4,6 +4,8 @@ pub mod excmd;
 pub mod keys;
 pub mod layout;
 pub mod mixer;
+pub mod picker;
+pub mod routing;
 pub mod scope;
 pub mod sequencer;
 pub mod shm;

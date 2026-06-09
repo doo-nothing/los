@@ -17,6 +17,7 @@ use ratatui::{
     Terminal,
 };
 
+use crate::routing::{self, SourceAddr};
 use crate::shm::{EventRingbuf, Manifest, ModulationBus, ShmTransport};
 use crate::state;
 
@@ -53,18 +54,21 @@ impl Default for EnvelopeChannel {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct ChannelParams {
     rise_param: f32,   // 0.0-1.0 → 1ms to 10s (exponential)
     fall_param: f32,   // 0.0-1.0 → 1ms to 10s (exponential)
     shape_param: f32,  // 0.0-1.0 → curve exponent 0.05 to 20.0
     loop_mode: bool,
     attenuverter: f32, // -1.0 to 1.0
-    trigger_track: i32, // -1 = off, 0..NUM_TRACKS-1 = specific track
-    rise_track: i32,    // -1 = none, 0+ = track modulating rise
-    fall_track: i32,
-    shape_track: i32,
-    atten_track: i32,
+    // Receiver-side bindings (routing.rs source addresses).
+    // trigger_src: a sequencer track whose note events fire this channel
+    // (None = any note event). The others modulate the param when bound.
+    trigger_src: Option<SourceAddr>,
+    rise_src: Option<SourceAddr>,
+    fall_src: Option<SourceAddr>,
+    shape_src: Option<SourceAddr>,
+    atten_src: Option<SourceAddr>,
 }
 
 /// Exponential parameter → real time in seconds.
@@ -107,11 +111,11 @@ impl Default for ChannelParams {
             shape_param: 0.5,  // ~1.0 (linear-ish)
             loop_mode: false,
             attenuverter: 1.0,
-            trigger_track: -1, // ch0 = Track 1 in EnvelopeState::default
-            rise_track: -1,
-            fall_track: -1,
-            shape_track: -1,
-            atten_track: -1,
+            trigger_src: None, // ch0 = sequencer/0/t1 in EnvelopeState::default
+            rise_src: None,
+            fall_src: None,
+            shape_src: None,
+            atten_src: None,
         }
     }
 }
@@ -123,21 +127,21 @@ struct EnvelopeState {
     current_channel: usize,
     gate: bool,
     events_received: u64,
+    /// Modbus base channel claimed at registration (outputs write here).
+    mod_base: Option<usize>,
 }
 
 impl Default for EnvelopeState {
     fn default() -> Self {
         let mut params = vec![ChannelParams::default(); NUM_CHANNELS];
-        // Channel 1 defaults to Track 1; channels 2-4 default to Off
-        params[0].trigger_track = 0;
-        for p in params.iter_mut().skip(1) {
-            p.trigger_track = -1;
-        }
+        // Channel 1 defaults to sequencer track 1; channels 2-4 to any-note
+        params[0].trigger_src = SourceAddr::parse("sequencer/0/t1");
         Self {
             channels: vec![EnvelopeChannel::default(); NUM_CHANNELS],
             params,
             current_channel: 0,
             gate: false,
+            mod_base: None,
             events_received: 0,
         }
     }
@@ -160,12 +164,18 @@ fn env_thread(
     shutdown: std::sync::mpsc::Receiver<()>,
     instance: usize,
 ) -> Result<()> {
-    let consumer_id = (4 + instance).min(15);
+    let consumer_id = crate::shm::consumer_id("envelope", instance);
     let mut events = EventRingbuf::open(consumer_id).ok();
     let mut modbus = ModulationBus::open().or_else(|_| ModulationBus::create()).ok();
+    let manifest = Manifest::open().or_else(|_| Manifest::create())?;
     let _transport = ShmTransport::open().ok();
 
     let dt = 1.0 / SAMPLE_RATE as f32;
+
+    // Per-channel resolved bindings: (trigger note-track, rise/fall/shape/atten
+    // modbus channels). Refreshed periodically through the manifest.
+    let mut resolved: Vec<(Option<u8>, [Option<usize>; 4])> = vec![(None, [None; 4]); NUM_CHANNELS];
+    let mut refresh_in = 0u32;
 
     loop {
         if shutdown.try_recv().is_ok() {
@@ -173,11 +183,28 @@ fn env_thread(
         }
 
         if events.is_none() {
-            events = EventRingbuf::open((4 + instance).min(15)).ok();
+            events = EventRingbuf::open(consumer_id).ok();
         }
         if modbus.is_none() {
             modbus = ModulationBus::open().ok();
         }
+
+        if refresh_in == 0 {
+            refresh_in = 256;
+            let entries = manifest.entries();
+            let s = state.lock().unwrap();
+            for (i, r) in resolved.iter_mut().enumerate().take(s.params.len()) {
+                let p = &s.params[i];
+                r.0 = p.trigger_src.as_ref().and_then(routing::note_source_track);
+                r.1 = [
+                    p.rise_src.as_ref().and_then(|a| routing::resolve(&entries, a)),
+                    p.fall_src.as_ref().and_then(|a| routing::resolve(&entries, a)),
+                    p.shape_src.as_ref().and_then(|a| routing::resolve(&entries, a)),
+                    p.atten_src.as_ref().and_then(|a| routing::resolve(&entries, a)),
+                ];
+            }
+        }
+        refresh_in -= 1;
 
         // Read events (triggers)
         let mut triggers = [false; NUM_CHANNELS];
@@ -212,27 +239,22 @@ fn env_thread(
         let mut ch_outputs = [0.0f32; NUM_CHANNELS];
 
         for i in 0..NUM_CHANNELS {
-            let params = s.params[i];
+            let params = s.params[i].clone();
             let ch = &mut s.channels[i];
+            let (trigger_filter, mod_chans) = resolved[i];
 
-            let should_trigger = if params.trigger_track >= 0 {
-                if let Some(t) = track_trigger {
-                    (t as i32 == params.trigger_track) || triggers[i]
-                } else {
-                    triggers[i]
-                }
-            } else {
-                track_trigger.is_some() || triggers[i]
+            let should_trigger = match (params.trigger_src.is_some(), trigger_filter, track_trigger) {
+                // bound to a specific track: only its notes (or a manual trigger)
+                (true, Some(want), Some(got)) => got == want || triggers[i],
+                (true, _, _) => triggers[i],
+                // unbound: any note event
+                (false, _, got) => got.is_some() || triggers[i],
             };
 
-            let should_release = if params.trigger_track >= 0 {
-                if let Some(t) = release_track {
-                    t as i32 == params.trigger_track
-                } else {
-                    false
-                }
-            } else {
-                release_track.is_some()
+            let should_release = match (params.trigger_src.is_some(), trigger_filter, release_track) {
+                (true, Some(want), Some(got)) => got == want,
+                (true, _, _) => false,
+                (false, _, got) => got.is_some(),
             };
 
             // Apply trigger/release
@@ -248,23 +270,15 @@ fn env_thread(
                 ch.eoc_fired = false;
             }
 
-            // Track modulation: if a track is assigned, read its value from modbus
-            let track_val = |track: i32| -> f32 {
-                if track >= 0 {
-                    modbus.as_ref().map(|m| m.get(8 + track as usize)).unwrap_or(0.0)
-                } else {
-                    -1.0 // sentinel: no assignment
-                }
+            // Param modulation: bound + resolvable -> modbus value
+            let chan_val = |ch: Option<usize>| -> Option<f32> {
+                ch.and_then(|c| modbus.as_ref().map(|m| m.get(c)))
             };
 
-            let rp = track_val(params.rise_track);
-            let rp = if rp < 0.0 { params.rise_param } else { rp.clamp(0.0, 1.0) };
-            let fp = track_val(params.fall_track);
-            let fp = if fp < 0.0 { params.fall_param } else { fp.clamp(0.0, 1.0) };
-            let sp = track_val(params.shape_track);
-            let sp = if sp < 0.0 { params.shape_param } else { sp.clamp(0.0, 1.0) };
-            let att = track_val(params.atten_track);
-            let att = if att < 0.0 { params.attenuverter } else { att.clamp(-1.0, 1.0) };
+            let rp = chan_val(mod_chans[0]).map(|v| v.clamp(0.0, 1.0)).unwrap_or(params.rise_param);
+            let fp = chan_val(mod_chans[1]).map(|v| v.clamp(0.0, 1.0)).unwrap_or(params.fall_param);
+            let sp = chan_val(mod_chans[2]).map(|v| v.clamp(0.0, 1.0)).unwrap_or(params.shape_param);
+            let att = chan_val(mod_chans[3]).map(|v| v.clamp(-1.0, 1.0)).unwrap_or(params.attenuverter);
 
             let rise_time = param_to_time(rp);
             let fall_time = param_to_time(fp);
@@ -329,17 +343,19 @@ fn env_thread(
         let and_val = ch_outputs.iter().copied().fold(f32::INFINITY, f32::min);
         let invert = -ch_outputs[0];
 
+        let mod_base = s.mod_base;
         drop(s);
 
-        // Write to modulation bus
-        if let Some(ref mut bus) = modbus {
+        // Write outputs to our claimed modbus range:
+        // base+0..3 = channels, base+4..7 = sum/or/and/inv
+        if let (Some(ref mut bus), Some(base)) = (modbus.as_mut(), mod_base) {
             for (i, &val) in ch_outputs.iter().enumerate().take(NUM_CHANNELS) {
-                bus.set(i, val);
+                bus.set(base + i, val);
             }
-            bus.set(4, sum);
-            bus.set(5, or_val);
-            bus.set(6, and_val);
-            bus.set(7, invert);
+            bus.set(base + 4, sum);
+            bus.set(base + 5, or_val);
+            bus.set(base + 6, and_val);
+            bus.set(base + 7, invert);
         }
 
         // Sleep to maintain real-time pacing: 64 samples @ 48kHz ≈ 1.33ms
@@ -355,6 +371,7 @@ fn draw_ui(
     selected: usize,
     show_help: bool,
     overlay: Option<&str>,
+    picker: Option<(Vec<String>, usize)>,
 ) -> Result<()> {
     terminal.draw(|f| {
         let area = f.area();
@@ -393,28 +410,28 @@ fn draw_ui(
         f.render_widget(tab_widget, chunks[0]);
 
         let ch = state.current_channel.min(NUM_CHANNELS - 1);
-        let params = state.params[ch];
+        let params = state.params[ch].clone();
         let env_ch = state.channels[ch];
 
-        let track_label = |t: i32| -> String {
-            if t >= 0 { format!(" @T{}", t + 1) } else { String::new() }
+        let src_label = |a: &Option<SourceAddr>| -> String {
+            a.as_ref().map(|a| format!(" @{}", a)).unwrap_or_default()
         };
 
-        let trigger_str = if params.trigger_track < 0 {
-            "Off".to_string()
-        } else {
-            format!("Track {}", params.trigger_track + 1)
-        };
+        let trigger_str = params
+            .trigger_src
+            .as_ref()
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| String::from("any note"));
 
         let rise_time = param_to_time(params.rise_param);
         let fall_time = param_to_time(params.fall_param);
         let shape_exp = param_to_shape(params.shape_param);
 
         let param_labels = [
-            format!("Rise:  {}{}", format_time(rise_time), track_label(params.rise_track)),
-            format!("Fall:  {}{}", format_time(fall_time), track_label(params.fall_track)),
-            format!("Shape: {:.2}{}", shape_exp, track_label(params.shape_track)),
-            format!("Atten: {:+.2}{}", params.attenuverter, track_label(params.atten_track)),
+            format!("Rise:  {}{}", format_time(rise_time), src_label(&params.rise_src)),
+            format!("Fall:  {}{}", format_time(fall_time), src_label(&params.fall_src)),
+            format!("Shape: {:.2}{}", shape_exp, src_label(&params.shape_src)),
+            format!("Atten: {:+.2}{}", params.attenuverter, src_label(&params.atten_src)),
             format!("Trig:  {}", trigger_str),
         ];
 
@@ -480,7 +497,7 @@ fn draw_ui(
                 Line::from(""),
                 Line::from("Actions:"),
                 Line::from("  t          Trigger envelope manually"),
-                Line::from("  @#         Assign selected param to track # (1-8, 0=off)"),
+                Line::from("  @          Bind selected param/trigger to a source"),
                 Line::from("  c          Toggle cycle/loop mode"),
                 Line::from("  o          Toggle gate on/off (sustain)"),
                 Line::from(""),
@@ -505,6 +522,38 @@ fn draw_ui(
                 r,
             );
         }
+
+        // Source picker overlay (@): list of live modulation sources
+        if let Some((rows, sel)) = picker {
+            let h = (rows.len() as u16 + 2).min(area.height);
+            let w = rows.iter().map(|r| r.len()).max().unwrap_or(10).max(20) as u16 + 4;
+            let r = ratatui::layout::Rect::new(
+                (area.width.saturating_sub(w)) / 2,
+                (area.height.saturating_sub(h)) / 2,
+                w.min(area.width),
+                h,
+            );
+            f.render_widget(ratatui::widgets::Clear, r);
+            let items: Vec<ratatui::widgets::ListItem> = rows
+                .iter()
+                .enumerate()
+                .map(|(i, row)| {
+                    let style = if i == sel {
+                        Style::default().fg(Color::Black).bg(Color::Yellow)
+                    } else {
+                        Style::default().fg(Color::White)
+                    };
+                    ratatui::widgets::ListItem::new(row.clone()).style(style)
+                })
+                .collect();
+            let list = ratatui::widgets::List::new(items).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Yellow))
+                    .title("Bind source (Enter binds, x unbinds, Esc cancels)"),
+            );
+            f.render_widget(list, r);
+        }
     })?;
 
     Ok(())
@@ -518,11 +567,11 @@ fn snapshot_params(s: &EnvelopeState) -> state::EnvelopeParams {
             shape: p.shape_param,
             loop_mode: p.loop_mode,
             attenuverter: p.attenuverter,
-            trigger_track: p.trigger_track,
-            rise_track: p.rise_track,
-            fall_track: p.fall_track,
-            shape_track: p.shape_track,
-            atten_track: p.atten_track,
+            trigger_src: p.trigger_src.as_ref().map(|a| a.to_string()),
+            rise_src: p.rise_src.as_ref().map(|a| a.to_string()),
+            fall_src: p.fall_src.as_ref().map(|a| a.to_string()),
+            shape_src: p.shape_src.as_ref().map(|a| a.to_string()),
+            atten_src: p.atten_src.as_ref().map(|a| a.to_string()),
         }).collect(),
         logic_outputs: state::LogicOutputConfig {
             sum_enabled: true,
@@ -539,11 +588,11 @@ fn apply_params(s: &mut EnvelopeState, params: &state::EnvelopeParams) {
         s.params[i].shape_param = ch.shape;
         s.params[i].loop_mode = ch.loop_mode;
         s.params[i].attenuverter = ch.attenuverter;
-        s.params[i].trigger_track = ch.trigger_track;
-        s.params[i].rise_track = ch.rise_track;
-        s.params[i].fall_track = ch.fall_track;
-        s.params[i].shape_track = ch.shape_track;
-        s.params[i].atten_track = ch.atten_track;
+        s.params[i].trigger_src = ch.trigger_src.as_deref().and_then(SourceAddr::parse);
+        s.params[i].rise_src = ch.rise_src.as_deref().and_then(SourceAddr::parse);
+        s.params[i].fall_src = ch.fall_src.as_deref().and_then(SourceAddr::parse);
+        s.params[i].shape_src = ch.shape_src.as_deref().and_then(SourceAddr::parse);
+        s.params[i].atten_src = ch.atten_src.as_deref().and_then(SourceAddr::parse);
     }
 }
 
@@ -559,7 +608,7 @@ fn adjust(s: &mut EnvelopeState, row: usize, steps: i32, coarse: bool) {
         1 => p.fall_param = step_f32(p.fall_param, steps, 0.005, coarse, 0.0, 1.0),
         2 => p.shape_param = step_f32(p.shape_param, steps, 0.005, coarse, 0.0, 1.0),
         3 => p.attenuverter = step_f32(p.attenuverter, steps, 0.05, coarse, -1.0, 1.0),
-        4 => p.trigger_track = (p.trigger_track + steps).clamp(-1, crate::NUM_TRACKS as i32 - 1),
+        4 => {} // trigger row is binding-only (@ opens the source picker)
         _ => {}
     }
 }
@@ -569,7 +618,8 @@ pub fn run(instance: usize) -> Result<()> {
     state::setup_reload_signal();
     state::write_pid_file("envelope", instance);
     let mut manifest = Manifest::open().or_else(|_| Manifest::create())?;
-    let _ = manifest.register("envelope", instance, None);
+    let _ = manifest.register("envelope", instance, None, 8);
+    let claimed_base = manifest.claimed_base();
 
     for attempt in 0..20 {
         match enable_raw_mode() {
@@ -590,6 +640,7 @@ pub fn run(instance: usize) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let state = Arc::new(Mutex::new(EnvelopeState::default()));
+    state.lock().unwrap().mod_base = claimed_base;
 
     // Load saved state if available
     if let Ok(params) = state::load_module_state::<state::EnvelopeParams>("envelope", instance) {
@@ -609,7 +660,7 @@ pub fn run(instance: usize) -> Result<()> {
     let mut show_help = false;
     // Global transport handle for Space = play/pause (lazily reopened)
     let mut transport_ui: Option<ShmTransport> = ShmTransport::open().ok();
-    let mut at_pending = false;
+    let mut picker = crate::picker::Picker::default();
     let mut count = crate::keys::Count::default();
     let mut pending_g = false;
     let mut ex = crate::excmd::ExLine::default();
@@ -636,11 +687,26 @@ pub fn run(instance: usize) -> Result<()> {
         } else {
             ex_msg.clone()
         };
-        draw_ui(&mut terminal, &current_state, selected, show_help, overlay.as_deref())?;
+        let picker_rows = if picker.is_active() { Some(picker.rows()) } else { None };
+        draw_ui(&mut terminal, &current_state, selected, show_help, overlay.as_deref(), picker_rows)?;
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 ex_msg = None;
+                if picker.is_active() {
+                    if let crate::picker::PickerEvent::Chosen(addr) = picker.handle_key(key.code) {
+                        let mut s = state.lock().unwrap();
+                        let ch = s.current_channel;
+                        match selected {
+                            0 => s.params[ch].rise_src = addr,
+                            1 => s.params[ch].fall_src = addr,
+                            2 => s.params[ch].shape_src = addr,
+                            3 => s.params[ch].atten_src = addr,
+                            _ => s.params[ch].trigger_src = addr,
+                        }
+                    }
+                    continue;
+                }
                 if ex.is_active() {
                     let candidates = crate::excmd::patch_names(&state::patches_dir());
                     if let crate::excmd::ExEvent::Submit(cmd) = ex.handle_key(key.code, &candidates) {
@@ -694,24 +760,6 @@ pub fn run(instance: usize) -> Result<()> {
                 }
 
                 match key.code {
-                    // @N digit binding takes precedence over count digits
-                    KeyCode::Char(d) if at_pending && d.is_ascii_digit() => {
-                        let tnum = (d as u8 - b'0') as i32;
-                        let track = if tnum == 0 { -1 } else if tnum <= crate::NUM_TRACKS as i32 { tnum - 1 } else { -2 };
-                        if track != -2 {
-                            let mut s = state.lock().unwrap();
-                            let ch = s.current_channel;
-                            match selected {
-                                0 => { s.params[ch].rise_track = track; }
-                                1 => { s.params[ch].fall_track = track; }
-                                2 => { s.params[ch].shape_track = track; }
-                                3 => { s.params[ch].atten_track = track; }
-                                4 => { s.params[ch].trigger_track = track; }
-                                _ => {}
-                            }
-                        }
-                        at_pending = false;
-                    }
                     KeyCode::Char(c) if c.is_ascii_digit() && count.push(c) => {}
                     KeyCode::Char('j') | KeyCode::Down => {
                         selected = crate::keys::cycle(selected, count.take() as i32, NUM_ROWS);
@@ -747,7 +795,7 @@ pub fn run(instance: usize) -> Result<()> {
                         s.current_channel = (s.current_channel + n).min(NUM_CHANNELS - 1);
                         selected = 0;
                     }
-                    KeyCode::Char('g') if !at_pending => {
+                    KeyCode::Char('g') => {
                         count.clear();
                         if pending_g {
                             pending_g = false;
@@ -773,7 +821,21 @@ pub fn run(instance: usize) -> Result<()> {
                         s.channels[ch].eoc_fired = false;
                     }
                     KeyCode::Char('@') => {
-                        at_pending = true;
+                        count.clear();
+                        let sources = Manifest::open()
+                            .map(|m| crate::routing::live_sources(&m.entries()))
+                            .unwrap_or_default();
+                        let s = state.lock().unwrap();
+                        let ch = s.current_channel;
+                        let current = match selected {
+                            0 => s.params[ch].rise_src.clone(),
+                            1 => s.params[ch].fall_src.clone(),
+                            2 => s.params[ch].shape_src.clone(),
+                            3 => s.params[ch].atten_src.clone(),
+                            _ => s.params[ch].trigger_src.clone(),
+                        };
+                        drop(s);
+                        picker.open(sources, current.as_ref());
                     }
                     KeyCode::Char('c') => {
                         let mut s = state.lock().unwrap();
@@ -818,7 +880,6 @@ pub fn run(instance: usize) -> Result<()> {
                         show_help = !show_help;
                     }
                     _ => {
-                        at_pending = false;
                         count.clear();
                     }
                 }
@@ -880,11 +941,11 @@ mod envelope_tests {
             shape_param: 0.5,
             loop_mode: false,
             attenuverter: 1.0,
-            trigger_track: -1,
-            rise_track: -1,
-            fall_track: -1,
-            shape_track: -1,
-            atten_track: -1,
+            trigger_src: None,
+            rise_src: None,
+            fall_src: None,
+            shape_src: None,
+            atten_src: None,
         };
         let rise_time = param_to_time(params.rise_param);
         let shape = param_to_shape(params.shape_param);
@@ -917,11 +978,11 @@ mod envelope_tests {
             shape_param: 0.5,
             loop_mode: false,
             attenuverter: 1.0,
-            trigger_track: -1,
-            rise_track: -1,
-            fall_track: -1,
-            shape_track: -1,
-            atten_track: -1,
+            trigger_src: None,
+            rise_src: None,
+            fall_src: None,
+            shape_src: None,
+            atten_src: None,
         };
         let fall_time = param_to_time(params.fall_param);
         let shape = param_to_shape(params.shape_param);
@@ -1063,11 +1124,11 @@ mod doctrine_tests {
     }
 
     #[test]
-    fn trigger_track_row_clamps() {
+    fn trigger_row_is_binding_only() {
         let mut s = EnvelopeState::default();
+        let before = s.params[0].trigger_src.clone();
         adjust(&mut s, 4, -10, false);
-        assert_eq!(s.params[0].trigger_track, -1);
-        adjust(&mut s, 4, 100, false);
-        assert_eq!(s.params[0].trigger_track, crate::NUM_TRACKS as i32 - 1);
+        adjust(&mut s, 4, 100, true);
+        assert_eq!(s.params[0].trigger_src, before, "h/l must not touch the binding");
     }
 }
