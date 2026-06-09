@@ -21,7 +21,7 @@ use ratatui::{
 use crate::shm::{AudioRingbuf, Manifest, ModulationBus, ShmTransport};
 use crate::state;
 
-const BUFFER_SIZE: usize = 512;
+const BUFFER_SIZE: usize = 4096; // ~85ms of 48kHz audio
 const SHM_NAME: &str = "/los_mix_in";
 
 #[derive(Clone)]
@@ -93,7 +93,7 @@ fn row_display(s: &ScopeState, row: usize) -> String {
                 _ => "Dots",
             }
         ),
-        ROW_SOURCE => format!("Src:{}", if s.source == 0 { "Audio" } else { "Mod" }),
+        ROW_SOURCE => format!("Src:{}", if s.source == 0 { "Mix" } else { "Mod" }),
         ROW_CHANNEL => format!(
             "Ch:{}",
             match s.channel {
@@ -119,6 +119,9 @@ fn snapshot_params(s: &ScopeState) -> state::ScopeParams {
         channel: Some(s.channel),
         zoom: Some(s.zoom),
         gain: Some(s.gain),
+        source: Some(s.source),
+        modbus_channel: Some(s.modbus_channel),
+        trigger_level: Some(s.trigger_level),
     }
 }
 
@@ -127,6 +130,9 @@ fn apply_params(s: &mut ScopeState, params: &state::ScopeParams) {
     if let Some(v) = params.channel { s.channel = v; }
     if let Some(v) = params.zoom { s.zoom = v; }
     if let Some(v) = params.gain { s.gain = v; }
+    if let Some(v) = params.source { s.source = v; }
+    if let Some(v) = params.modbus_channel { s.modbus_channel = v; }
+    if let Some(v) = params.trigger_level { s.trigger_level = v; }
 }
 
 impl crate::undo::ParamUndo for ScopeState {
@@ -163,15 +169,25 @@ fn scope_thread(
     state: Arc<Mutex<ScopeState>>,
     shutdown: std::sync::mpsc::Receiver<()>,
 ) -> Result<()> {
-    let ringbuf = AudioRingbuf::open(SHM_NAME).ok();
+    // /los_mix_in exists solely for the scope: the mixer writes its summed
+    // output there and we are the one consumer, so destructive read() gives
+    // a contiguous 48kHz stream (peek_latest + decimation drew aliased
+    // garbage). The mixer creates it up to 500ms after we spawn — keep
+    // retrying instead of giving up at startup.
+    let mut ringbuf: Option<AudioRingbuf> = None;
     let modbus = ModulationBus::open().or_else(|_| ModulationBus::create()).ok();
-
-    let slot_len = ringbuf.as_ref().map(|r| r.slot_len()).unwrap_or(128);
-    let mut local_buffer = vec![0.0f32; slot_len];
+    let mut local_buffer = vec![0.0f32; 128];
 
     loop {
         if shutdown.try_recv().is_ok() {
             break;
+        }
+
+        if ringbuf.is_none() {
+            ringbuf = AudioRingbuf::open(SHM_NAME).ok();
+            if let Some(ref rb) = ringbuf {
+                local_buffer = vec![0.0f32; rb.slot_len()];
+            }
         }
 
         let mut s = state.lock().unwrap();
@@ -179,14 +195,15 @@ fn scope_thread(
         let gain = s.gain;
 
         if source == 0 {
-            if let Some(ref rb) = ringbuf {
-                if let Ok(true) = rb.peek_latest(&mut local_buffer) {
+            if let Some(ref mut rb) = ringbuf {
+                // drain everything written since last tick (contiguous)
+                while let Ok(true) = rb.read(&mut local_buffer) {
                     let channel = s.channel;
-                    for i in (0..slot_len).step_by(2) {
+                    for frame in local_buffer.chunks_exact(2) {
                         let sample = match channel {
-                            0 => local_buffer[i],
-                            1 => local_buffer[i + 1],
-                            _ => (local_buffer[i] + local_buffer[i + 1]) / 2.0,
+                            0 => frame[0],
+                            1 => frame[1],
+                            _ => (frame[0] + frame[1]) / 2.0,
                         };
                         s.buffer.push(sample * gain);
                     }
@@ -198,8 +215,9 @@ fn scope_thread(
             s.buffer.push(sample);
         }
 
-        while s.buffer.len() > BUFFER_SIZE {
-            s.buffer.remove(0);
+        let len = s.buffer.len();
+        if len > BUFFER_SIZE {
+            s.buffer.drain(..len - BUFFER_SIZE);
         }
 
         drop(s);
@@ -207,6 +225,16 @@ fn scope_thread(
     }
 
     Ok(())
+}
+
+/// Start index of the display window: the earliest rising crossing of
+/// `level` that still leaves a full `window` of samples after it. None =
+/// no trigger found (free-run: show the latest window).
+fn trigger_window(buf: &[f32], level: f32, window: usize) -> Option<usize> {
+    if buf.len() < window + 1 {
+        return None;
+    }
+    (1..=buf.len() - window).find(|&i| buf[i - 1] < level && buf[i] >= level)
 }
 
 fn draw_ui(
@@ -246,8 +274,15 @@ fn draw_ui(
         };
         f.render_widget(status_widget, chunks[1]);
 
-        let data: Vec<(f64, f64)> = state
-            .buffer
+        // Trigger-synced display: window length set by zoom, aligned to the
+        // first rising crossing of the trigger level (free-run when none).
+        let window = ((state.buffer.len() as f32 / state.zoom) as usize)
+            .clamp(16, state.buffer.len().max(16))
+            .min(state.buffer.len().max(1));
+        let start = trigger_window(&state.buffer, state.trigger_level, window)
+            .unwrap_or_else(|| state.buffer.len().saturating_sub(window));
+        let visible = &state.buffer[start..(start + window).min(state.buffer.len())];
+        let data: Vec<(f64, f64)> = visible
             .iter()
             .enumerate()
             .map(|(i, &s)| (i as f64, s as f64))
@@ -260,7 +295,7 @@ fn draw_ui(
             _ => Marker::Dot,
         };
 
-        let x_max = (state.buffer.len() as f64 / state.zoom as f64).min(state.buffer.len() as f64);
+        let x_max = visible.len().max(1) as f64;
 
         let datasets = vec![Dataset::default()
             .marker(marker)
@@ -663,5 +698,40 @@ mod tests {
             adjust(&mut b, 1, false);
         }
         assert!((a.zoom - b.zoom).abs() < 1e-6);
+    }
+
+    #[test]
+    fn trigger_finds_rising_crossing_with_room() {
+        // ramp down then a clean rising edge at index 5
+        let buf = [0.5, 0.3, 0.1, -0.2, -0.4, 0.1, 0.4, 0.6, 0.7, 0.8];
+        assert_eq!(trigger_window(&buf, 0.0, 4), Some(5));
+        // window too large to fit after the crossing -> free-run
+        assert_eq!(trigger_window(&buf, 0.0, 10), None);
+        // no crossing of a high level
+        assert_eq!(trigger_window(&buf, 0.95, 2), None);
+    }
+
+    #[test]
+    fn trigger_picks_earliest_fitting_crossing() {
+        let buf = [-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0];
+        assert_eq!(trigger_window(&buf, 0.0, 3), Some(1), "earliest crossing wins");
+        assert_eq!(trigger_window(&buf, 0.0, 7), Some(1));
+    }
+
+    #[test]
+    fn scope_params_persist_source_and_trigger() {
+        let s = ScopeState {
+            source: 1,
+            modbus_channel: 7,
+            trigger_level: 0.25,
+            ..Default::default()
+        };
+        let toml_str = state::to_toml_string(&snapshot_params(&s)).unwrap();
+        let parsed: state::ScopeParams = toml::from_str(&toml_str).unwrap();
+        let mut back = ScopeState::default();
+        apply_params(&mut back, &parsed);
+        assert_eq!(back.source, 1);
+        assert_eq!(back.modbus_channel, 7);
+        assert_eq!(back.trigger_level, 0.25);
     }
 }
