@@ -10,8 +10,7 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::Style,
     text::Line,
     widgets::{Block, Borders, Paragraph},
     Terminal,
@@ -864,6 +863,7 @@ fn sequencer_thread(
             s.playing = playing;
             s.bpm
         };
+        transport.set_bpm(bpm as f32);
 
         let clock = transport.clock();
         let samples_per_step = (60.0 / bpm * sample_rate / 4.0) as u64;
@@ -968,35 +968,6 @@ fn euclidean_apply(steps: &mut [Step], pulses: usize, length: usize, rotation: u
     }
 }
 
-fn compact_track_row(track: &Track, track_idx: usize, current_track: usize, selected: usize) -> String {
-    let is_current = track_idx == current_track;
-    let mut row = format!("{}T{} ", if is_current { "▶" } else { " " }, track_idx + 1);
-    if track.muted {
-        row.push_str("[mute]   ");
-    } else {
-        let mode_str = match track.mode {
-            state::TrackMode::Note => "[NOTE]",
-            state::TrackMode::Modulation => "[MOD] ",
-        };
-        row.push_str(&format!("{:<8} ", mode_str));
-    }
-    for (i, step) in track.steps.iter().enumerate().take(track.length) {
-        let ch = if i == selected && is_current {
-            '▽'
-        } else if step.active {
-            '●'
-        } else {
-            '○'
-        };
-        row.push(ch);
-    }
-    // Pad to 16 chars if shorter
-    for _ in track.length..16 {
-        row.push(' ');
-    }
-    row.push_str(&format!("  P:{} L:{} R:{}", track.pulses, track.length, track.rotation));
-    row
-}
 
 #[allow(clippy::too_many_arguments)]
 fn draw_ui(
@@ -1012,211 +983,246 @@ fn draw_ui(
     undo_msg: &Option<String>,
     pending: Option<&str>,
 ) -> Result<()> {
+    use crate::theme;
+    use ratatui::text::Span;
+
     terminal.draw(|f| {
         let area = f.area();
-        let track_rows = state.tracks.len().clamp(1, 6) as u16;
-        
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(track_rows), // Stacked track list
-                Constraint::Length(3),            // Step grid
-                Constraint::Length(1),            // Note display
-                Constraint::Min(0),               // Help or empty
-                Constraint::Length(1),            // Status line
-            ])
-            .split(area);
+        let w = area.width as usize;
 
-        // Stacked track rows
+        // ── header ──────────────────────────────────────────────────────
+        let cstep = state.current_steps[state.current_track];
+        let cur_len = state.track().length;
+        let echo = theme::transport_echo(
+            state.bpm as f32,
+            state.playing,
+            Some(&format!("{:02}/{:02}", cstep + 1, cur_len)),
+        );
+        let ctx = format!("t{}/{}", state.current_track + 1, state.tracks.len());
+        let mut lines: Vec<Line> = vec![theme::header("SEQ", &ctx, &echo, w)];
+
+        // ── track rows ──────────────────────────────────────────────────
         for (ti, trk) in state.tracks.iter().enumerate() {
-            let sel = if ti == state.current_track { state.selected } else { 0 };
-            let row_text = compact_track_row(trk, ti, state.current_track, sel);
-            let style = if ti == state.current_track {
-                Style::default().fg(Color::Yellow)
-            } else if trk.muted {
-                Style::default().fg(Color::DarkGray)
-            } else {
-                Style::default().fg(Color::Cyan)
+            let is_cur = ti == state.current_track;
+            let tstep = state.current_steps[ti];
+            let hue = match trk.mode {
+                TrackMode::Note => theme::note(),
+                TrackMode::Modulation => theme::cv(),
             };
-            let row_widget = Paragraph::new(row_text).style(style);
-            if ti < chunks[0].height as usize {
-                let row_rect = Rect::new(chunks[0].x, chunks[0].y + ti as u16, chunks[0].width, 1);
-                f.render_widget(row_widget, row_rect);
+            let row_style = if trk.muted { theme::dim() } else { theme::value() };
+
+            let mut spans: Vec<Span> = Vec::with_capacity(trk.length + 8);
+            spans.push(Span::styled(
+                format!("{}t{} ", if is_cur { theme::PLAYHEAD } else { ' ' }, ti + 1),
+                if is_cur { theme::chrome_hi() } else { theme::chrome() },
+            ));
+            for i in 0..trk.length {
+                if i > 0 && i % 4 == 0 {
+                    spans.push(Span::raw(" "));
+                }
+                let step = &trk.steps[i];
+                let on = step.active;
+                let glyph = match (trk.mode, on) {
+                    (TrackMode::Note, true) => theme::STEP_ON,
+                    (TrackMode::Note, false) => theme::STEP_OFF,
+                    (TrackMode::Modulation, true) => theme::MOD_ON,
+                    (TrackMode::Modulation, false) => theme::MOD_OFF,
+                };
+                // playhead + wake (CLOCK hue), trigger flash on the live cell
+                let style = if state.playing && i == tstep && !trk.muted {
+                    if on {
+                        theme::flash(hue)
+                    } else {
+                        theme::signal(theme::clock())
+                    }
+                } else if state.playing && !trk.muted && wake_offset(i, tstep, trk.length).is_some() {
+                    theme::signal(theme::clock())
+                } else if trk.muted {
+                    theme::dim()
+                } else if on {
+                    theme::signal(hue)
+                } else {
+                    theme::dim()
+                };
+                let shown = if state.playing && !trk.muted {
+                    match wake_offset(i, tstep, trk.length) {
+                        Some(o) if i != tstep => theme::WAKE[2 - o.min(2)],
+                        _ if i == tstep => {
+                            if on { glyph } else { theme::PLAYHEAD }
+                        }
+                        _ => glyph,
+                    }
+                } else {
+                    glyph
+                };
+                spans.push(Span::styled(shown.to_string(), style));
             }
+            let info = format!(
+                "  {:2} P{} R{}{}{}",
+                trk.length,
+                trk.pulses,
+                trk.rotation,
+                if trk.mode == TrackMode::Modulation { " ⌁" } else { "" },
+                if trk.muted { " M" } else { "" },
+            );
+            spans.push(Span::styled(info, if is_cur { row_style } else { theme::dim() }));
+            lines.push(Line::from(spans));
         }
 
-        let len = state.track().length;
-        let play_str = if state.playing { "▶" } else { "■" };
-        let cstep = state.current_steps[state.current_track];
-        
-        let step_width = area.width as usize / len;
-        let step_width = step_width.clamp(3, 10);
-        
-        for i in 0..len {
-            let step = &state.track().steps[i];
-            let is_current = i == cstep;
-            let is_selected = i == state.selected;
+        lines.push(theme::rule(w));
 
-            let x = (i * step_width) as u16;
-            let rect = Rect::new(x, chunks[1].y, step_width as u16, 3);
-
-            let in_visual = (mode == "visual")
+        // ── detail strip: current track, three rows ─────────────────────
+        let trk = state.track();
+        let cell = 5usize; // chars per step column
+        let visible = (w / cell).max(1).min(trk.length);
+        // window scrolls to keep the selected step in view
+        let first = state.selected.saturating_sub(visible.saturating_sub(1));
+        let in_visual = |i: usize| {
+            mode == "visual"
                 && state.visual_anchor.is_some_and(|a| {
                     let (lo, hi) = (a.min(state.selected), a.max(state.selected));
                     i >= lo && i <= hi
-                });
-            let (bg, fg, marker) = if is_current && is_selected {
-                (Color::Yellow, Color::Black, "▶")
-            } else if is_current {
-                (Color::Green, Color::Black, "▶")
-            } else if is_selected {
-                (Color::Blue, Color::White, "*")
-            } else if in_visual {
-                (Color::Magenta, Color::White, " ")
-            } else if step.active {
-                (Color::DarkGray, Color::White, " ")
+                })
+        };
+
+        let mut nums: Vec<Span> = Vec::new();
+        let mut vals: Vec<Span> = Vec::new();
+        let mut vels: Vec<Span> = Vec::new();
+        for i in first..(first + visible).min(trk.length) {
+            let step = &trk.steps[i];
+            let sel = i == state.selected;
+            let num_style = if sel {
+                theme::selected()
+            } else if i == cstep && state.playing {
+                theme::signal(theme::clock())
             } else {
-                (Color::Reset, Color::DarkGray, " ")
+                theme::dim()
             };
+            nums.push(Span::styled(format!("{:^cell$}", format!("{:02}", i + 1)), num_style));
 
-            let third_line = match state.track().mode {
-                state::TrackMode::Note => midi_note_name(step.note),
-                state::TrackMode::Modulation => format!("{:+.2}", step.mod_value),
+            let val = match trk.mode {
+                TrackMode::Note => {
+                    if step.active {
+                        midi_note_name(step.note)
+                    } else {
+                        String::from("·")
+                    }
+                }
+                TrackMode::Modulation => format!("{:+.2}", step.mod_value),
             };
-            let step_text = format!(
-                "{}{}\n{}\n{}",
-                marker,
-                i,
-                if step.active { "●" } else { "○" },
-                third_line,
-            );
+            let val_style = if sel {
+                theme::selected()
+            } else if in_visual(i) {
+                theme::flash(theme::cv())
+            } else if step.active {
+                theme::signal(match trk.mode {
+                    TrackMode::Note => theme::note(),
+                    TrackMode::Modulation => theme::cv(),
+                })
+            } else {
+                theme::dim()
+            };
+            vals.push(Span::styled(format!("{:^cell$}", val), val_style));
 
-            let step_widget = Paragraph::new(step_text)
-                .style(Style::default().fg(fg).bg(bg))
-                .block(Block::default().borders(Borders::NONE));
-            f.render_widget(step_widget, rect);
+            let vel = if step.active && trk.mode == TrackMode::Note {
+                theme::meter_char(step.velocity as f32 / 127.0).to_string()
+            } else {
+                String::from("·")
+            };
+            vels.push(Span::styled(
+                format!("{:^cell$}", vel),
+                if step.active { theme::signal(theme::note()) } else { theme::dim() },
+            ));
         }
+        lines.push(Line::from(nums));
+        lines.push(Line::from(vals));
+        lines.push(Line::from(vels));
 
-        let sel_step = &state.track().steps[state.selected];
-        let note_info = match state.track().mode {
-            state::TrackMode::Note => format!(
-                "Step {}: {} | Note: {} ({}) | Vel: {} | {}",
-                state.selected,
-                if sel_step.active { "ON" } else { "OFF" },
-                sel_step.note,
-                midi_note_name(sel_step.note),
-                sel_step.velocity,
-                if !input_buffer.is_empty() { format!("Input: {}", input_buffer) } else { String::new() }
-            ),
-            state::TrackMode::Modulation => format!(
-                "Step {}: {} | Value: {:+.2} | {}",
-                state.selected,
-                if sel_step.active { "ON" } else { "OFF" },
-                sel_step.mod_value,
-                if !input_buffer.is_empty() { format!("Input: {}", input_buffer) } else { String::new() }
-            ),
-        };
-        let note_widget = Paragraph::new(note_info)
-            .style(Style::default().fg(Color::Yellow));
-        f.render_widget(note_widget, chunks[2]);
+        lines.push(theme::rule(w));
 
-        // Bottom status bar
+        // ── status ──────────────────────────────────────────────────────
         let mode_label = match mode {
-            "insert" if !submode.is_empty() => format!(" INSERT[{}] ", submode),
-            "insert" => String::from(" INSERT "),
-            "visual" => String::from(" VISUAL "),
-            "visual_line" => String::from(" V-LINE "),
-            _ => String::from(" NORMAL "),
+            "insert" if !submode.is_empty() => format!("INSERT[{}:{}]", submode, input_buffer),
+            "insert" => String::from("INSERT"),
+            "visual" => String::from("VISUAL"),
+            "visual_line" => String::from("V-LINE"),
+            _ => String::from("NORMAL"),
         };
-        let mode_str = match state.track().mode {
-            state::TrackMode::Note => "NOTE",
-            state::TrackMode::Modulation => "MOD",
-        };
-        let mut status_parts = vec![
-            mode_label,
-            format!("T{}/{}", state.current_track + 1, state.tracks.len()),
-            mode_str.to_string(),
-            format!("{} {} BPM", play_str, state.bpm as u32),
-            format!("Step {}/{}", cstep, len),
-            format!("Sel {}", state.selected),
-            format!("P:{} L:{} R:{}", state.track().pulses, len, state.track().rotation),
-        ];
-        if let Some(ref count) = pending_count {
-            status_parts.push(format!("Count:{}", count));
+        let mut msg_parts: Vec<String> = Vec::new();
+        if let Some(c) = pending_count {
+            msg_parts.push(format!("{}…", c));
         }
         if let Some(p) = pending {
-            status_parts.push(p.to_string());
+            msg_parts.push(p.to_string());
         }
-        if !submode.is_empty() {
-            status_parts.push(format!("{}:{}", submode.to_uppercase(), input_buffer));
+        if let Some(t) = gt_target {
+            msg_parts.push(format!("gt{}:{}", t, gt_input));
         }
-        if let Some(ref target) = gt_target {
-            status_parts.push(format!("gt{}:{}", target, gt_input));
+        if let Some(m) = undo_msg {
+            msg_parts.push(m.clone());
         }
-        if let Some(ref msg) = undo_msg {
-            status_parts.push(msg.clone());
-        }
-        let status = status_parts.join(" | ");
-        let status_style = if mode == "insert" {
-            Style::default().fg(Color::Green).bg(Color::Black)
-        } else {
-            Style::default().fg(Color::Cyan).bg(Color::Black)
-        };
-        let status_widget = Paragraph::new(status).style(status_style);
-        f.render_widget(status_widget, chunks[4]);
+        let msg = msg_parts.join(theme::SEP);
+        lines.push(theme::status(&mode_label, &msg, "", w));
 
+        f.render_widget(Paragraph::new(lines), area);
+
+        // ── help overlay ────────────────────────────────────────────────
         if show_help {
-            let help_text = vec![
-                Line::from("━━━ Sequencer Help ━━━"),
-                Line::from(""),
-                Line::from("Motions (word = run of active steps):"),
-                Line::from("  h/l        Step left/right (counts: 5l)"),
-                Line::from("  w / b / e  Word fwd / back / end"),
-                Line::from("  0 / $      First / last step"),
-                Line::from("  f# / t#    To / till step #"),
-                Line::from("  j/k, [/]   Track down/up (counts)"),
-                Line::from("  gg / G     First / last track"),
-                Line::from("  gt#        Go to track #"),
-                Line::from(""),
-                Line::from("Operators (normal/visual): y d c"),
-                Line::from("  y{motion}  Yank steps (yw, ye, yt8, y$)"),
-                Line::from("  d{motion}  Delete steps  c = delete + insert"),
-                Line::from("  yy/dd/cc   Whole track (yank/delete/clear)"),
-                Line::from(""),
-                Line::from("Normal mode:"),
-                Line::from("  Enter/i    Insert mode   v/V visual/line"),
-                Line::from("  x          Cut step    ~ toggle step"),
-                Line::from("  p / P      Paste after / before (#p = N times)"),
-                Line::from("  .          Repeat last change"),
-                Line::from("  o/O (n)    New track after/before"),
-                Line::from("  >>/<<      Rotate pattern right/left"),
-                Line::from("  m / @      Mute / track mode"),
-                Line::from("  space / s  Play-pause / stop (global)"),
-                Line::from("  u, ^r      Undo, redo (counts)"),
-                Line::from("  :w/:e/:q   Patch save/load, quit (:x save+quit)"),
-                Line::from("  :set bpm N BPM (also pulses/length/rotation)"),
-                Line::from(""),
-                Line::from("Insert mode (Esc returns):"),
-                Line::from("  Enter/space Toggle step    x/y/p step edit"),
-                Line::from("  k/K j/J    Note +-semitone/octave (counts)"),
-                Line::from("  N<NUM>     Set note (e.g. N60)"),
-                Line::from("  #P/#L/#R   Euclid pulses/length/rotation"),
-                Line::from("  P/L/R      Re-apply / re-apply / rotate+1"),
-                Line::from(""),
-                Line::from("  ?          Toggle this help"),
-                Line::from("  Close pane: tmux prefix + x"),
-            ];
+            let help_text = sequencer_help();
             let help = Paragraph::new(help_text)
-                .style(Style::default().fg(Color::White).bg(Color::Black))
+                .style(Style::default().fg(theme::ink()).bg(theme::bg()))
                 .block(Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Cyan))
-                    .title("Help"));
+                    .border_style(theme::chrome())
+                    .title(Span::styled(" SEQ ", theme::chrome_hi())));
             f.render_widget(help, area);
         }
     })?;
 
     Ok(())
+}
+
+fn sequencer_help() -> Vec<Line<'static>> {
+    vec![
+        Line::from("━━━ SEQ ━━━"),
+        Line::from(""),
+        Line::from("Motions (word = run of active steps):"),
+        Line::from("  h/l        Step left/right (counts: 5l)"),
+        Line::from("  w / b / e  Word fwd / back / end"),
+        Line::from("  0 / $      First / last step"),
+        Line::from("  f# / t#    To / till step #"),
+        Line::from("  j/k, [/]   Track down/up (counts)"),
+        Line::from("  gg/G, gt#  First / last / go to track"),
+        Line::from(""),
+        Line::from("Operators (normal/visual): y d c"),
+        Line::from("  y/d/c{motion}; yy/dd/cc whole track"),
+        Line::from(""),
+        Line::from("Normal: Enter/i insert · v/V visual"),
+        Line::from("  x cut  ~ toggle  p/P paste (#p ×N)"),
+        Line::from("  . repeat · o/O new track · >>/<< rotate"),
+        Line::from("  m mute · @ track mode · space/s transport"),
+        Line::from("  u/^r undo/redo (counts)"),
+        Line::from("  :w/:e/:q patches · :set bpm/pulses/…"),
+        Line::from(""),
+        Line::from("Insert: Enter/space toggle · x/y/p step"),
+        Line::from("  k/K j/J note ±st/oct · N<n> set note"),
+        Line::from("  #P/#L/#R euclid · P/L/R re-apply/rotate"),
+        Line::from(""),
+        Line::from("  ? closes help"),
+    ]
+}
+
+/// Wake position: Some(0..=2) when `i` trails the playhead by 1–3 steps.
+fn wake_offset(i: usize, head: usize, len: usize) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    let behind = (head + len - i) % len;
+    if (1..=3).contains(&behind) {
+        Some(behind - 1)
+    } else {
+        None
+    }
 }
 
 fn snapshot_params(s: &SequencerState) -> state::SequencerParams {
@@ -2940,5 +2946,15 @@ mod tests {
         s.focus(9, Some(20));
         assert_eq!(s.current_track, 1, "track clamps to last");
         assert_eq!(s.selected, 7, "step clamps to track length");
+    }
+
+    #[test]
+    fn wake_trails_the_playhead_and_wraps() {
+        assert_eq!(wake_offset(8, 9, 16), Some(0), "one behind");
+        assert_eq!(wake_offset(7, 9, 16), Some(1));
+        assert_eq!(wake_offset(6, 9, 16), Some(2));
+        assert_eq!(wake_offset(5, 9, 16), None, "wake is 3 cells");
+        assert_eq!(wake_offset(9, 9, 16), None, "the head is not its own wake");
+        assert_eq!(wake_offset(15, 1, 16), Some(1), "wraps across the bar line");
     }
 }

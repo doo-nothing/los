@@ -187,7 +187,7 @@ fn install_transport_keys(exe: &str) {
 }
 
 /// Module types the conductor (and `los add`) can spawn at runtime.
-pub const ADDABLE_MODULES: &[&str] = &["voice", "envelope", "sequencer", "scope", "tone"];
+pub const ADDABLE_MODULES: &[&str] = &["voice", "envelope", "sequencer", "scope", "tone", "badge"];
 
 /// Spawn a new module instance in a fresh pane of the modules window.
 /// Picks the next free instance number from the manifest when not given.
@@ -247,6 +247,23 @@ pub fn remove_module(module: &str, instance: usize) -> Result<()> {
     anyhow::bail!("no pane titled '{}' found", title)
 }
 
+/// Theme the tmux shell itself (design-language.md §8): dim ink borders,
+/// amber active edge, brand-voice status bar. Session-scoped options only —
+/// other tmux sessions keep their look.
+fn install_shell_theme() {
+    let t = |args: &[&str]| tmux_cmd_ok(args);
+    t(&["set-option", "-t", "los", "pane-border-style", "fg=#4a4438,bg=#0d0b08"]);
+    t(&["set-option", "-t", "los", "pane-active-border-style", "fg=#e3a818,bg=#0d0b08"]);
+    t(&["set-option", "-t", "los", "pane-border-format", " #{pane_title} "]);
+    t(&["set-option", "-t", "los", "status-style", "fg=#9a7b2d,bg=#0d0b08"]);
+    t(&["set-option", "-t", "los", "status-left", "#[fg=#e3a818,bold] los #[fg=#9a7b2d]· "]);
+    t(&["set-option", "-t", "los", "status-right", "#[fg=#c45dd4]♪ #{session_name} "]);
+    t(&["set-option", "-t", "los", "window-status-current-style", "fg=#e8dcc8,bold"]);
+    t(&["set-option", "-t", "los", "window-status-style", "fg=#7d7363"]);
+    t(&["set-window-option", "-t", "los:modules", "window-style", "bg=#0d0b08"]);
+    t(&["set-window-option", "-t", "los:modules", "window-active-style", "bg=#0d0b08"]);
+}
+
 pub fn create_session() -> Result<()> {
     state::ensure_dirs()?;
     let _ = tmux_cmd(&["kill-session", "-t", "los"]);
@@ -263,11 +280,12 @@ pub fn create_session() -> Result<()> {
     
     // Spawn module panes (each with instance 0 by default)
     let modules = [
-        ("sequencer 0", "Sequencer 0"),
-        ("voice 0", "Voice 0"),
-        ("mixer 0", "Mixer 0"),
-        ("scope 0", "Scope 0"),
-        ("envelope 0", "Envelope 0"),
+        ("sequencer 0", "SEQ"),
+        ("voice 0", "VOICE"),
+        ("mixer 0", "MIX"),
+        ("scope 0", "SCOPE"),
+        ("envelope 0", "MATHs"),
+        ("badge 0", "los"),
     ];
     spawn_session_panes(&modules)?;
 
@@ -275,6 +293,7 @@ pub fn create_session() -> Result<()> {
     tmux_cmd(&["select-layout", "-t", "los:modules", "tiled"])?;
 
     install_transport_keys(&exe);
+    install_shell_theme();
 
     // Attach (blocks until detached; use raw .status())
     let _ = Command::new("tmux")
@@ -370,6 +389,7 @@ pub fn load_session(state_path: &str) -> Result<()> {
     }
 
     install_transport_keys(&exe);
+    install_shell_theme();
 
     let _ = Command::new("tmux")
         .args(["attach-session", "-t", "los"])

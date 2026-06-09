@@ -332,7 +332,8 @@ impl AudioRingbuf {
 ///   [0..8)    clock       : u64  — total samples consumed (mixer writes, voices read)
 ///   [8..12)   sample_rate : u32  — sample rate in Hz
 ///   [12..16)  flags       : u32  — bit 0 = playing
-///   [16..32)  reserved
+///   [16..20)  bpm         : f32  — published by the sequencer (0 = unset)
+///   [20..32)  reserved
 pub struct ShmTransport {
     ptr: *mut u8,
     fd: i32,
@@ -475,6 +476,17 @@ impl ShmTransport {
         let new = !self.playing();
         self.set_playing(new);
         new
+    }
+
+    /// Session BPM, published by the sequencer (offset 16; 0 = unset → 120).
+    pub fn bpm(&self) -> f32 {
+        let v: f32 = unsafe { ptr::read_unaligned(self.ptr.add(16) as *const f32) };
+        if v > 0.0 { v } else { 120.0 }
+    }
+
+    pub fn set_bpm(&mut self, bpm: f32) {
+        compiler_fence(Ordering::Release);
+        unsafe { ptr::write_unaligned(self.ptr.add(16) as *mut f32, bpm) };
     }
 
     pub fn add_clock_frames(&mut self, frames: u64) {

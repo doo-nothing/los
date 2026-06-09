@@ -1,3 +1,4 @@
+pub mod badge;
 pub mod conductor;
 pub mod envelope;
 pub mod excmd;
@@ -10,6 +11,7 @@ pub mod scope;
 pub mod sequencer;
 pub mod shm;
 pub mod state;
+pub mod theme;
 pub mod tmux;
 pub mod tone;
 pub mod undo;
