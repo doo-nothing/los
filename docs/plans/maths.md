@@ -1,5 +1,22 @@
 # Maths — Make Noise–grade Function Generator
 
+**Status: ✅ M1+M2+M3 implemented · ✅ pluck/LPG pass**
+
+### Pluck & LPG addendum (Natural Gates-inspired)
+- **Zero times**: rise/fall params at 0 are literally instant (the 0.5ms
+  floor was hardware-spec, not a digital constraint). `:set rise 0`.
+- **Vari-Response τ widened to ±9** (hardware-plus): full-exp keeps the
+  curve under 2% through half the segment — extreme staccato spikes.
+- **Pluck (per channel)**: double-exponential vactrol decay — a fast snap
+  component (τ ≈ 0.1·fall) dropping ~10dB, then a ring component
+  (τ up to 4.8·fall, weight up to 0.35) — the "vactrol memory" tail.
+  Reference: the Natural Gates module's digital vactrol model.
+- **Voice LPG row**: since we have no analog LPG, the voice grew one — a
+  one-pole lowpass whose cutoff tracks the amp envelope (25Hz–12kHz,
+  exponential), VCA leaning on the filter (√level) like a vactrol gate.
+  Plus per-sample amplitude smoothing (~0.7ms) so block-rate envelope
+  updates don't zipper on fast edges.
+
 **Status: ✅ M1+M2+M3 implemented** (one pass, per interview). Decisions:
 superset (all channels full generators + offsets, up to 6, `a`/`x`
 add/remove), Maths-style panel UI, audio output included. Also fixed: the

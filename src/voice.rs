@@ -42,6 +42,10 @@ struct VoiceState {
     amp_src: Option<SourceAddr>,
     /// Which sequencer track's notes this voice plays. None = all tracks.
     notes_src: Option<SourceAddr>,
+    /// Low-pass-gate amount (0 = plain VCA, 1 = full vactrol-style LPG:
+    /// the amp envelope closes a one-pole filter as it closes the gate, so
+    /// amplitude and brightness fall together — the pluck sound).
+    lpg: f32,
 }
 
 impl Default for VoiceState {
@@ -61,6 +65,7 @@ impl Default for VoiceState {
             level_src: None,
             amp_src: SourceAddr::parse("envelope/0/ch1"),
             notes_src: None,
+            lpg: 0.0,
         }
     }
 }
@@ -86,6 +91,10 @@ fn voice_thread(
 
     let mut phase = 0.0f64;
     let mut sub_phase = 0.0f64;
+    // per-sample smoothed amplitude (kills block-rate zipper on fast
+    // envelopes) and the LPG one-pole filter state
+    let mut level_smooth = 0.0f32;
+    let mut lp_state = 0.0f32;
 
     let sample_rate = 48000.0;
     let block_size = 64;
@@ -159,6 +168,8 @@ fn voice_thread(
         // on session load or when the sequencer hasn't started yet.
         let velocity = if s.gate && s.velocity < 0.001 { 1.0 } else { s.velocity };
 
+        let lpg = s.lpg;
+
         let chan_val = |ch: Option<usize>| -> Option<f32> {
             ch.and_then(|c| modbus.as_ref().map(|m| m.get(c)))
         };
@@ -206,7 +217,23 @@ fn voice_thread(
                 _ => main * (1.0 - sub_mix) + sub * sub_mix * 0.5,
             };
 
-            let output = sample * level * 0.5;
+            // ~0.7ms amplitude smoothing: the amp source updates at block
+            // rate; without this, fast envelope edges arrive as steps
+            level_smooth += (level - level_smooth) * 0.1;
+
+            let output = if lpg > 0.0 {
+                // Low-pass gate: cutoff tracks the (smoothed) amp level —
+                // 25Hz closed to ~12kHz open — and the VCA leans on the
+                // filter (gain ~ sqrt(level)) like a vactrol LPG.
+                let fc = lpg_cutoff(level_smooth);
+                let g = 1.0 - (-2.0 * std::f32::consts::PI * fc / 48000.0).exp();
+                lp_state += (sample - lp_state) * g;
+                let plain = sample * level_smooth;
+                let gated = lp_state * level_smooth.max(0.0).sqrt();
+                (plain + (gated - plain) * lpg) * 0.5
+            } else {
+                sample * level_smooth * 0.5
+            };
             block[i * 2] = output;
             block[i * 2 + 1] = output;
 
@@ -256,6 +283,7 @@ fn draw_ui(
                 Constraint::Length(1),  // Output
                 Constraint::Length(1),  // Amp binding
                 Constraint::Length(1),  // Notes binding
+                Constraint::Length(1),  // LPG amount
                 Constraint::Length(1),  // Level meter
                 Constraint::Min(0),
                 Constraint::Length(1),  // Status
@@ -274,7 +302,7 @@ fn draw_ui(
             state.level * 100.0
         );
         let status_widget = Paragraph::new(status).style(Style::default().fg(Color::Cyan));
-        f.render_widget(status_widget, chunks[8]);
+        f.render_widget(status_widget, chunks[9]);
 
         // Parameters (gauges show the @source when bound)
         let src_label = |a: &Option<SourceAddr>| -> String {
@@ -316,6 +344,14 @@ fn draw_ui(
         let notes_style = if selected == 5 { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::White) };
         f.render_widget(Paragraph::new(notes_text).style(notes_style), chunks[5]);
 
+        // LPG amount (0 = plain VCA, 1 = vactrol-style low-pass gate)
+        let lpg_style = if selected == 6 { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::White) };
+        let lpg_gauge = Gauge::default()
+            .gauge_style(lpg_style)
+            .ratio(state.lpg as f64)
+            .label(format!("LPG: {:.2}{}", state.lpg, if state.lpg > 0.0 { " (vactrol)" } else { "" }));
+        f.render_widget(lpg_gauge, chunks[6]);
+
         // Output mode
         let output_style = if selected == 3 {
             Style::default().fg(Color::Yellow)
@@ -336,7 +372,7 @@ fn draw_ui(
             .gauge_style(Style::default().fg(Color::Green))
             .ratio(state.level as f64)
             .label(format!("Level: {:.0}%", state.level * 100.0));
-        f.render_widget(level_gauge, chunks[6]);
+        f.render_widget(level_gauge, chunks[7]);
 
         // Help overlay
         if show_help {
@@ -351,6 +387,8 @@ fn draw_ui(
                 Line::from("  gg / G     First / last param"),
                 Line::from(""),
                 Line::from("Output row: Main / Main+Sub / Mix"),
+                Line::from("LPG row:    0=VCA, 1=vactrol low-pass gate"),
+                Line::from("            (amp env closes the filter too)"),
                 Line::from(""),
                 Line::from("Routing:"),
                 Line::from("  @          Bind selected param to a source (picker)"),
@@ -416,6 +454,12 @@ fn draw_ui(
     Ok(())
 }
 
+/// LPG cutoff tracking: amp level 0..1 → 25Hz (closed) to ~12kHz (open),
+/// exponential like a vactrol's resistance curve.
+fn lpg_cutoff(level: f32) -> f32 {
+    25.0 * (480.0f32).powf(level.clamp(0.0, 1.0))
+}
+
 fn snapshot_params(s: &VoiceState) -> state::VoiceParams {
     state::VoiceParams {
         format: state::STATE_FORMAT,
@@ -433,6 +477,7 @@ fn snapshot_params(s: &VoiceState) -> state::VoiceParams {
         level_src: s.level_src.as_ref().map(|a| a.to_string()),
         amp_src: s.amp_src.as_ref().map(|a| a.to_string()),
         notes_src: s.notes_src.as_ref().map(|a| a.to_string()),
+        lpg: Some(s.lpg),
     }
 }
 
@@ -445,6 +490,7 @@ fn apply_params(s: &mut VoiceState, params: &state::VoiceParams) {
     if let Some(v) = params.gate { s.gate = v; }
     if let Some(v) = params.level { s.level = v; }
     if let Some(v) = params.velocity { s.velocity = v; }
+    if let Some(v) = params.lpg { s.lpg = v; }
     // Binding fields only exist in format-2 files. An old file simply lacks
     // them — keep the defaults (e.g. amp -> envelope/0/ch1) rather than
     // unbinding everything.
@@ -493,6 +539,7 @@ impl crate::undo::ParamUndo for VoiceState {
             1 => Some(V::F32(self.sub)),
             2 => Some(V::F32(self.fm)),
             3 => Some(V::U8(self.output)),
+            6 => Some(V::F32(self.lpg)),
             s if s >= BIND_SLOT => row_binding(self, s - BIND_SLOT)
                 .map(|b| V::Src(b.as_ref().map(|a| a.to_string()))),
             _ => None,
@@ -506,6 +553,7 @@ impl crate::undo::ParamUndo for VoiceState {
             (1, V::F32(v)) => self.sub = v,
             (2, V::F32(v)) => self.fm = v,
             (3, V::U8(v)) => self.output = v,
+            (6, V::F32(v)) => self.lpg = v,
             (s, V::Src(a)) if s >= BIND_SLOT => {
                 set_row_binding(self, s - BIND_SLOT, a.as_deref().and_then(SourceAddr::parse));
             }
@@ -514,7 +562,7 @@ impl crate::undo::ParamUndo for VoiceState {
     }
 }
 
-const NUM_ROWS: usize = 6; // shape, sub, fm, output, amp, notes
+const NUM_ROWS: usize = 7; // shape, sub, fm, output, amp, notes, lpg
 
 /// Adjust a param row by `steps` (doctrine: h/l fine, H/L coarse ×10).
 fn adjust(s: &mut VoiceState, row: usize, steps: i32, coarse: bool) {
@@ -524,6 +572,7 @@ fn adjust(s: &mut VoiceState, row: usize, steps: i32, coarse: bool) {
         1 => s.sub = step_f32(s.sub, steps, 0.05, coarse, 0.0, 1.0),
         2 => s.fm = step_f32(s.fm, steps, 0.05, coarse, 0.0, 1.0),
         3 => s.output = cycle(s.output as usize, steps, 3) as u8,
+        6 => s.lpg = step_f32(s.lpg, steps, 0.05, coarse, 0.0, 1.0),
         _ => {}
     }
 }
@@ -827,5 +876,28 @@ mod tests {
         };
         apply_params(&mut s, &p);
         assert!(s.amp_src.is_none(), "format-2 file with no amp_src = unbound");
+    }
+
+    #[test]
+    fn lpg_cutoff_tracks_level_exponentially() {
+        assert!((lpg_cutoff(0.0) - 25.0).abs() < 0.1, "closed = 25Hz");
+        assert!(lpg_cutoff(1.0) > 11_000.0, "open = ~12kHz");
+        assert!(lpg_cutoff(0.5) > 400.0 && lpg_cutoff(0.5) < 700.0, "midpoint is midrange");
+        assert!(lpg_cutoff(0.6) > lpg_cutoff(0.4), "monotonic");
+    }
+
+    #[test]
+    fn lpg_row_adjusts_and_clamps() {
+        let mut s = VoiceState::default();
+        assert_eq!(s.lpg, 0.0, "LPG defaults off");
+        adjust(&mut s, 6, 4, false);
+        assert!((s.lpg - 0.2).abs() < 1e-6);
+        adjust(&mut s, 6, 100, true);
+        assert_eq!(s.lpg, 1.0);
+        // persists through params
+        let snap = snapshot_params(&s);
+        let mut back = VoiceState::default();
+        apply_params(&mut back, &snap);
+        assert_eq!(back.lpg, 1.0);
     }
 }

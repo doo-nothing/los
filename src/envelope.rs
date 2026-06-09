@@ -55,11 +55,14 @@ struct EnvelopeChannel {
     stage: Stage,
     phase: f32,
     output: f32,
+    // vactrol model components (pluck mode)
+    pluck_fast: f32,
+    pluck_slow: f32,
 }
 
 impl Default for EnvelopeChannel {
     fn default() -> Self {
-        Self { stage: Stage::Off, phase: 0.0, output: 0.0 }
+        Self { stage: Stage::Off, phase: 0.0, output: 0.0, pluck_fast: 0.0, pluck_slow: 0.0 }
     }
 }
 
@@ -100,6 +103,10 @@ struct ChannelParams {
     loop_mode: bool,
     attenuverter: f32, // -1.0 to 1.0
     offset: f32,       // -1.0 to 1.0, post-attenuverter DC offset
+    /// Vactrol-style nonlinear fall (0 = vari-response fall, 1 = full
+    /// Natural Gates tail). Decay becomes level-dependent: fast while hot,
+    /// slowing as it cools.
+    pluck: f32,
     // Receiver-side bindings (routing.rs source addresses).
     trigger: Trigger,
     /// When bound, the channel stops generating and slews this source
@@ -120,6 +127,7 @@ impl Default for ChannelParams {
             loop_mode: false,
             attenuverter: 1.0,
             offset: 0.0,
+            pluck: 0.0,
             trigger: Trigger::Any,
             signal_src: None,
             rise_src: None,
@@ -136,9 +144,15 @@ impl Default for ChannelParams {
 const TIME_MIN: f32 = 0.0005;
 const TIME_RANGE: f32 = 3_000_000.0; // TIME_MIN * RANGE = 1500s = 25min
 
-/// Exponential parameter → seconds. 0.0 → 0.5ms, ~0.42 → 100ms, 1.0 → 25min.
+/// Exponential parameter → seconds. 0.0 → instant (0s), then 0.5ms at the
+/// first step up to 25min. Zero-attack envelopes are essential for plucks.
 fn param_to_time(param: f32) -> f32 {
-    TIME_MIN * TIME_RANGE.powf(param.clamp(0.0, 1.0))
+    let p = param.clamp(0.0, 1.0);
+    if p <= 0.0 {
+        0.0
+    } else {
+        TIME_MIN * TIME_RANGE.powf(p)
+    }
 }
 
 /// Seconds → parameter (inverse of `param_to_time`).
@@ -162,11 +176,17 @@ fn parse_time_param(v: &str) -> Option<f32> {
         return (0.0..=1.0).contains(&p).then_some(p);
     };
     let t: f32 = num.trim().parse().ok()?;
+    if t == 0.0 {
+        return Some(0.0);
+    }
     (t > 0.0).then(|| time_to_param(t * mult))
 }
 
 /// Display a time with auto units.
 fn format_time(t: f32) -> String {
+    if t <= 0.0 {
+        return String::from("0 (instant)");
+    }
     if t < 0.01 {
         format!("{:.2}ms", t * 1000.0)
     } else if t < 1.0 {
@@ -181,10 +201,11 @@ fn format_time(t: f32) -> String {
 /// Maths Vari-Response: one parameter morphs the segment curve from
 /// logarithmic (RC charge — fast start, asymptotic end) through exactly
 /// linear (0.5) to exponential (slow start, accelerating end). Modeled on
-/// the analog curves: f(x) = (e^(τx) − 1) / (e^τ − 1), τ ∈ [−6, +6].
+/// the analog curves: f(x) = (e^(τx) − 1) / (e^τ − 1), τ ∈ [−9, +9] —
+/// wider than the hardware sweep for extreme staccato spike shapes.
 fn vari_response(x: f32, shape: f32) -> f32 {
     let x = x.clamp(0.0, 1.0);
-    let tau = (shape.clamp(0.0, 1.0) - 0.5) * 12.0;
+    let tau = (shape.clamp(0.0, 1.0) - 0.5) * 18.0;
     if tau.abs() < 0.01 {
         x
     } else {
@@ -201,12 +222,36 @@ fn slew_step(out: f32, target: f32, dt: f32, rise_t: f32, fall_t: f32, shape: f3
     if diff == 0.0 {
         return out;
     }
-    let time = if diff > 0.0 { rise_t } else { fall_t }.max(TIME_MIN);
+    let time = if diff > 0.0 { rise_t } else { fall_t };
+    if time <= 0.0 {
+        return target;
+    }
+    let time = time.max(TIME_MIN);
     let lin = dt / time; // full-scale per `time`
     let rc = (dt / (time * 0.2)) * diff.abs(); // τ ≈ time/5
     let rc_weight = ((0.5 - shape.clamp(0.0, 1.0)) * 2.0).max(0.0);
     let step = (lin + (rc - lin) * rc_weight).min(diff.abs());
     out + diff.signum() * step
+}
+
+/// One sample of vactrol-style decay (Natural Gates-inspired).
+///
+/// A struck vactrol doesn't decay on one time constant: it snaps quickly
+/// through the first ~10 dB, then *rings out* on a much slower constant
+/// ("vactrol memory"). We model two exponentially decaying components mixed
+/// by the pluck amount: τ_fast = 0.1·fall (the snap, dropping ~10dB before
+/// the ring takes over), τ_slow growing from 0.8·fall to 4.8·fall (the
+/// ring), with the slow component's weight rising 0.1 → 0.35 as pluck
+/// increases. Returns (fast, slow, output).
+fn pluck_decay(fast: f32, slow: f32, dt: f32, fall_time: f32, pluck: f32) -> (f32, f32, f32) {
+    let p = pluck.clamp(0.0, 1.0);
+    let tf = (fall_time * 0.1).max(TIME_MIN);
+    let ts = (fall_time * (0.8 + 4.0 * p)).max(TIME_MIN);
+    let fast = (fast - dt * fast / tf).max(0.0);
+    let slow = (slow - dt * slow / ts).max(0.0);
+    let w = 0.1 + 0.25 * p;
+    let out = (1.0 - w) * fast + w * slow;
+    (fast, slow, out)
 }
 
 #[derive(Clone)]
@@ -261,13 +306,14 @@ fn remove_channel(s: &mut EnvelopeState) -> bool {
 
 // ── rows / undo ─────────────────────────────────────────────────────────────
 
-// Rows: 0 rise, 1 fall, 2 shape, 3 atten, 4 offset, 5 signal, 6 trigger.
-const NUM_ROWS: usize = 7;
-const ROW_SIGNAL: usize = 5;
-const ROW_TRIGGER: usize = 6;
+// Rows: 0 rise, 1 fall, 2 shape, 3 atten, 4 offset, 5 pluck, 6 signal, 7 trigger.
+const NUM_ROWS: usize = 8;
+const ROW_PLUCK: usize = 5;
+const ROW_SIGNAL: usize = 6;
+const ROW_TRIGGER: usize = 7;
 
-/// Undo slots: ch*32 + row for values (0–4) and loop (5); ch*32 + 8 + n for
-/// the six bindings (rise/fall/shape/atten/signal/trigger).
+/// Undo slots: ch*32 + row for values (0–4), loop (5), pluck (6);
+/// ch*32 + 8 + n for the six bindings (rise/fall/shape/atten/signal/trigger).
 const CH_SLOT_STRIDE: usize = 32;
 const BIND_OFF: usize = 8;
 
@@ -283,6 +329,7 @@ impl crate::undo::ParamUndo for EnvelopeState {
             3 => Some(V::F32(p.attenuverter)),
             4 => Some(V::F32(p.offset)),
             5 => Some(V::Bool(p.loop_mode)),
+            6 => Some(V::F32(p.pluck)),
             r if (BIND_OFF..BIND_OFF + 6).contains(&r) => {
                 let b = match r - BIND_OFF {
                     0 => p.rise_src.as_ref().map(|a| a.to_string()),
@@ -309,6 +356,7 @@ impl crate::undo::ParamUndo for EnvelopeState {
             (3, V::F32(v)) => p.attenuverter = v,
             (4, V::F32(v)) => p.offset = v,
             (5, V::Bool(v)) => p.loop_mode = v,
+            (6, V::F32(v)) => p.pluck = v,
             (r, V::Src(a)) if (BIND_OFF..BIND_OFF + 6).contains(&r) => {
                 if r - BIND_OFF == 5 {
                     p.trigger = Trigger::from_param(a.as_deref());
@@ -332,6 +380,7 @@ impl crate::undo::ParamUndo for EnvelopeState {
 fn row_slot(ch: usize, row: usize) -> usize {
     match row {
         0..=4 => ch * CH_SLOT_STRIDE + row,
+        ROW_PLUCK => ch * CH_SLOT_STRIDE + 6,
         ROW_SIGNAL => ch * CH_SLOT_STRIDE + BIND_OFF + 4,
         _ => ch * CH_SLOT_STRIDE + BIND_OFF + 5,
     }
@@ -348,6 +397,7 @@ fn adjust(s: &mut EnvelopeState, row: usize, steps: i32, coarse: bool) {
         2 => p.shape_param = step_f32(p.shape_param, steps, 0.005, coarse, 0.0, 1.0),
         3 => p.attenuverter = step_f32(p.attenuverter, steps, 0.05, coarse, -1.0, 1.0),
         4 => p.offset = step_f32(p.offset, steps, 0.05, coarse, -1.0, 1.0),
+        ROW_PLUCK => p.pluck = step_f32(p.pluck, steps, 0.05, coarse, 0.0, 1.0),
         _ => {} // signal/trigger rows are binding-only (@ opens the picker)
     }
 }
@@ -364,6 +414,7 @@ fn snapshot_params(s: &EnvelopeState) -> state::EnvelopeParams {
             loop_mode: p.loop_mode,
             attenuverter: p.attenuverter,
             offset: p.offset,
+            pluck: p.pluck,
             signal_src: p.signal_src.as_ref().map(|a| a.to_string()),
             trigger_src: p.trigger.to_param(),
             rise_src: p.rise_src.as_ref().map(|a| a.to_string()),
@@ -397,6 +448,7 @@ fn apply_params(s: &mut EnvelopeState, params: &state::EnvelopeParams) {
         s.params[i].attenuverter = ch.attenuverter;
         if params.format >= state::STATE_FORMAT {
             s.params[i].offset = ch.offset;
+            s.params[i].pluck = ch.pluck;
             s.params[i].signal_src = ch.signal_src.as_deref().and_then(SourceAddr::parse);
             s.params[i].trigger = Trigger::from_param(ch.trigger_src.as_deref());
             s.params[i].rise_src = ch.rise_src.as_deref().and_then(SourceAddr::parse);
@@ -586,7 +638,11 @@ fn env_thread(
                             }
                         }
                         Stage::Rise => {
-                            ch.phase += dt / rise_time.max(TIME_MIN);
+                            if rise_time <= 0.0 {
+                                ch.phase = 1.0;
+                            } else {
+                                ch.phase += dt / rise_time;
+                            }
                             if ch.phase >= 1.0 {
                                 ch.phase = 1.0;
                                 ch.output = 1.0;
@@ -604,8 +660,30 @@ fn env_thread(
                             ch.output = 1.0;
                         }
                         Stage::Fall => {
-                            ch.phase += dt / fall_time.max(TIME_MIN);
-                            if ch.phase >= 1.0 {
+                            let done = if params.pluck > 0.0 {
+                                // vactrol model: snap + ring; ends when the
+                                // tail decays below audibility
+                                if ch.phase == 0.0 {
+                                    ch.pluck_fast = ch.output;
+                                    ch.pluck_slow = ch.output;
+                                    ch.phase = 0.5; // initialized marker
+                                }
+                                let (f2, s2, out) =
+                                    pluck_decay(ch.pluck_fast, ch.pluck_slow, dt, fall_time, params.pluck);
+                                ch.pluck_fast = f2;
+                                ch.pluck_slow = s2;
+                                ch.output = out;
+                                out < 0.001
+                            } else if fall_time <= 0.0 {
+                                true
+                            } else {
+                                ch.phase += dt / fall_time;
+                                if ch.phase < 1.0 {
+                                    ch.output = 1.0 - vari_response(ch.phase, sp);
+                                }
+                                ch.phase >= 1.0
+                            };
+                            if done {
                                 ch.phase = 1.0;
                                 ch.output = 0.0;
                                 if i == n - 1 {
@@ -617,8 +695,6 @@ fn env_thread(
                                 } else {
                                     ch.stage = Stage::Off;
                                 }
-                            } else {
-                                ch.output = 1.0 - vari_response(ch.phase, sp);
                             }
                         }
                     }
@@ -721,7 +797,7 @@ fn draw_ui(
             .constraints(col_constraints)
             .split(chunks[0]);
 
-        let row_names = ["Rise", "Fall", "Shap", "Attn", "Offs", "Sig ", "Trig"];
+        let row_names = ["Rise", "Fall", "Shap", "Attn", "Offs", "Plck", "Sig ", "Trig"];
         for i in 0..n {
             let p = &state.params[i];
             let ch = &state.channels[i];
@@ -739,6 +815,7 @@ fn draw_ui(
                 format!("{:.2}{}", p.shape_param, bound(&p.shape_src)),
                 format!("{:+.2}{}", p.attenuverter, bound(&p.atten_src)),
                 format!("{:+.2}", p.offset),
+                format!("{:.2}", p.pluck),
                 p.signal_src.as_ref().map(|a| a.output.clone()).unwrap_or_else(|| "—".into()),
                 trig_short,
             ];
@@ -848,8 +925,9 @@ fn draw_ui(
                 Line::from("  gg / G     First / last channel"),
                 Line::from("  j/k        Select row   h/l adjust (H/L coarse)"),
                 Line::from(""),
-                Line::from("Rows: Rise, Fall (0.5ms–25min), Shape"),
-                Line::from("  (log↔lin↔exp), Atten, Offset, Sig, Trig"),
+                Line::from("Rows: Rise, Fall (0=instant…25min), Shape"),
+                Line::from("  (log↔lin↔exp), Atten, Offset, Plck"),
+                Line::from("  (vactrol tail), Sig, Trig"),
                 Line::from(""),
                 Line::from("Actions:"),
                 Line::from("  a / x      Add / remove channel"),
@@ -861,7 +939,7 @@ fn draw_ui(
                 Line::from("             offers any-note / off / sources"),
                 Line::from("             (non-note source = edge trigger)"),
                 Line::from("  u / ^r     Undo / redo (counts)"),
-                Line::from("  :set rise 100ms | 2s | 1.5m | 0.42"),
+                Line::from("  :set rise 0|100ms|2s|1.5m  (also pluck)"),
                 Line::from("  :w/:e/:q   Patch save/load, quit"),
                 Line::from(""),
                 Line::from("Outputs: ch1..ch6, sum, or, and, inv,"),
@@ -1063,6 +1141,7 @@ pub fn run(instance: usize) -> Result<()> {
                                     "shape" => v.parse().ok().map(|p: f32| (2, p.clamp(0.0, 1.0))),
                                     "atten" => v.parse().ok().map(|p: f32| (3, p.clamp(-1.0, 1.0))),
                                     "offset" => v.parse().ok().map(|p: f32| (4, p.clamp(-1.0, 1.0))),
+                                    "pluck" => v.parse().ok().map(|p: f32| (6, p.clamp(0.0, 1.0))),
                                     _ => None,
                                 };
                                 match parsed {
@@ -1245,7 +1324,7 @@ pub fn run(instance: usize) -> Result<()> {
                                     special,
                                 );
                             }
-                            4 => {} // offset has no binding
+                            4 | ROW_PLUCK => {} // offset/pluck have no binding
                             _ => {
                                 let current = match selected {
                                     0 => s.params[ch].rise_src.clone(),
@@ -1299,8 +1378,9 @@ mod tests {
     // ── engine math ─────────────────────────────────────────────────────
 
     #[test]
-    fn time_taper_spans_half_ms_to_25_min() {
-        assert!((param_to_time(0.0) - 0.0005).abs() < 1e-6);
+    fn time_taper_spans_instant_to_25_min() {
+        assert_eq!(param_to_time(0.0), 0.0, "zero attack is allowed — plucks need it");
+        assert!((param_to_time(0.001) - 0.0005).abs() < 0.0001, "first step up is ~0.5ms");
         assert!((param_to_time(1.0) - 1500.0).abs() < 1.0);
         // round trip
         for t in [0.001, 0.1, 2.5, 60.0, 900.0] {
@@ -1478,5 +1558,82 @@ mod tests {
         apply_params(&mut back, &parsed);
         assert_eq!(back.params[1].offset, -0.4);
         assert_eq!(back.params[1].signal_src.as_ref().unwrap().to_string(), "sequencer/0/t2");
+    }
+
+    #[test]
+    fn zero_times_parse_and_format() {
+        assert_eq!(parse_time_param("0").unwrap(), 0.0);
+        assert_eq!(parse_time_param("0ms").unwrap(), 0.0);
+        assert_eq!(format_time(0.0), "0 (instant)");
+    }
+
+    #[test]
+    fn vari_response_reaches_extreme_curvature() {
+        // τ ±9: at full exp the curve stays under 2% through half the
+        // segment — the staccato spike territory the hardware lives in
+        assert!(vari_response(0.5, 1.0) < 0.02, "got {}", vari_response(0.5, 1.0));
+        // and the log mirror is correspondingly explosive at the start
+        assert!(vari_response(0.05, 0.0) > 0.3, "got {}", vari_response(0.05, 0.0));
+        // mirror symmetry: f_log(x) == 1 - f_exp(1-x)
+        for x in [0.1, 0.3, 0.7] {
+            let log = vari_response(x, 0.0);
+            let exp = vari_response(1.0 - x, 1.0);
+            assert!((log - (1.0 - exp)).abs() < 1e-3, "mirror at {}", x);
+        }
+    }
+
+    #[test]
+    fn pluck_decay_snaps_then_rings() {
+        let dt = 1.0 / 48000.0;
+        let fall = 0.2; // 200ms
+        let (mut f, mut s) = (1.0f32, 1.0f32);
+        let mut out = 1.0f32;
+        let mut t = 0.0f32;
+        let mut t_half = None;
+        let mut t_done = None;
+        let mut prev = f32::MAX;
+        while t < 20.0 {
+            let (f2, s2, o) = pluck_decay(f, s, dt, fall, 1.0);
+            f = f2;
+            s = s2;
+            out = o;
+            assert!(out <= prev + 1e-6, "monotonic decay");
+            prev = out;
+            t += dt;
+            if t_half.is_none() && out < 0.5 {
+                t_half = Some(t);
+            }
+            if out < 0.01 {
+                t_done = Some(t);
+                break;
+            }
+        }
+        let t_half = t_half.expect("decays through half");
+        let t_done = t_done.expect("decays to silence");
+        // the snap: drops through 50% well inside a quarter of the fall time
+        assert!(t_half < fall * 0.25, "snap too slow: {}s", t_half);
+        // the ring: full decay takes several times the fall time
+        assert!(t_done > fall * 2.0, "tail too short: {}s", t_done);
+        let _ = out;
+    }
+
+    #[test]
+    fn pluck_zero_tail_is_much_shorter() {
+        let dt = 1.0 / 48000.0;
+        let fall = 0.2;
+        let time_to_silence = |pluck: f32| -> f32 {
+            let (mut f, mut s) = (1.0f32, 1.0f32);
+            let mut t = 0.0f32;
+            loop {
+                let (f2, s2, o) = pluck_decay(f, s, dt, fall, pluck);
+                f = f2;
+                s = s2;
+                t += dt;
+                if o < 0.01 || t > 30.0 {
+                    return t;
+                }
+            }
+        };
+        assert!(time_to_silence(1.0) > time_to_silence(0.1) * 2.0, "pluck stretches the ring");
     }
 }
