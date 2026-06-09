@@ -35,10 +35,10 @@ Module-specific keybindings work when that pane is focused.
 
 ## Project status
 
-**Phase 6 complete** — Full modular synth workstation with save/load.
+**Phase 7 complete** — Full modular synth workstation with save/load and sequencer undo/redo.
 
 - ✅ Conductor with session management TUI
-- ✅ Sequencer with 8 tracks, Euclidean rhythms, step editing
+- ✅ Sequencer with 8 tracks, Euclidean rhythms, step editing, vi-style undo/redo (`u` / `Ctrl-r`)
 - ✅ Voice (STO-style waveshaping, sub osc, FM)
 - ✅ Mixer (dynamic channels, manifest-driven discovery)
 - ✅ Scope (Braille/HalfBlock/Bars/Dots render modes)

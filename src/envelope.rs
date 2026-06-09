@@ -778,9 +778,7 @@ mod envelope_tests {
 
     #[test]
     fn envelope_rise_reaches_one() {
-        let mut ch = EnvelopeChannel::default();
-        ch.stage = Stage::Rise;
-        ch.phase = 0.0;
+        let mut ch = EnvelopeChannel { stage: Stage::Rise, phase: 0.0, ..Default::default() };
 
         let params = ChannelParams {
             rise_param: 0.0, // 1ms = very fast
@@ -817,9 +815,7 @@ mod envelope_tests {
 
     #[test]
     fn envelope_fall_reaches_zero() {
-        let mut ch = EnvelopeChannel::default();
-        ch.stage = Stage::Fall;
-        ch.phase = 0.0;
+        let mut ch = EnvelopeChannel { stage: Stage::Fall, phase: 0.0, ..Default::default() };
 
         let params = ChannelParams {
             rise_param: 0.5,
@@ -855,8 +851,7 @@ mod envelope_tests {
 
     #[test]
     fn attenuverter_inverts() {
-        let mut ch = EnvelopeChannel::default();
-        ch.output = 0.75;
+        let ch = EnvelopeChannel { output: 0.75, ..Default::default() };
         let att = -1.0;
         let out = ch.output * att;
         assert!((out - (-0.75)).abs() < 0.001);
@@ -864,8 +859,7 @@ mod envelope_tests {
 
     #[test]
     fn attenuverter_scales_down() {
-        let mut ch = EnvelopeChannel::default();
-        ch.output = 1.0;
+        let ch = EnvelopeChannel { output: 1.0, ..Default::default() };
         let att = 0.5;
         let out = ch.output * att;
         assert!((out - 0.5).abs() < 0.001);
@@ -923,9 +917,8 @@ mod envelope_tests {
     #[test]
     fn envelope_release_from_rise() {
         // Bug fix: note_off during Rise should immediately transition to Fall
-        let mut ch = EnvelopeChannel::default();
-        ch.stage = Stage::Rise;
-        ch.phase = 0.3; // partially through rise
+        // partially through rise
+        let mut ch = EnvelopeChannel { stage: Stage::Rise, phase: 0.3, ..Default::default() };
 
         // Simulate receiving a release while in Rise
         let should_release = true;
@@ -940,8 +933,7 @@ mod envelope_tests {
 
     #[test]
     fn envelope_no_release_when_already_off() {
-        let mut ch = EnvelopeChannel::default();
-        ch.stage = Stage::Off;
+        let mut ch = EnvelopeChannel { stage: Stage::Off, ..Default::default() };
 
         let should_release = true;
         let original_stage = ch.stage;
