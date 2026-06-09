@@ -107,6 +107,11 @@ struct ChannelParams {
     /// Natural Gates tail). Decay becomes level-dependent: fast while hot,
     /// slowing as it cools.
     pluck: f32,
+    /// Note-input semantics: false = **trig** (a note fires the full
+    /// rise→fall transient; note_off is ignored — Maths' trigger input),
+    /// true = **gate** (sustain at the top until note_off — the signal
+    /// input held high). Default trig: a trigger should be a trigger.
+    gate_mode: bool,
     // Receiver-side bindings (routing.rs source addresses).
     trigger: Trigger,
     /// When bound, the channel stops generating and slews this source
@@ -128,6 +133,7 @@ impl Default for ChannelParams {
             attenuverter: 1.0,
             offset: 0.0,
             pluck: 0.0,
+            gate_mode: false,
             trigger: Trigger::Any,
             signal_src: None,
             rise_src: None,
@@ -312,7 +318,7 @@ const ROW_PLUCK: usize = 5;
 const ROW_SIGNAL: usize = 6;
 const ROW_TRIGGER: usize = 7;
 
-/// Undo slots: ch*32 + row for values (0–4), loop (5), pluck (6);
+/// Undo slots: ch*32 + row for values (0–4), loop (5), pluck (6), gate-mode (7);
 /// ch*32 + 8 + n for the six bindings (rise/fall/shape/atten/signal/trigger).
 const CH_SLOT_STRIDE: usize = 32;
 const BIND_OFF: usize = 8;
@@ -330,6 +336,7 @@ impl crate::undo::ParamUndo for EnvelopeState {
             4 => Some(V::F32(p.offset)),
             5 => Some(V::Bool(p.loop_mode)),
             6 => Some(V::F32(p.pluck)),
+            7 => Some(V::Bool(p.gate_mode)),
             r if (BIND_OFF..BIND_OFF + 6).contains(&r) => {
                 let b = match r - BIND_OFF {
                     0 => p.rise_src.as_ref().map(|a| a.to_string()),
@@ -357,6 +364,7 @@ impl crate::undo::ParamUndo for EnvelopeState {
             (4, V::F32(v)) => p.offset = v,
             (5, V::Bool(v)) => p.loop_mode = v,
             (6, V::F32(v)) => p.pluck = v,
+            (7, V::Bool(v)) => p.gate_mode = v,
             (r, V::Src(a)) if (BIND_OFF..BIND_OFF + 6).contains(&r) => {
                 if r - BIND_OFF == 5 {
                     p.trigger = Trigger::from_param(a.as_deref());
@@ -415,6 +423,7 @@ fn snapshot_params(s: &EnvelopeState) -> state::EnvelopeParams {
             attenuverter: p.attenuverter,
             offset: p.offset,
             pluck: p.pluck,
+            gate_mode: p.gate_mode,
             signal_src: p.signal_src.as_ref().map(|a| a.to_string()),
             trigger_src: p.trigger.to_param(),
             rise_src: p.rise_src.as_ref().map(|a| a.to_string()),
@@ -449,6 +458,7 @@ fn apply_params(s: &mut EnvelopeState, params: &state::EnvelopeParams) {
         if params.format >= state::STATE_FORMAT {
             s.params[i].offset = ch.offset;
             s.params[i].pluck = ch.pluck;
+            s.params[i].gate_mode = ch.gate_mode;
             s.params[i].signal_src = ch.signal_src.as_deref().and_then(SourceAddr::parse);
             s.params[i].trigger = Trigger::from_param(ch.trigger_src.as_deref());
             s.params[i].rise_src = ch.rise_src.as_deref().and_then(SourceAddr::parse);
@@ -477,6 +487,91 @@ struct ResolvedChannel {
     trig: Option<RTrig>, // None until first refresh
     mods: [Option<usize>; 4],
     signal: Option<usize>,
+}
+
+/// Effective per-block channel settings after modulation resolution.
+struct StageParams {
+    rise_time: f32,
+    fall_time: f32,
+    shape: f32,
+    loop_mode: bool,
+    gate_mode: bool,
+    pluck: f32,
+}
+
+/// Advance one channel by one sample. Returns true when a cycle completed
+/// (fall reached bottom) — the EOC pulse.
+fn advance_stage(ch: &mut EnvelopeChannel, p: &StageParams, dt: f32) -> bool {
+    let mut cycle_done = false;
+    match ch.stage {
+        Stage::Off => {
+            ch.output = 0.0;
+            if p.loop_mode {
+                ch.stage = Stage::Rise;
+                ch.phase = 0.0;
+            }
+        }
+        Stage::Rise => {
+            if p.rise_time <= 0.0 {
+                ch.phase = 1.0;
+            } else {
+                ch.phase += dt / p.rise_time;
+            }
+            if ch.phase >= 1.0 {
+                ch.phase = 1.0;
+                ch.output = 1.0;
+                if p.gate_mode && !p.loop_mode {
+                    ch.stage = Stage::Sustain;
+                } else {
+                    // trig semantics (and cycling): straight into the fall
+                    ch.stage = Stage::Fall;
+                    ch.phase = 0.0;
+                }
+            } else {
+                ch.output = vari_response(ch.phase, p.shape);
+            }
+        }
+        Stage::Sustain => {
+            ch.output = 1.0;
+        }
+        Stage::Fall => {
+            let done = if p.pluck > 0.0 {
+                // vactrol model: snap + ring; ends when the tail decays
+                // below audibility
+                if ch.phase == 0.0 {
+                    ch.pluck_fast = ch.output;
+                    ch.pluck_slow = ch.output;
+                    ch.phase = 0.5; // initialized marker
+                }
+                let (f2, s2, out) =
+                    pluck_decay(ch.pluck_fast, ch.pluck_slow, dt, p.fall_time, p.pluck);
+                ch.pluck_fast = f2;
+                ch.pluck_slow = s2;
+                ch.output = out;
+                out < 0.001
+            } else if p.fall_time <= 0.0 {
+                true
+            } else {
+                ch.phase += dt / p.fall_time;
+                if ch.phase < 1.0 {
+                    ch.output = 1.0 - vari_response(ch.phase, p.shape);
+                }
+                ch.phase >= 1.0
+            };
+            if done {
+                ch.phase = 1.0;
+                ch.output = 0.0;
+                cycle_done = true;
+                if p.loop_mode {
+                    ch.stage = Stage::Rise;
+                    ch.phase = 0.0;
+                } else {
+                    ch.stage = Stage::Off;
+                }
+            }
+        }
+    }
+    cycle_done
 }
 
 fn env_thread(
@@ -597,11 +692,13 @@ fn env_thread(
                 Some(RTrig::Off) | Some(RTrig::Edge(_)) => triggers[i],
                 Some(RTrig::Note(want)) => track_trigger == Some(want) || triggers[i],
             };
-            let should_release = match r.trig {
-                Some(RTrig::AnyNote) | None => release_track.is_some(),
-                Some(RTrig::Off) | Some(RTrig::Edge(_)) => false,
-                Some(RTrig::Note(want)) => release_track == Some(want),
-            };
+            // note_off only matters to a gate; a trig ignores it entirely
+            let should_release = params.gate_mode
+                && match r.trig {
+                    Some(RTrig::AnyNote) | None => release_track.is_some(),
+                    Some(RTrig::Off) | Some(RTrig::Edge(_)) => false,
+                    Some(RTrig::Note(want)) => release_track == Some(want),
+                };
 
             if should_release && ch.stage != Stage::Off && ch.stage != Stage::Fall {
                 ch.stage = Stage::Fall;
@@ -623,81 +720,21 @@ fn env_thread(
             let fall_time = param_to_time(fp);
             let signal_target = r.signal.and_then(|c| modbus.as_ref().map(|m| m.get(c)));
 
+            let stage_params = StageParams {
+                rise_time,
+                fall_time,
+                shape: sp,
+                loop_mode: params.loop_mode,
+                gate_mode: params.gate_mode,
+                pluck: params.pluck,
+            };
             for frame in 0..BLOCK_SIZE {
                 if let Some(target) = signal_target {
                     // Signal-input mode: slew limiter
                     ch.output = slew_step(ch.output, target, dt, rise_time, fall_time, sp);
                     ch.stage = Stage::Off;
-                } else {
-                    match ch.stage {
-                        Stage::Off => {
-                            ch.output = 0.0;
-                            if params.loop_mode {
-                                ch.stage = Stage::Rise;
-                                ch.phase = 0.0;
-                            }
-                        }
-                        Stage::Rise => {
-                            if rise_time <= 0.0 {
-                                ch.phase = 1.0;
-                            } else {
-                                ch.phase += dt / rise_time;
-                            }
-                            if ch.phase >= 1.0 {
-                                ch.phase = 1.0;
-                                ch.output = 1.0;
-                                if params.loop_mode {
-                                    ch.stage = Stage::Fall;
-                                    ch.phase = 0.0;
-                                } else {
-                                    ch.stage = Stage::Sustain;
-                                }
-                            } else {
-                                ch.output = vari_response(ch.phase, sp);
-                            }
-                        }
-                        Stage::Sustain => {
-                            ch.output = 1.0;
-                        }
-                        Stage::Fall => {
-                            let done = if params.pluck > 0.0 {
-                                // vactrol model: snap + ring; ends when the
-                                // tail decays below audibility
-                                if ch.phase == 0.0 {
-                                    ch.pluck_fast = ch.output;
-                                    ch.pluck_slow = ch.output;
-                                    ch.phase = 0.5; // initialized marker
-                                }
-                                let (f2, s2, out) =
-                                    pluck_decay(ch.pluck_fast, ch.pluck_slow, dt, fall_time, params.pluck);
-                                ch.pluck_fast = f2;
-                                ch.pluck_slow = s2;
-                                ch.output = out;
-                                out < 0.001
-                            } else if fall_time <= 0.0 {
-                                true
-                            } else {
-                                ch.phase += dt / fall_time;
-                                if ch.phase < 1.0 {
-                                    ch.output = 1.0 - vari_response(ch.phase, sp);
-                                }
-                                ch.phase >= 1.0
-                            };
-                            if done {
-                                ch.phase = 1.0;
-                                ch.output = 0.0;
-                                if i == n - 1 {
-                                    eoc_pulse = true;
-                                }
-                                if params.loop_mode {
-                                    ch.stage = Stage::Rise;
-                                    ch.phase = 0.0;
-                                } else {
-                                    ch.stage = Stage::Off;
-                                }
-                            }
-                        }
-                    }
+                } else if advance_stage(ch, &stage_params, dt) && i == n - 1 {
+                    eoc_pulse = true;
                 }
                 // audio path: attenuverted function (offsets excluded — DC)
                 let a = ch.output * att;
@@ -804,11 +841,15 @@ fn draw_ui(
             let is_cur = i == state.current_channel;
 
             let bound = |a: &Option<SourceAddr>| if a.is_some() { "@" } else { " " };
-            let trig_short = match &p.trigger {
-                Trigger::Any => String::from("any"),
-                Trigger::Off => String::from("off"),
-                Trigger::Source(a) => a.output.clone(),
-            };
+            let trig_short = format!(
+                "{}·{}",
+                match &p.trigger {
+                    Trigger::Any => String::from("any"),
+                    Trigger::Off => String::from("off"),
+                    Trigger::Source(a) => a.output.clone(),
+                },
+                if p.gate_mode { "gt" } else { "tr" }
+            );
             let values = [
                 format!("{}{}", format_time(param_to_time(p.rise_param)), bound(&p.rise_src)),
                 format!("{}{}", format_time(param_to_time(p.fall_param)), bound(&p.fall_src)),
@@ -891,11 +932,15 @@ fn draw_ui(
             2 => p.shape_src.as_ref().map(|a| format!("shape @{}", a)),
             3 => p.atten_src.as_ref().map(|a| format!("atten @{}", a)),
             ROW_SIGNAL => p.signal_src.as_ref().map(|a| format!("signal @{} (slew mode)", a)),
-            ROW_TRIGGER => Some(match &p.trigger {
-                Trigger::Any => String::from("trigger: any note"),
-                Trigger::Off => String::from("trigger: off (manual t / cycle only)"),
-                Trigger::Source(a) => format!("trigger @{}", a),
-            }),
+            ROW_TRIGGER => Some(format!(
+                "{} — {} (m toggles)",
+                match &p.trigger {
+                    Trigger::Any => String::from("trigger: any note"),
+                    Trigger::Off => String::from("trigger: off (manual t / cycle only)"),
+                    Trigger::Source(a) => format!("trigger @{}", a),
+                },
+                if p.gate_mode { "gate: sustains until note off" } else { "trig: full rise→fall per note" }
+            )),
             _ => None,
         };
         let status = match overlay {
@@ -932,6 +977,8 @@ fn draw_ui(
                 Line::from("Actions:"),
                 Line::from("  a / x      Add / remove channel"),
                 Line::from("  c          Toggle cycle (loop) mode"),
+                Line::from("  m          Trig/gate per channel (trig ="),
+                Line::from("             full AD per note; gate sustains)"),
                 Line::from("  t          Trigger channel manually"),
                 Line::from("  o          Toggle gate on/off (sustain)"),
                 Line::from("  @          Bind row to a source (picker)"),
@@ -1142,18 +1189,34 @@ pub fn run(instance: usize) -> Result<()> {
                                     "atten" => v.parse().ok().map(|p: f32| (3, p.clamp(-1.0, 1.0))),
                                     "offset" => v.parse().ok().map(|p: f32| (4, p.clamp(-1.0, 1.0))),
                                     "pluck" => v.parse().ok().map(|p: f32| (6, p.clamp(0.0, 1.0))),
+                                    "mode" => match v.as_str() {
+                                        "trig" => Some((7, 0.0)),
+                                        "gate" => Some((7, 1.0)),
+                                        _ => None,
+                                    },
                                     _ => None,
                                 };
                                 match parsed {
                                     Some((row, val)) => {
                                         let slot = ch * CH_SLOT_STRIDE + row;
                                         let old = s.get_param(slot);
-                                        s.set_param(slot, ParamValue::F32(val));
+                                        let new_val = if row == 7 {
+                                            ParamValue::Bool(val > 0.5)
+                                        } else {
+                                            ParamValue::F32(val)
+                                        };
+                                        s.set_param(slot, new_val);
                                         if let Some(old) = old {
-                                            history.record(slot, "Set", old, ParamValue::F32(val));
+                                            let new_val = if row == 7 {
+                                                ParamValue::Bool(val > 0.5)
+                                            } else {
+                                                ParamValue::F32(val)
+                                            };
+                                            history.record(slot, "Set", old, new_val);
                                         }
                                         ex_msg = Some(match row {
                                             0 | 1 => format!("{} = {}", k, format_time(param_to_time(val))),
+                                            7 => format!("mode = {}", if val > 0.5 { "gate" } else { "trig" }),
                                             _ => format!("{} = {:.2}", k, val),
                                         });
                                     }
@@ -1262,6 +1325,25 @@ pub fn run(instance: usize) -> Result<()> {
                         let ch = s.current_channel;
                         s.channels[ch].stage = Stage::Rise;
                         s.channels[ch].phase = 0.0;
+                    }
+                    KeyCode::Char('m') => {
+                        count.clear();
+                        use crate::undo::ParamValue;
+                        let mut s = state.lock().unwrap();
+                        let ch = s.current_channel;
+                        let was = s.params[ch].gate_mode;
+                        s.params[ch].gate_mode = !was;
+                        history.record(
+                            ch * CH_SLOT_STRIDE + 7,
+                            "Trig/gate mode",
+                            ParamValue::Bool(was),
+                            ParamValue::Bool(!was),
+                        );
+                        ex_msg = Some(format!(
+                            "Ch{} note input: {}",
+                            ch + 1,
+                            if !was { "gate (sustains)" } else { "trig (full AD)" }
+                        ));
                     }
                     KeyCode::Char('c') => {
                         count.clear();
@@ -1635,5 +1717,107 @@ mod tests {
             }
         };
         assert!(time_to_silence(1.0) > time_to_silence(0.1) * 2.0, "pluck stretches the ring");
+    }
+
+    fn sp(rise: f32, fall: f32, gate: bool, pluck: f32) -> StageParams {
+        StageParams {
+            rise_time: rise,
+            fall_time: fall,
+            shape: 0.5,
+            loop_mode: false,
+            gate_mode: gate,
+            pluck,
+        }
+    }
+
+    #[test]
+    fn trig_mode_fires_full_ad_without_note_off() {
+        let dt = 1.0 / 48000.0;
+        let p = sp(0.01, 0.01, false, 0.0); // 10ms / 10ms
+        let mut ch = EnvelopeChannel { stage: Stage::Rise, ..Default::default() };
+        let mut peaked = false;
+        let mut finished = false;
+        for _ in 0..48000 {
+            advance_stage(&mut ch, &p, dt);
+            if ch.output > 0.99 {
+                peaked = true;
+            }
+            if peaked && ch.stage == Stage::Off {
+                finished = true;
+                break;
+            }
+        }
+        assert!(peaked, "trig must reach the top");
+        assert!(finished, "trig must fall back to Off with no release event");
+    }
+
+    #[test]
+    fn gate_mode_sustains_at_top() {
+        let dt = 1.0 / 48000.0;
+        let p = sp(0.001, 0.01, true, 0.0);
+        let mut ch = EnvelopeChannel { stage: Stage::Rise, ..Default::default() };
+        for _ in 0..4800 {
+            advance_stage(&mut ch, &p, dt);
+        }
+        assert_eq!(ch.stage, Stage::Sustain, "gate holds until note off");
+        assert_eq!(ch.output, 1.0);
+    }
+
+    #[test]
+    fn instant_rise_and_fall_produce_silence() {
+        let dt = 1.0 / 48000.0;
+        let p = sp(0.0, 0.0, false, 0.0);
+        let mut ch = EnvelopeChannel { stage: Stage::Rise, ..Default::default() };
+        let eoc = advance_stage(&mut ch, &p, dt);
+        // sample 1: instant rise -> straight into fall
+        let eoc2 = advance_stage(&mut ch, &p, dt);
+        assert!(eoc || eoc2, "cycle completes immediately");
+        assert_eq!(ch.output, 0.0, "hard drop: no residual level");
+        assert_eq!(ch.stage, Stage::Off);
+    }
+
+    #[test]
+    fn trig_mode_pluck_rings_after_instant_strike() {
+        let dt = 1.0 / 48000.0;
+        let p = sp(0.0, 0.15, false, 0.9);
+        let mut ch = EnvelopeChannel { stage: Stage::Rise, ..Default::default() };
+        advance_stage(&mut ch, &p, dt); // strike
+        let mut t = 0.0;
+        let mut above_tenth_at_100ms = false;
+        while ch.stage != Stage::Off && t < 10.0 {
+            advance_stage(&mut ch, &p, dt);
+            t += dt;
+            if (0.099..0.101).contains(&t) && ch.output > 0.05 {
+                above_tenth_at_100ms = true;
+            }
+        }
+        assert!(above_tenth_at_100ms, "the ring is still audible at 100ms");
+        assert!(t > 0.15, "tail outlives the nominal fall time");
+    }
+
+    #[test]
+    fn cycling_ignores_gate_mode() {
+        let dt = 1.0 / 48000.0;
+        let p = StageParams { loop_mode: true, ..sp(0.005, 0.005, true, 0.0) };
+        let mut ch = EnvelopeChannel { stage: Stage::Rise, ..Default::default() };
+        let mut cycles = 0;
+        for _ in 0..48000 {
+            if advance_stage(&mut ch, &p, dt) {
+                cycles += 1;
+            }
+        }
+        assert!(cycles >= 90, "cycle mode keeps oscillating even in gate mode: {}", cycles);
+    }
+
+    #[test]
+    fn gate_mode_param_persists_per_channel() {
+        let mut s = EnvelopeState::default();
+        s.params[2].gate_mode = true;
+        let snap = snapshot_params(&s);
+        assert!(!snap.channels[0].gate_mode);
+        assert!(snap.channels[2].gate_mode, "per-channel, not global");
+        let mut back = EnvelopeState::default();
+        apply_params(&mut back, &snap);
+        assert!(back.params[2].gate_mode && !back.params[1].gate_mode);
     }
 }

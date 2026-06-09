@@ -153,10 +153,12 @@ EOR/EOC, live meters). Rows: Rise, Fall (0 = instant … 25min), Shape (log↔li
 Atten, Offset, Plck (vactrol snap+ring decay), Sig (slew input), Trig.
 `j/k` select row · `h/l` adjust · `H/L` coarse · `[`/`]` channel (counts) ·
 `gg/G` first/last channel · `a`/`x` add/remove channel (up to 6) ·
-`t` manual trigger · `c` cycle · `o` gate · `@` bind row (Trig row offers
+`t` manual trigger · `c` cycle · `m` trig/gate per channel (trig = full
+rise→fall per note, note-off ignored — the default; gate = sustain until
+note off) · `o` manual gate · `@` bind row (Trig row offers
 — any note — / — off — / sources; a non-note source = rising-edge trigger,
 e.g. `envelope/0/eoc` for self-patching) · `:set rise 0|100ms|2s|1.5m|0.42`
-(also fall/shape/atten/offset/pluck) · `:` · undo (all ✅)
+(also fall/shape/atten/offset/pluck, `mode trig|gate`) · `:` · undo (all ✅)
 
 ### Mixer
 `h/l` select channel (counts) · `j/k` level down/up · `J/K` coarse ·

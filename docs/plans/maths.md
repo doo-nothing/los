@@ -2,6 +2,14 @@
 
 **Status: ✅ M1+M2+M3 implemented · ✅ pluck/LPG pass**
 
+### Trig vs gate (per channel)
+A note used to act as a gate (rise → sustain → fall at note_off), which
+masked pluck decays and made instant-rise/instant-fall audible. Channels now
+default to **trig** semantics — a note fires the full rise→fall transient and
+note_off is ignored (Maths' trigger input); `m` flips a channel to **gate**
+(sustain while held — the signal input). Cycle mode overrides both. The
+stage machine is extracted (`advance_stage`) and directly tested.
+
 ### Pluck & LPG addendum (Natural Gates-inspired)
 - **Zero times**: rise/fall params at 0 are literally instant (the 0.5ms
   floor was hardware-spec, not a digital constraint). `:set rise 0`.
