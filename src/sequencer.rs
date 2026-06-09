@@ -730,7 +730,7 @@ impl Command {
 const HISTORY_CAP: usize = 100;
 
 struct History {
-    commands: Vec<Command>,
+    commands: Vec<(Command, Instant)>,
     index: usize,
 }
 
@@ -740,8 +740,29 @@ impl History {
     }
 
     fn push(&mut self, cmd: Command) {
+        // Sweep rule (docs/keybindings.md): consecutive edits of the same
+        // step within the coalescing window merge into one undo entry, so a
+        // held transpose key reverts with a single u.
+        if self.index == self.commands.len() {
+            if let Some((Command::EditStep { track, step, old_step, new_step }, at)) =
+                self.commands.last_mut()
+            {
+                if let Command::EditStep { track: t2, step: s2, new_step: n2, .. } = &cmd {
+                    if t2 == track && s2 == step && at.elapsed() < crate::undo::COALESCE_WINDOW {
+                        *new_step = *n2;
+                        *at = Instant::now();
+                        if old_step == new_step {
+                            // sweep returned to where it started — drop it
+                            self.commands.pop();
+                            self.index = self.commands.len();
+                        }
+                        return;
+                    }
+                }
+            }
+        }
         self.commands.truncate(self.index);
-        self.commands.push(cmd);
+        self.commands.push((cmd, Instant::now()));
         if self.commands.len() > HISTORY_CAP {
             self.commands.remove(0);
         }
@@ -751,15 +772,15 @@ impl History {
     fn undo(&mut self, state: &mut SequencerState) -> Option<&'static str> {
         if self.index == 0 { return None; }
         self.index -= 1;
-        self.commands[self.index].undo(state);
-        Some(self.commands[self.index].description())
+        self.commands[self.index].0.undo(state);
+        Some(self.commands[self.index].0.description())
     }
 
     fn redo(&mut self, state: &mut SequencerState) -> Option<&'static str> {
         if self.index >= self.commands.len() { return None; }
-        self.commands[self.index].redo(state);
+        self.commands[self.index].0.redo(state);
         self.index += 1;
-        Some(self.commands[self.index - 1].description())
+        Some(self.commands[self.index - 1].0.description())
     }
 }
 
@@ -2833,5 +2854,28 @@ mod tests {
         apply_action(&mut s, &mut h, &Action::Paste { before: false, times: 3 });
         assert!(s.tracks[0].steps[3].active && s.tracks[0].steps[4].active && s.tracks[0].steps[5].active);
         assert!(!s.tracks[0].steps[6].active);
+    }
+
+    #[test]
+    fn transpose_sweep_coalesces() {
+        let mut s = state_with_tracks(1);
+        let mut h = History::new();
+        for _ in 0..5 {
+            apply_action(&mut s, &mut h, &Action::Transpose { note: 1, mod_value: 0.01 });
+        }
+        assert_eq!(s.tracks[0].steps[0].note, 65);
+        assert_eq!(h.commands.len(), 1, "sweep is one undo entry");
+        assert!(h.undo(&mut s).is_some());
+        assert_eq!(s.tracks[0].steps[0].note, 60, "one u reverts the whole sweep");
+    }
+
+    #[test]
+    fn round_trip_sweep_leaves_no_history() {
+        let mut s = state_with_tracks(1);
+        let mut h = History::new();
+        apply_action(&mut s, &mut h, &Action::Transpose { note: 3, mod_value: 0.0 });
+        apply_action(&mut s, &mut h, &Action::Transpose { note: -3, mod_value: 0.0 });
+        assert_eq!(s.tracks[0].steps[0].note, 60);
+        assert_eq!(h.undo(&mut s), None, "no-op sweep records nothing");
     }
 }

@@ -501,6 +501,7 @@ fn draw_ui(
                 Line::from("  c          Toggle cycle/loop mode"),
                 Line::from("  o          Toggle gate on/off (sustain)"),
                 Line::from(""),
+                Line::from("  u / ^r     Undo / redo (counts; sweeps coalesce)"),
                 Line::from("  :w/:e/:q   Patch save/load, quit (:x save+quit)"),
                 Line::from("  space      Play/pause (global)"),
                 Line::from("  ?          Toggle this help"),
@@ -596,6 +597,61 @@ fn apply_params(s: &mut EnvelopeState, params: &state::EnvelopeParams) {
     }
 }
 
+/// Undo slots: ch*32 + row for values (0–3) and loop (5); ch*32 + 8 + row
+/// for the five per-row bindings (rise/fall/shape/atten/trigger).
+const CH_SLOT_STRIDE: usize = 32;
+const BIND_OFF: usize = 8;
+
+impl crate::undo::ParamUndo for EnvelopeState {
+    fn get_param(&self, slot: usize) -> Option<crate::undo::ParamValue> {
+        use crate::undo::ParamValue as V;
+        let (ch, row) = (slot / CH_SLOT_STRIDE, slot % CH_SLOT_STRIDE);
+        let p = self.params.get(ch)?;
+        match row {
+            0 => Some(V::F32(p.rise_param)),
+            1 => Some(V::F32(p.fall_param)),
+            2 => Some(V::F32(p.shape_param)),
+            3 => Some(V::F32(p.attenuverter)),
+            5 => Some(V::Bool(p.loop_mode)),
+            r if (BIND_OFF..BIND_OFF + 5).contains(&r) => {
+                let b = match r - BIND_OFF {
+                    0 => &p.rise_src,
+                    1 => &p.fall_src,
+                    2 => &p.shape_src,
+                    3 => &p.atten_src,
+                    _ => &p.trigger_src,
+                };
+                Some(V::Src(b.as_ref().map(|a| a.to_string())))
+            }
+            _ => None,
+        }
+    }
+
+    fn set_param(&mut self, slot: usize, value: crate::undo::ParamValue) {
+        use crate::undo::ParamValue as V;
+        let (ch, row) = (slot / CH_SLOT_STRIDE, slot % CH_SLOT_STRIDE);
+        let Some(p) = self.params.get_mut(ch) else { return };
+        match (row, value) {
+            (0, V::F32(v)) => p.rise_param = v,
+            (1, V::F32(v)) => p.fall_param = v,
+            (2, V::F32(v)) => p.shape_param = v,
+            (3, V::F32(v)) => p.attenuverter = v,
+            (5, V::Bool(v)) => p.loop_mode = v,
+            (r, V::Src(a)) if (BIND_OFF..BIND_OFF + 5).contains(&r) => {
+                let addr = a.as_deref().and_then(SourceAddr::parse);
+                match r - BIND_OFF {
+                    0 => p.rise_src = addr,
+                    1 => p.fall_src = addr,
+                    2 => p.shape_src = addr,
+                    3 => p.atten_src = addr,
+                    _ => p.trigger_src = addr,
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 const NUM_ROWS: usize = 5; // rise, fall, shape, atten, trigger-track
 
 /// Adjust a param row on the current channel (doctrine: h/l fine, H/L coarse ×10).
@@ -661,6 +717,7 @@ pub fn run(instance: usize) -> Result<()> {
     // Global transport handle for Space = play/pause (lazily reopened)
     let mut transport_ui: Option<ShmTransport> = ShmTransport::open().ok();
     let mut picker = crate::picker::Picker::default();
+    let mut history = crate::undo::ParamHistory::default();
     let mut count = crate::keys::Count::default();
     let mut pending_g = false;
     let mut ex = crate::excmd::ExLine::default();
@@ -695,14 +752,15 @@ pub fn run(instance: usize) -> Result<()> {
                 ex_msg = None;
                 if picker.is_active() {
                     if let crate::picker::PickerEvent::Chosen(addr) = picker.handle_key(key.code) {
+                        use crate::undo::{ParamUndo, ParamValue};
                         let mut s = state.lock().unwrap();
                         let ch = s.current_channel;
-                        match selected {
-                            0 => s.params[ch].rise_src = addr,
-                            1 => s.params[ch].fall_src = addr,
-                            2 => s.params[ch].shape_src = addr,
-                            3 => s.params[ch].atten_src = addr,
-                            _ => s.params[ch].trigger_src = addr,
+                        let slot = ch * CH_SLOT_STRIDE + BIND_OFF + selected.min(4);
+                        let old = s.get_param(slot);
+                        s.set_param(slot, ParamValue::Src(addr.map(|a| a.to_string())));
+                        let new = s.get_param(slot);
+                        if let (Some(old), Some(new)) = (old, new) {
+                            history.record(slot, "Bind", old, new);
                         }
                     }
                     continue;
@@ -752,6 +810,12 @@ pub fn run(instance: usize) -> Result<()> {
                 if !matches!(key.code, KeyCode::Char('g')) {
                     pending_g = false;
                 }
+                if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::CONTROL {
+                    let n = count.take();
+                    let mut s = state.lock().unwrap();
+                    ex_msg = Some(crate::undo::history_status("Redo", n, || history.redo(&mut *s)));
+                    continue;
+                }
                 // Ctrl-s: save
                 if key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL {
                     let params = snapshot_params(&state.lock().unwrap());
@@ -767,21 +831,28 @@ pub fn run(instance: usize) -> Result<()> {
                     KeyCode::Char('k') | KeyCode::Up => {
                         selected = crate::keys::cycle(selected, -(count.take() as i32), NUM_ROWS);
                     }
-                    KeyCode::Char('h') | KeyCode::Left => {
+                    KeyCode::Char('h' | 'l' | 'H' | 'L') | KeyCode::Left | KeyCode::Right => {
+                        let c = match key.code {
+                            KeyCode::Char(c) => c,
+                            KeyCode::Left => 'h',
+                            _ => 'l',
+                        };
                         let n = count.take() as i32;
-                        adjust(&mut state.lock().unwrap(), selected, -n, false);
-                    }
-                    KeyCode::Char('l') | KeyCode::Right => {
-                        let n = count.take() as i32;
-                        adjust(&mut state.lock().unwrap(), selected, n, false);
-                    }
-                    KeyCode::Char('H') => {
-                        let n = count.take() as i32;
-                        adjust(&mut state.lock().unwrap(), selected, -n, true);
-                    }
-                    KeyCode::Char('L') => {
-                        let n = count.take() as i32;
-                        adjust(&mut state.lock().unwrap(), selected, n, true);
+                        let (steps, coarse) = match c {
+                            'h' => (-n, false),
+                            'l' => (n, false),
+                            'H' => (-n, true),
+                            _ => (n, true),
+                        };
+                        use crate::undo::ParamUndo;
+                        let mut s = state.lock().unwrap();
+                        let slot = s.current_channel * CH_SLOT_STRIDE + selected;
+                        let old = s.get_param(slot);
+                        adjust(&mut s, selected, steps, coarse);
+                        let new = s.get_param(slot);
+                        if let (Some(old), Some(new)) = (old, new) {
+                            history.record(slot, "Adjust", old, new);
+                        }
                     }
                     KeyCode::Char('[') => {
                         let n = count.take();
@@ -820,6 +891,11 @@ pub fn run(instance: usize) -> Result<()> {
                         s.channels[ch].eor_fired = false;
                         s.channels[ch].eoc_fired = false;
                     }
+                    KeyCode::Char('u') => {
+                        let n = count.take();
+                        let mut s = state.lock().unwrap();
+                        ex_msg = Some(crate::undo::history_status("Undo", n, || history.undo(&mut *s)));
+                    }
                     KeyCode::Char('@') => {
                         count.clear();
                         let sources = Manifest::open()
@@ -838,9 +914,18 @@ pub fn run(instance: usize) -> Result<()> {
                         picker.open(sources, current.as_ref());
                     }
                     KeyCode::Char('c') => {
+                        count.clear();
+                        use crate::undo::ParamValue;
                         let mut s = state.lock().unwrap();
                         let ch = s.current_channel;
-                        s.params[ch].loop_mode = !s.params[ch].loop_mode;
+                        let was = s.params[ch].loop_mode;
+                        s.params[ch].loop_mode = !was;
+                        history.record(
+                            ch * CH_SLOT_STRIDE + 5,
+                            "Cycle mode",
+                            ParamValue::Bool(was),
+                            ParamValue::Bool(!was),
+                        );
                     }
                     KeyCode::Char('o') => {
                         count.clear();
