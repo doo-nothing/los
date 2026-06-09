@@ -1116,14 +1116,36 @@ impl Manifest {
         let total = MANIFEST_TOTAL_SIZE;
 
         let fd = unsafe {
-            let fd = libc::shm_open(cname.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o644);
+            let mut fd = libc::shm_open(cname.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o644);
             if fd < 0 {
                 anyhow::bail!("shm_open({}) failed: {}", SHM_MANIFEST_NAME, std::io::Error::last_os_error());
             }
-            if libc::ftruncate(fd, total as libc::off_t) < 0 {
+            // POSIX shm objects can only be sized once on macOS. A wrong-sized
+            // object is a leftover from an older layout: unlink it and start
+            // over rather than mmapping past its end.
+            let mut st: libc::stat = std::mem::zeroed();
+            if libc::fstat(fd, &mut st) < 0 {
                 libc::close(fd);
-                libc::shm_unlink(cname.as_ptr());
-                anyhow::bail!("ftruncate({}) failed: {}", SHM_MANIFEST_NAME, std::io::Error::last_os_error());
+                anyhow::bail!("fstat({}) failed: {}", SHM_MANIFEST_NAME, std::io::Error::last_os_error());
+            }
+            if st.st_size != total as libc::off_t {
+                if st.st_size == 0 {
+                    if libc::ftruncate(fd, total as libc::off_t) < 0 {
+                        libc::close(fd);
+                        libc::shm_unlink(cname.as_ptr());
+                        anyhow::bail!("ftruncate({}) failed: {}", SHM_MANIFEST_NAME, std::io::Error::last_os_error());
+                    }
+                } else {
+                    libc::close(fd);
+                    libc::shm_unlink(cname.as_ptr());
+                    fd = libc::shm_open(cname.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o644);
+                    if fd < 0 || libc::ftruncate(fd, total as libc::off_t) < 0 {
+                        if fd >= 0 {
+                            libc::close(fd);
+                        }
+                        anyhow::bail!("recreate({}) failed: {}", SHM_MANIFEST_NAME, std::io::Error::last_os_error());
+                    }
+                }
             }
             fd
         };
@@ -1145,16 +1167,22 @@ impl Manifest {
             p as *mut u8
         };
 
+        // Initialize only when the header isn't already a live current-version
+        // manifest — concurrent open().or_else(create()) callers must not
+        // wipe each other's registrations.
         unsafe {
-            ptr::write_unaligned(ptr as *mut u32, MANIFEST_VERSION);
-            ptr::write_unaligned(ptr.add(4) as *mut u32, MANIFEST_MAX_ENTRIES as u32);
-            ptr::write_unaligned(ptr.add(8) as *mut u32, MANIFEST_ENTRY_SIZE as u32);
-            ptr::write_unaligned(ptr.add(12) as *mut u32, 0); // next free modbus channel
-            std::ptr::write_bytes(
-                ptr.add(MANIFEST_HEADER_SIZE),
-                0,
-                MANIFEST_MAX_ENTRIES * MANIFEST_ENTRY_SIZE,
-            );
+            let version = ptr::read_unaligned(ptr as *const u32);
+            if version != MANIFEST_VERSION {
+                ptr::write_unaligned(ptr as *mut u32, MANIFEST_VERSION);
+                ptr::write_unaligned(ptr.add(4) as *mut u32, MANIFEST_MAX_ENTRIES as u32);
+                ptr::write_unaligned(ptr.add(8) as *mut u32, MANIFEST_ENTRY_SIZE as u32);
+                ptr::write_unaligned(ptr.add(12) as *mut u32, 0); // next free modbus channel
+                std::ptr::write_bytes(
+                    ptr.add(MANIFEST_HEADER_SIZE),
+                    0,
+                    MANIFEST_MAX_ENTRIES * MANIFEST_ENTRY_SIZE,
+                );
+            }
         }
 
         Ok(Self { ptr, fd, owned: true, my_slot: None, my_mod_base: None })
@@ -1186,6 +1214,22 @@ impl Manifest {
             }
             p as *mut u8
         };
+
+        // A leftover manifest from an older binary has a different entry
+        // layout — refuse it so the open().or_else(create()) chain
+        // re-initializes the object instead of misreading it.
+        let version = unsafe { ptr::read_unaligned(ptr as *const u32) };
+        if version != MANIFEST_VERSION {
+            unsafe {
+                libc::munmap(ptr as *mut libc::c_void, MANIFEST_TOTAL_SIZE);
+                libc::close(fd);
+            }
+            anyhow::bail!(
+                "manifest version {} != {} (stale SHM from an old binary)",
+                version,
+                MANIFEST_VERSION
+            );
+        }
 
         Ok(Self { ptr, fd, owned: false, my_slot: None, my_mod_base: None })
     }
@@ -1649,6 +1693,22 @@ mod shm_tests {
         let entries = m2.entries();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].module_name, "voice");
+    }
+
+    #[test]
+    fn manifest_open_refuses_stale_version() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ = unsafe { libc::shm_unlink(CString::new(SHM_MANIFEST_NAME).unwrap().as_ptr()) };
+        let m = Manifest::create().expect("create");
+        // forge an old version in the header
+        unsafe { ptr::write_unaligned(m.ptr as *mut u32, 1) };
+        assert!(Manifest::open().is_err(), "v1 manifest must be refused");
+        // the standard fallback chain recovers by re-initializing
+        let m2 = Manifest::open().or_else(|_| Manifest::create()).expect("recreate");
+        assert!(m2.entries().is_empty());
+        drop(m2);
+        std::mem::forget(m); // owner drop would unlink mid-test otherwise
+        let _ = unsafe { libc::shm_unlink(CString::new(SHM_MANIFEST_NAME).unwrap().as_ptr()) };
     }
 
     #[test]
