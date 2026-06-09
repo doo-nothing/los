@@ -594,5 +594,13 @@ Phase 4: Envelope module             ✅ Complete
 Phase 5: Track routing / modulation  ✅ Complete
 Phase 6: Module lifecycle            ✅ Complete
 Phase 7: Sequencer undo/redo         ✅ Complete
+v1 polish (8 PRs, see v1-polish.md)  ✅ Complete
 ```
+
+## Post-v1 (next)
+
+- New voices (additional synthesis models) and FX modules
+- Sequencer depth (orca-inspired): per-step chance, ratcheting,
+  per-track clock division, swing — see docs/keybindings.md "Future"
+- Routing overview graph rendering, patch morphing, MIDI I/O
 

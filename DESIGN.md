@@ -231,6 +231,23 @@ active states. Tracks default to enabling every 4th step.
 | **5** | Save/load session state, envelope module, track routing, multi-track | ✅ |
 | **6** | Module lifecycle: add/remove at runtime, `/los_manifest` SHM registry, per-module audio ringbuffers, dynamic mixer channels, CLI aliases | ✅ |
 | **7** | Sequencer undo/redo: command pattern with `u`/`Ctrl-r`, 18 undoable actions, status-bar feedback | ✅ |
+| **v1** | Polish (docs/plans/v1-polish.md): global transport, keybinding doctrine, ex command line + patches, sequencer vi grammar, dynamic routing with source addresses, undo everywhere, conductor lifecycle | ✅ |
+
+---
+
+## 6.5 Keybinding Doctrine
+
+The canonical key reference is `docs/keybindings.md`. The invariants:
+
+- **Axis rule**: navigate along a module's visual layout axis; adjust on the
+  perpendicular. Shift = coarse (~10×), count prefixes repeat, `gg`/`G` jump
+  the primary collection.
+- **Global keys** in every module: `Space` transport play/pause, `Ctrl-s`
+  save, `u`/`Ctrl-r` undo/redo (sweeps coalesce), `:` ex command line
+  (`:w :e :q :q! :x :set`), `@` source picker on bindable params, `?` help.
+- **Sequencer grammar**: vi operators `y/d/c` × motions
+  `h l w b e 0 $ t# f#` over a unified register; visual mode; dot-repeat.
+  A *word* is a maximal run of consecutive active steps.
 
 ---
 

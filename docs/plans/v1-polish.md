@@ -1,5 +1,7 @@
 # v1 Polish — Routing, Keybindings, Transport, Lifecycle
 
+**Status: ✅ Complete** (PRs #5–#12, 2026-06-09)
+
 Everything between "all roadmap phases complete" and a coherent, hyper-polished
 v1. After this: new voices and fx modules.
 

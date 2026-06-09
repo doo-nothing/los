@@ -2878,4 +2878,67 @@ mod tests {
         assert_eq!(s.tracks[0].steps[0].note, 60);
         assert_eq!(h.undo(&mut s), None, "no-op sweep records nothing");
     }
+
+    // ── backfill: helpers that predate the test suite ───────────────────
+
+    #[test]
+    fn euclidean_distributes_pulses() {
+        let mut steps = vec![Step::default(); 16];
+        euclidean_apply(&mut steps, 4, 16, 0);
+        let active: Vec<usize> = (0..16).filter(|&i| steps[i].active).collect();
+        assert_eq!(active.len(), 4);
+        // 4 pulses over 16 steps must be evenly spaced
+        assert_eq!(active[1] - active[0], 4);
+        assert_eq!(active[2] - active[1], 4);
+        assert_eq!(active[3] - active[2], 4);
+    }
+
+    #[test]
+    fn euclidean_rotation_shifts_pattern() {
+        let mut a = vec![Step::default(); 16];
+        let mut b = vec![Step::default(); 16];
+        euclidean_apply(&mut a, 4, 16, 0);
+        euclidean_apply(&mut b, 4, 16, 1);
+        for i in 0..16 {
+            assert_eq!(a[i].active, b[(i + 1) % 16].active, "rotation shifts by one at {}", i);
+        }
+    }
+
+    #[test]
+    fn euclidean_short_length_deactivates_tail() {
+        let mut steps = vec![Step::default(); 16];
+        for st in steps.iter_mut() {
+            st.active = true;
+        }
+        euclidean_apply(&mut steps, 2, 8, 0);
+        assert!(steps[8..].iter().all(|s| !s.active), "steps beyond length must be off");
+        assert_eq!(steps[..8].iter().filter(|s| s.active).count(), 2);
+    }
+
+    #[test]
+    fn euclidean_zero_and_full_pulses() {
+        let mut steps = vec![Step::default(); 16];
+        euclidean_apply(&mut steps, 0, 16, 0);
+        assert!(steps.iter().all(|s| !s.active));
+        euclidean_apply(&mut steps, 16, 16, 0);
+        assert!(steps.iter().all(|s| s.active));
+    }
+
+    #[test]
+    fn midi_note_names() {
+        assert_eq!(midi_note_name(60), "C4");
+        assert_eq!(midi_note_name(69), "A4");
+        assert_eq!(midi_note_name(61), "C#4");
+        assert_eq!(midi_note_name(0), "C0"); // octave saturates at 0
+        assert_eq!(midi_note_name(127), "G9");
+    }
+
+    #[test]
+    fn focus_clamps_track_and_step() {
+        let mut s = state_with_tracks(2);
+        s.tracks[1].length = 8;
+        s.focus(9, Some(20));
+        assert_eq!(s.current_track, 1, "track clamps to last");
+        assert_eq!(s.selected, 7, "step clamps to track length");
+    }
 }
