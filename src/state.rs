@@ -274,6 +274,9 @@ pub struct EnvelopeChannelParams {
     pub offset: f32,
     #[serde(default)]
     pub pluck: f32,
+    /// false = trig (full AD per note), true = gate (sustain until note off)
+    #[serde(default)]
+    pub gate_mode: bool,
     // Source-address bindings (state format v2)
     #[serde(default)]
     pub signal_src: Option<String>,
@@ -299,6 +302,7 @@ impl Default for EnvelopeChannelParams {
             attenuverter: 1.0,
             offset: 0.0,
             pluck: 0.0,
+            gate_mode: false,
             signal_src: None,
             trigger_src: None,
             rise_src: None,
