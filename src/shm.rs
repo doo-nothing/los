@@ -1249,9 +1249,68 @@ impl Manifest {
         Ok(base)
     }
 
+    /// Free manifest slots held by dead processes (a module killed by tmux
+    /// or a crash never runs Drop, so its entry — and its channel claim —
+    /// would otherwise leak forever). Reclaims allocator space where safe:
+    /// a full reset when no live claimers remain, otherwise dead ranges are
+    /// popped off the top of the allocator. Returns the number reaped.
+    pub fn reap_dead(&mut self) -> usize {
+        let mut reaped = 0usize;
+        let mut live_end: u32 = 0;
+        let mut dead_ranges: Vec<(u32, u32)> = Vec::new();
+        for slot in 0..MANIFEST_MAX_ENTRIES {
+            let valid = unsafe { &*self.entry_valid_mut_ptr(slot) };
+            if valid.load(Ordering::Acquire) != 1 {
+                continue;
+            }
+            let data = self.entry_data_ptr(slot);
+            let pid = unsafe { ptr::read_unaligned(data.add(20) as *const u32) };
+            let base = unsafe { ptr::read_unaligned(data.add(56) as *const u32) };
+            let count = unsafe { ptr::read_unaligned(data.add(60) as *const u32) };
+            // signal 0 = existence check; ESRCH = dead (EPERM still means alive)
+            let dead = pid != 0
+                && unsafe { libc::kill(pid as i32, 0) } != 0
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+            if dead {
+                if base != u32::MAX && count > 0 {
+                    dead_ranges.push((base, count));
+                }
+                valid.store(0, Ordering::Release);
+                reaped += 1;
+            } else if base != u32::MAX && count > 0 {
+                live_end = live_end.max(base + count);
+            }
+        }
+
+        let alloc = unsafe { &*(self.ptr.add(12) as *const AtomicU32) };
+        if live_end == 0 {
+            // no live claimers: reset the allocator (CAS so a concurrent
+            // claimer can't be clobbered)
+            let cur = alloc.load(Ordering::Acquire);
+            if cur > 0 {
+                let _ = alloc.compare_exchange(cur, 0, Ordering::AcqRel, Ordering::Relaxed);
+            }
+        } else {
+            // pop dead ranges that sit exactly at the top of the allocator
+            dead_ranges.sort_by_key(|(base, _)| std::cmp::Reverse(*base));
+            let mut cur = alloc.load(Ordering::Acquire);
+            for (base, count) in dead_ranges {
+                if base >= live_end && base + count == cur {
+                    match alloc.compare_exchange(cur, base, Ordering::AcqRel, Ordering::Relaxed) {
+                        Ok(_) => cur = base,
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+        reaped
+    }
+
     /// Register this module in the manifest. Returns the slot index.
     /// `mod_channels` modbus channels are claimed for this module's outputs
     /// (0 for modules that produce none).
+    /// Dead entries are reaped first, so leaked slots/channels from killed
+    /// sessions self-heal here.
     /// Uses two-phase claim protocol: 0 → CLAIMING → 1.
     /// Readers only read entries with valid == 1 (data fully written).
     pub fn register(
@@ -1265,6 +1324,7 @@ impl Manifest {
         if let Some(shm) = audio_shm {
             anyhow::ensure!(shm.len() < 32, "audio SHM name too long (max 31 chars)");
         }
+        self.reap_dead();
         let mod_base = if mod_channels > 0 {
             self.claim_channels(mod_channels)?
         } else {
@@ -1308,6 +1368,18 @@ impl Manifest {
     /// The modbus base channel this module claimed at registration.
     pub fn claimed_base(&self) -> Option<usize> {
         self.my_mod_base
+    }
+
+    /// Current value of the channel allocator (next free modbus channel).
+    pub fn next_channel(&self) -> u32 {
+        unsafe { (*(self.ptr.add(12) as *const AtomicU32)).load(Ordering::Acquire) }
+    }
+
+    /// Forge an entry's pid (tests only — to simulate a dead process).
+    #[cfg(test)]
+    fn force_entry_pid(&mut self, slot: usize, pid: u32) {
+        let data = self.entry_data_ptr(slot);
+        unsafe { ptr::write_unaligned(data.add(20) as *mut u32, pid) };
     }
 
     /// Unregister from our slot (called on Drop, but can be explicit too).
@@ -1758,6 +1830,84 @@ mod shm_tests {
         for i in 0..4 {
             assert!(seen.insert(consumer_id("envelope", i)), "envelope {} collides", i);
         }
+    }
+
+    #[test]
+    fn reap_frees_dead_slots_and_resets_allocator() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ = unsafe { libc::shm_unlink(CString::new(SHM_MANIFEST_NAME).unwrap().as_ptr()) };
+        let mut m = Manifest::create().expect("create");
+
+        // a definitely-dead pid: spawn a child and wait for it
+        let dead_pid = std::process::Command::new("true")
+            .status()
+            .map(|_| {
+                let c = std::process::Command::new("true").spawn().unwrap();
+                let pid = c.id();
+                let _ = c.wait_with_output();
+                pid
+            })
+            .unwrap();
+
+        let s1 = m.register("sequencer", 0, None, 8).expect("seq");
+        m.my_slot = None;
+        let s2 = m.register("envelope", 0, None, 8).expect("env");
+        m.my_slot = None;
+        assert_eq!(m.next_channel(), 16);
+        m.force_entry_pid(s1, dead_pid);
+        m.force_entry_pid(s2, dead_pid);
+
+        assert_eq!(m.reap_dead(), 2, "both dead entries reaped");
+        assert!(m.entries().is_empty());
+        assert_eq!(m.next_channel(), 0, "allocator fully reset with no live claimers");
+
+        // and registration works again in the freed space
+        m.register("sequencer", 0, None, 8).expect("re-register");
+        assert_eq!(m.claimed_base(), Some(0));
+    }
+
+    #[test]
+    fn reap_pops_dead_top_ranges_but_keeps_live() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ = unsafe { libc::shm_unlink(CString::new(SHM_MANIFEST_NAME).unwrap().as_ptr()) };
+        let mut m = Manifest::create().expect("create");
+        let dead_pid = {
+            let c = std::process::Command::new("true").spawn().unwrap();
+            let pid = c.id();
+            let _ = c.wait_with_output();
+            pid
+        };
+
+        m.register("sequencer", 0, None, 8).expect("live seq"); // live, ch0-7
+        m.my_slot = None;
+        let s2 = m.register("envelope", 0, None, 8).expect("dead env"); // ch8-15
+        m.my_slot = None;
+        m.force_entry_pid(s2, dead_pid);
+
+        m.reap_dead();
+        assert_eq!(m.entries().len(), 1, "live entry survives");
+        assert_eq!(m.next_channel(), 8, "dead top range reclaimed, live claim kept");
+    }
+
+    #[test]
+    fn register_self_heals_a_full_manifest_of_dead_entries() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ = unsafe { libc::shm_unlink(CString::new(SHM_MANIFEST_NAME).unwrap().as_ptr()) };
+        let mut m = Manifest::create().expect("create");
+        let dead_pid = {
+            let c = std::process::Command::new("true").spawn().unwrap();
+            let pid = c.id();
+            let _ = c.wait_with_output();
+            pid
+        };
+        for i in 0..MANIFEST_MAX_ENTRIES {
+            let slot = m.register("mod", i, None, 0).expect("fill");
+            m.my_slot = None;
+            m.force_entry_pid(slot, dead_pid);
+        }
+        // full of corpses — registration must reap and succeed
+        m.register("voice", 0, None, 0).expect("register over corpses");
+        assert_eq!(m.entries().len(), 1);
     }
 
     #[test]
