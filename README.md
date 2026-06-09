@@ -39,7 +39,9 @@ Module-specific keybindings work when that pane is focused.
 
 ## Project status
 
-**Phase 7 complete** — Full modular synth workstation with save/load and sequencer undo/redo.
+**v1** — Full modular synth workstation: vi editing grammar, dynamic
+routing, global transport, patches, undo everywhere, runtime module
+lifecycle. Key reference: [docs/keybindings.md](docs/keybindings.md).
 
 - ✅ Conductor with session management TUI
 - ✅ Sequencer with 8 tracks, Euclidean rhythms, step editing, vi-style undo/redo (`u` / `Ctrl-r`)
@@ -50,7 +52,12 @@ Module-specific keybindings work when that pane is focused.
 - ✅ Save/load: full session state (pane order, layout, active pane, params)
 - ✅ Module lifecycle: add/remove modules at runtime, `/los_manifest` SHM registry, per-module audio ringbuffers
 - ✅ Mixer auto-detects new audio sources, dynamically creates channels
-- ✅ CLI: `los --help`, module aliases (`sto` → voice, `maths` → envelope)
+- ✅ CLI: `los --help`, module aliases (`sto` → voice, `maths` → envelope), `los ctl`, `los add`
+- ✅ Vi grammar in the sequencer: operators y/d/c × motions w/b/e/0/$/t#/f#, unified register, visual mode, dot-repeat
+- ✅ Receiver-side routing: `@` source picker, `module/instance/output` addresses, dynamic modbus allocation (multi-voice works)
+- ✅ Ex command line in every module: `:w`/`:e` patches, `:q`, `:set bpm`
+- ✅ Undo/redo in every module (`u`/`Ctrl-r`, counts, sweep coalescing)
+- ✅ Conductor modules view: add/remove modules, routing overview
 
 See [DESIGN.md](DESIGN.md) for architecture details and [docs/plans/roadmap.md](docs/plans/roadmap.md) for future phases.
 

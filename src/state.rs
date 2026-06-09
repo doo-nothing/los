@@ -560,3 +560,49 @@ mod patch_tests {
         assert!(load_patch::<ScopeParams>("definitely-not-a-real-patch").is_err());
     }
 }
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+
+    #[test]
+    fn voice_params_src_roundtrip() {
+        let p = VoiceParams {
+            shape: Some(0.5),
+            amp_src: Some("envelope/0/ch1".into()),
+            notes_src: Some("sequencer/0/t3".into()),
+            ..Default::default()
+        };
+        let s = to_toml_string(&p).unwrap();
+        let back: VoiceParams = toml::from_str(&s).unwrap();
+        assert_eq!(back.amp_src.as_deref(), Some("envelope/0/ch1"));
+        assert_eq!(back.notes_src.as_deref(), Some("sequencer/0/t3"));
+    }
+
+    #[test]
+    fn v1_state_files_parse_but_carry_format_zero() {
+        // Old (v1) files lack meta.format — serde default gives 0, which the
+        // loader refuses. New saves stamp STATE_FORMAT.
+        let toml_str = r#"
+[meta]
+name = "old"
+created = "2026-01-01"
+"#;
+        let st: SessionState = toml::from_str(toml_str).unwrap();
+        assert_eq!(st.meta.format, 0);
+        assert!(st.meta.format < STATE_FORMAT);
+    }
+
+    #[test]
+    fn old_track_binding_fields_are_ignored() {
+        // v1 patches carried shape_track = 3 etc.; v2 ignores unknown fields
+        // and leaves the binding unset rather than failing the load.
+        let toml_str = r#"
+shape = 0.7
+shape_track = 3
+"#;
+        let p: VoiceParams = toml::from_str(toml_str).unwrap();
+        assert_eq!(p.shape, Some(0.7));
+        assert!(p.shape_src.is_none());
+    }
+}
