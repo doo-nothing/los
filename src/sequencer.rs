@@ -67,6 +67,8 @@ struct SequencerState {
     last_notes: Vec<Option<u8>>,
     register: Option<Register>,
     visual_anchor: Option<usize>,
+    /// Modbus base channel claimed at registration (track outputs write here).
+    mod_base: Option<usize>,
 }
 
 impl Default for SequencerState {
@@ -82,6 +84,7 @@ impl Default for SequencerState {
             last_notes: vec![None; track_count],
             register: None,
             visual_anchor: None,
+            mod_base: None,
         }
     }
 }
@@ -885,8 +888,8 @@ fn sequencer_thread(
                             }
                             TrackMode::Modulation => step.mod_value,
                         };
-                        if let Some(ref mut bus) = modbus {
-                            bus.set(8 + t, mod_val);
+                        if let (Some(ref mut bus), Some(base)) = (modbus.as_mut(), s.mod_base) {
+                            bus.set(base + t, mod_val);
                         }
 
                         // Note mode: send note-on/note-off events
@@ -1262,7 +1265,8 @@ pub fn run(instance: usize) -> Result<()> {
     state::setup_reload_signal();
     state::write_pid_file("sequencer", instance);
     let mut manifest = Manifest::open().or_else(|_| Manifest::create())?;
-    let _ = manifest.register("sequencer", instance, None);
+    let _ = manifest.register("sequencer", instance, None, 8);
+    let claimed_base = manifest.claimed_base();
     
     for attempt in 0..20 {
         match enable_raw_mode() {
@@ -1283,6 +1287,7 @@ pub fn run(instance: usize) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let state = Arc::new(Mutex::new(SequencerState::default()));
+    state.lock().unwrap().mod_base = claimed_base;
     
     // Load saved state if available
     if let Ok(params) = state::load_module_state::<state::SequencerParams>("sequencer", instance) {

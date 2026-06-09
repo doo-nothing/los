@@ -896,7 +896,7 @@ impl EventRingbuf {
 ///   [4..8)     num_channels : u32 = 32
 ///   [8..64)    reserved
 ///   [64..4160) 32 x f32 channels (aligned 4)
-const MODBUS_NUM_CHANNELS: usize = 32;
+const MODBUS_NUM_CHANNELS: usize = 64;
 const MODBUS_DATA_OFFSET: usize = 64;
 const MODBUS_TOTAL_SIZE: usize = MODBUS_DATA_OFFSET + MODBUS_NUM_CHANNELS * size_of::<f32>();
 
@@ -1039,8 +1039,24 @@ impl ModulationBus {
 // ── Manifest ────────────────────────────────────────────────────────────
 
 const MANIFEST_MAX_ENTRIES: usize = 16;
-const MANIFEST_ENTRY_SIZE: usize = 64;
+const MANIFEST_ENTRY_SIZE: usize = 96; // v2: grew from 64 for modbus claims
 const MANIFEST_HEADER_SIZE: usize = 64;
+const MANIFEST_VERSION: u32 = 2;
+/// Total modbus channels available to the allocator.
+pub const MODBUS_CHANNELS: usize = MODBUS_NUM_CHANNELS;
+
+/// Event-ringbuf consumer slot assignment (16 slots):
+/// voices 0–7, envelopes 8–11, 12–15 reserved.
+/// One documented scheme instead of per-module arithmetic — a module that
+/// reconnects MUST use the same slot it started with or it steals another
+/// module's events.
+pub fn consumer_id(module: &str, instance: usize) -> usize {
+    match module {
+        "voice" => instance.min(7),
+        "envelope" => 8 + instance.min(3),
+        _ => 15,
+    }
+}
 const MANIFEST_TOTAL_SIZE: usize =
     MANIFEST_HEADER_SIZE + MANIFEST_MAX_ENTRIES * MANIFEST_ENTRY_SIZE;
 
@@ -1053,6 +1069,7 @@ pub struct Manifest {
     fd: i32,
     owned: bool,
     my_slot: Option<usize>,
+    my_mod_base: Option<usize>,
 }
 
 unsafe impl Send for Manifest {}
@@ -1129,9 +1146,10 @@ impl Manifest {
         };
 
         unsafe {
-            ptr::write_unaligned(ptr as *mut u32, 1);
+            ptr::write_unaligned(ptr as *mut u32, MANIFEST_VERSION);
             ptr::write_unaligned(ptr.add(4) as *mut u32, MANIFEST_MAX_ENTRIES as u32);
             ptr::write_unaligned(ptr.add(8) as *mut u32, MANIFEST_ENTRY_SIZE as u32);
+            ptr::write_unaligned(ptr.add(12) as *mut u32, 0); // next free modbus channel
             std::ptr::write_bytes(
                 ptr.add(MANIFEST_HEADER_SIZE),
                 0,
@@ -1139,7 +1157,7 @@ impl Manifest {
             );
         }
 
-        Ok(Self { ptr, fd, owned: true, my_slot: None })
+        Ok(Self { ptr, fd, owned: true, my_slot: None, my_mod_base: None })
     }
 
     pub fn open() -> Result<Self> {
@@ -1169,17 +1187,45 @@ impl Manifest {
             p as *mut u8
         };
 
-        Ok(Self { ptr, fd, owned: false, my_slot: None })
+        Ok(Self { ptr, fd, owned: false, my_slot: None, my_mod_base: None })
+    }
+
+    /// Atomically claim `count` modbus channels; returns the base index.
+    /// The allocator is monotonic (channels are not reclaimed on exit) — a
+    /// restarted module simply claims a fresh range and bindings re-resolve
+    /// through the manifest. 64 channels is plenty for one session.
+    fn claim_channels(&mut self, count: u32) -> Result<u32> {
+        let alloc = unsafe { &*(self.ptr.add(12) as *const AtomicU32) };
+        let base = alloc.fetch_add(count, Ordering::AcqRel);
+        anyhow::ensure!(
+            (base + count) as usize <= MODBUS_NUM_CHANNELS,
+            "modbus channels exhausted ({} max)",
+            MODBUS_NUM_CHANNELS
+        );
+        Ok(base)
     }
 
     /// Register this module in the manifest. Returns the slot index.
+    /// `mod_channels` modbus channels are claimed for this module's outputs
+    /// (0 for modules that produce none).
     /// Uses two-phase claim protocol: 0 → CLAIMING → 1.
     /// Readers only read entries with valid == 1 (data fully written).
-    pub fn register(&mut self, module_name: &str, instance: usize, audio_shm: Option<&str>) -> Result<usize> {
+    pub fn register(
+        &mut self,
+        module_name: &str,
+        instance: usize,
+        audio_shm: Option<&str>,
+        mod_channels: u32,
+    ) -> Result<usize> {
         anyhow::ensure!(module_name.len() < 16, "module name too long (max 15 chars)");
         if let Some(shm) = audio_shm {
             anyhow::ensure!(shm.len() < 32, "audio SHM name too long (max 31 chars)");
         }
+        let mod_base = if mod_channels > 0 {
+            self.claim_channels(mod_channels)?
+        } else {
+            u32::MAX
+        };
 
         for slot in 0..MANIFEST_MAX_ENTRIES {
             let valid = unsafe { &*self.entry_valid_mut_ptr(slot) };
@@ -1200,15 +1246,24 @@ impl Manifest {
                             std::ptr::copy_nonoverlapping(shm_bytes.as_ptr(), dst, shm_bytes.len());
                             std::ptr::write(dst.add(shm_bytes.len()), 0u8);
                         }
+
+                        ptr::write_unaligned(data.add(56) as *mut u32, mod_base);
+                        ptr::write_unaligned(data.add(60) as *mut u32, mod_channels);
                     }
                     valid.store(1, Ordering::Release);
                     self.my_slot = Some(slot);
+                    self.my_mod_base = if mod_channels > 0 { Some(mod_base as usize) } else { None };
                     return Ok(slot);
                 }
                 _ => continue,
             }
         }
         anyhow::bail!("manifest is full ({} max entries)", MANIFEST_MAX_ENTRIES);
+    }
+
+    /// The modbus base channel this module claimed at registration.
+    pub fn claimed_base(&self) -> Option<usize> {
+        self.my_mod_base
     }
 
     /// Unregister from our slot (called on Drop, but can be explicit too).
@@ -1228,7 +1283,7 @@ impl Manifest {
             if valid.load(Ordering::Acquire) != 1 {
                 continue;
             }
-            let data = unsafe { std::slice::from_raw_parts(self.entry_data_ptr(slot), 60) };
+            let data = unsafe { std::slice::from_raw_parts(self.entry_data_ptr(slot), MANIFEST_ENTRY_SIZE - 4) };
             let name_end = data[..16].iter().position(|&b| b == 0).unwrap_or(16);
             let module_name = String::from_utf8_lossy(&data[..name_end]).to_string();
             let instance = unsafe { ptr::read_unaligned(data.as_ptr().add(16) as *const u32) as usize };
@@ -1237,7 +1292,10 @@ impl Manifest {
                 let shm_end = data[24..56].iter().position(|&b| b == 0).unwrap_or(32);
                 if shm_end == 0 { None } else { Some(String::from_utf8_lossy(&data[24..24 + shm_end]).to_string()) }
             };
-            result.push(ManifestEntry { module_name, instance, pid, audio_shm });
+            let raw_base = unsafe { ptr::read_unaligned(data.as_ptr().add(56) as *const u32) };
+            let mod_count = unsafe { ptr::read_unaligned(data.as_ptr().add(60) as *const u32) };
+            let mod_base = if raw_base == u32::MAX || mod_count == 0 { None } else { Some(raw_base as usize) };
+            result.push(ManifestEntry { module_name, instance, pid, audio_shm, mod_base, mod_count: mod_count as usize });
         }
         result
     }
@@ -1249,6 +1307,9 @@ pub struct ManifestEntry {
     pub instance: usize,
     pub pid: u32,
     pub audio_shm: Option<String>,
+    /// First modbus channel claimed by this module (None = claims none).
+    pub mod_base: Option<usize>,
+    pub mod_count: usize,
 }
 
 #[cfg(test)]
@@ -1545,7 +1606,7 @@ mod shm_tests {
         let _ = unsafe { libc::shm_unlink(CString::new(SHM_MANIFEST_NAME).unwrap().as_ptr()) };
         let mut m = Manifest::create().expect("create manifest");
 
-        let slot = m.register("voice", 0, Some("/los_audio_voice_0")).expect("register");
+        let slot = m.register("voice", 0, Some("/los_audio_voice_0"), 0).expect("register");
         assert_eq!(slot, 0, "first registration should get slot 0");
 
         let entries = m.entries();
@@ -1564,10 +1625,10 @@ mod shm_tests {
         let _ = unsafe { libc::shm_unlink(CString::new(SHM_MANIFEST_NAME).unwrap().as_ptr()) };
         let mut m = Manifest::create().expect("create manifest");
 
-        m.register("sequencer", 0, None).expect("register sequencer");
-        m.register("voice", 0, Some("/los_audio_voice_0")).expect("register voice 0");
-        m.register("voice", 1, Some("/los_audio_voice_1")).expect("register voice 1");
-        m.register("envelope", 0, None).expect("register envelope");
+        m.register("sequencer", 0, None, 8).expect("register sequencer");
+        m.register("voice", 0, Some("/los_audio_voice_0"), 0).expect("register voice 0");
+        m.register("voice", 1, Some("/los_audio_voice_1"), 0).expect("register voice 1");
+        m.register("envelope", 0, None, 8).expect("register envelope");
 
         let entries = m.entries();
         assert_eq!(entries.len(), 4);
@@ -1581,13 +1642,62 @@ mod shm_tests {
         let _guard = SHM_TEST_MUTEX.lock().unwrap();
         let _ = unsafe { libc::shm_unlink(CString::new(SHM_MANIFEST_NAME).unwrap().as_ptr()) };
         let mut m1 = Manifest::create().expect("create manifest");
-        m1.register("voice", 0, Some("/los_audio_voice_0")).expect("register");
+        m1.register("voice", 0, Some("/los_audio_voice_0"), 0).expect("register");
 
         // Simulate another process opening the same manifest
         let m2 = Manifest::open().expect("open manifest");
         let entries = m2.entries();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].module_name, "voice");
+    }
+
+    #[test]
+    fn manifest_claims_modbus_channels() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ = unsafe { libc::shm_unlink(CString::new(SHM_MANIFEST_NAME).unwrap().as_ptr()) };
+        let mut m = Manifest::create().expect("create manifest");
+
+        m.register("sequencer", 0, None, 8).expect("register seq");
+        assert_eq!(m.claimed_base(), Some(0), "first claimer gets base 0");
+
+        let mut m2 = Manifest::open().expect("open");
+        m2.register("envelope", 0, None, 8).expect("register env");
+        assert_eq!(m2.claimed_base(), Some(8), "second claimer follows");
+
+        let mut m3 = Manifest::open().expect("open");
+        m3.register("voice", 0, None, 0).expect("register voice");
+        assert_eq!(m3.claimed_base(), None, "no channels claimed");
+
+        let entries = m.entries();
+        let seq = entries.iter().find(|e| e.module_name == "sequencer").unwrap();
+        assert_eq!((seq.mod_base, seq.mod_count), (Some(0), 8));
+        let env = entries.iter().find(|e| e.module_name == "envelope").unwrap();
+        assert_eq!((env.mod_base, env.mod_count), (Some(8), 8));
+        let voice = entries.iter().find(|e| e.module_name == "voice").unwrap();
+        assert_eq!((voice.mod_base, voice.mod_count), (None, 0));
+    }
+
+    #[test]
+    fn modbus_channels_exhaust() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ = unsafe { libc::shm_unlink(CString::new(SHM_MANIFEST_NAME).unwrap().as_ptr()) };
+        let mut m = Manifest::create().expect("create manifest");
+        for i in 0..(MODBUS_CHANNELS / 8) {
+            m.register("mod", i, None, 8).expect("claim");
+            m.my_slot = None; // keep registering from the same handle
+        }
+        assert!(m.register("over", 0, None, 8).is_err(), "65th channel must fail");
+    }
+
+    #[test]
+    fn consumer_ids_are_disjoint() {
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..8 {
+            assert!(seen.insert(consumer_id("voice", i)), "voice {} collides", i);
+        }
+        for i in 0..4 {
+            assert!(seen.insert(consumer_id("envelope", i)), "envelope {} collides", i);
+        }
     }
 
     #[test]
@@ -1598,11 +1708,11 @@ mod shm_tests {
 
         // Fill all 16 slots
         for i in 0..16 {
-            m.register("mod", i, None).expect("register");
+            m.register("mod", i, None, 0).expect("register");
         }
 
         // Next registration should fail
-        assert!(m.register("overflow", 0, None).is_err());
+        assert!(m.register("overflow", 0, None, 0).is_err());
     }
 
     #[test]

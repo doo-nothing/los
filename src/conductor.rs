@@ -228,6 +228,13 @@ pub fn load_session(state_path: &str) -> Result<()> {
 
     // Read the state file
     let st = state::from_toml_file::<state::SessionState>(std::path::Path::new(state_path))?;
+    anyhow::ensure!(
+        st.meta.format >= state::STATE_FORMAT,
+        "{} is a v{} state file; v{} (routing source addresses) is a clean break — re-save your session",
+        state_path,
+        st.meta.format.max(1),
+        state::STATE_FORMAT
+    );
 
     // Kill existing session (ignore error if none exists)
     let _ = tmux_cmd(&["kill-session", "-t", "los"]);
@@ -315,6 +322,13 @@ pub fn load_session(state_path: &str) -> Result<()> {
 fn reload_modules_from_state(state_path: &std::path::Path) -> Result<()> {
     // Read the state file
     let st = state::from_toml_file::<state::SessionState>(state_path)?;
+    anyhow::ensure!(
+        st.meta.format >= state::STATE_FORMAT,
+        "{} is a v{} state file; v{} is a clean break — re-save your session",
+        state_path.display(),
+        st.meta.format.max(1),
+        state::STATE_FORMAT
+    );
 
     // Kill the existing modules window (all module panes), keeping conductor
     let _ = tmux_cmd(&["kill-window", "-t", "los:modules"]);
@@ -606,6 +620,7 @@ pub fn run_conductor() -> Result<()> {
                             meta: state::Meta {
                                 name: filename.trim_end_matches(".toml").to_string(),
                                 created: now,
+                                format: state::STATE_FORMAT,
                             },
                             tmux: state::TmuxState::default(),
                             windows: vec![state::WindowState {
@@ -768,6 +783,7 @@ mod tests {
             meta: state::Meta {
                 name: "reordered".into(),
                 created: "123".into(),
+                format: state::STATE_FORMAT,
             },
             tmux: state::TmuxState::default(),
             windows: vec![state::WindowState {
@@ -813,6 +829,7 @@ mod tests {
             meta: state::Meta {
                 name: "base-index-1".into(),
                 created: "123".into(),
+                format: state::STATE_FORMAT,
             },
             tmux: state::TmuxState::default(),
             windows: vec![state::WindowState {
@@ -844,6 +861,7 @@ mod tests {
             meta: state::Meta {
                 name: "layout-preserve".into(),
                 created: "123".into(),
+                format: state::STATE_FORMAT,
             },
             tmux: state::TmuxState::default(),
             windows: vec![state::WindowState {

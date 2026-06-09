@@ -11,7 +11,7 @@ pub fn run(frequency: f32, instance: usize) -> Result<()> {
         .context("creating SHM audio ringbuffer")?;
 
     let mut manifest = Manifest::open().or_else(|_| Manifest::create())?;
-    manifest.register("tone", instance, Some(&shm_name))?;
+    manifest.register("tone", instance, Some(&shm_name), 0)?;
 
     let sample_rate = 48000.0;
     let channels = ringbuf.channels() as usize;

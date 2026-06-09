@@ -98,11 +98,17 @@ pub struct SessionState {
     pub windows: Vec<WindowState>,
 }
 
+/// Current session state-file format. v2 (routing source addresses) is a
+/// clean break: v1 files are refused at load.
+pub const STATE_FORMAT: u32 = 2;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Meta {
     pub name: String,
     #[serde(default)]
     pub created: String,
+    #[serde(default)]
+    pub format: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,14 +168,19 @@ pub struct VoiceParams {
     pub gate: Option<bool>,
     pub level: Option<f32>,
     pub velocity: Option<f32>,
+    // Source-address bindings (state format v2): "module/instance/output"
     #[serde(default)]
-    pub shape_track: i32,
+    pub shape_src: Option<String>,
     #[serde(default)]
-    pub sub_track: i32,
+    pub sub_src: Option<String>,
     #[serde(default)]
-    pub fm_track: i32,
+    pub fm_src: Option<String>,
     #[serde(default)]
-    pub level_track: i32,
+    pub level_src: Option<String>,
+    #[serde(default)]
+    pub amp_src: Option<String>,
+    #[serde(default)]
+    pub notes_src: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -238,23 +249,24 @@ pub struct EnvelopeParams {
     pub logic_outputs: LogicOutputConfig,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvelopeChannelParams {
     pub rise: f32,
     pub fall: f32,
     pub shape: f32,
     pub loop_mode: bool,
     pub attenuverter: f32,
+    // Source-address bindings (state format v2)
     #[serde(default)]
-    pub trigger_track: i32,
+    pub trigger_src: Option<String>,
     #[serde(default)]
-    pub rise_track: i32,
+    pub rise_src: Option<String>,
     #[serde(default)]
-    pub fall_track: i32,
+    pub fall_src: Option<String>,
     #[serde(default)]
-    pub shape_track: i32,
+    pub shape_src: Option<String>,
     #[serde(default)]
-    pub atten_track: i32,
+    pub atten_src: Option<String>,
 }
 
 impl Default for EnvelopeChannelParams {
@@ -265,11 +277,11 @@ impl Default for EnvelopeChannelParams {
             shape: 0.5,
             loop_mode: false,
             attenuverter: 1.0,
-            trigger_track: -1,
-            rise_track: -1,
-            fall_track: -1,
-            shape_track: -1,
-            atten_track: -1,
+            trigger_src: None,
+            rise_src: None,
+            fall_src: None,
+            shape_src: None,
+            atten_src: None,
         }
     }
 }
@@ -398,6 +410,7 @@ mod state_tests {
             meta: Meta {
                 name: "test-session".into(),
                 created: "1234567890".into(),
+                format: STATE_FORMAT,
             },
             tmux: TmuxState {
                 session_name: "los".into(),
@@ -453,6 +466,7 @@ mod state_tests {
             meta: Meta {
                 name: "minimal".into(),
                 created: "".into(),
+                format: STATE_FORMAT,
             },
             tmux: TmuxState::default(),
             windows: vec![WindowState {
