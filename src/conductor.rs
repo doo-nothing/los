@@ -36,7 +36,7 @@ use ratatui::{
     Terminal,
 };
 
-use crate::shm::Manifest;
+use crate::shm::{Manifest, ShmTransport};
 use crate::state;
 
 // ── tmux command helpers ───────────────────────────────────────────────────
@@ -166,6 +166,26 @@ fn spawn_session_panes(panes_data: &[(&str, &str)]) -> Result<()> {
     Ok(())
 }
 
+/// Install global transport keys on the tmux prefix: `Ctrl-b p` toggles
+/// play/pause and `Ctrl-b s` stops — but only inside the los session.
+/// Outside it, the if-shell falls through to the stock tmux behavior
+/// (previous-window / session chooser), so other sessions are unaffected.
+fn install_transport_keys(exe: &str) {
+    let in_los = "#{==:#{session_name},los}";
+    tmux_cmd_ok(&[
+        "bind-key", "p",
+        "if-shell", "-F", in_los,
+        &format!("run-shell -b '{} ctl toggle'", exe),
+        "previous-window",
+    ]);
+    tmux_cmd_ok(&[
+        "bind-key", "s",
+        "if-shell", "-F", in_los,
+        &format!("run-shell -b '{} ctl stop'", exe),
+        "choose-tree -Zs",
+    ]);
+}
+
 pub fn create_session() -> Result<()> {
     state::ensure_dirs()?;
     let _ = tmux_cmd(&["kill-session", "-t", "los"]);
@@ -192,6 +212,8 @@ pub fn create_session() -> Result<()> {
 
     // Apply default tiled layout
     tmux_cmd(&["select-layout", "-t", "los:modules", "tiled"])?;
+
+    install_transport_keys(&exe);
 
     // Attach (blocks until detached; use raw .status())
     let _ = Command::new("tmux")
@@ -279,6 +301,8 @@ pub fn load_session(state_path: &str) -> Result<()> {
         }
     }
 
+    install_transport_keys(&exe);
+
     let _ = Command::new("tmux")
         .args(["attach-session", "-t", "los"])
         .status();
@@ -361,6 +385,8 @@ pub fn run_conductor() -> Result<()> {
     
     let mut selected: usize = 0;
     let mut show_help = false;
+    // Global transport handle for Space = play/pause (lazily reopened)
+    let mut transport_ui: Option<ShmTransport> = ShmTransport::open().ok();
     
     // Shared state entries list
     let mut entries: Vec<String> = Vec::new();
@@ -561,6 +587,14 @@ pub fn run_conductor() -> Result<()> {
                         let _ = std::fs::remove_file(&path);
                         needs_refresh = true;
                     }
+                    KeyCode::Char(' ') => {
+                        if transport_ui.is_none() {
+                            transport_ui = ShmTransport::open().ok();
+                        }
+                        if let Some(ref mut t) = transport_ui {
+                            t.toggle_playing();
+                        }
+                    }
                     KeyCode::Char('?') => {
                         show_help = true;
                         needs_refresh = true;
@@ -579,6 +613,7 @@ pub fn run_conductor() -> Result<()> {
                     Line::from("  s          Save current session state"),
                     Line::from("  l          Load selected state (full session reload)"),
                     Line::from("  d          Delete selected state"),
+                Line::from("  space      Play/pause (global)"),
                 Line::from("  ?          Toggle this help"),
                 Line::from("  Close pane: tmux prefix + x"),
                 ];

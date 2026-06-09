@@ -278,6 +278,7 @@ fn draw_ui(
                 Line::from("  +/-       Pan left/right"),
                 Line::from("  m         Toggle mute"),
                 Line::from("  s         Toggle solo"),
+                Line::from("  space      Play/pause (global)"),
                 Line::from("  ?         Toggle help"),
                 Line::from("  ^s        Save state"),
             ];
@@ -342,6 +343,8 @@ pub fn run() -> Result<()> {
     });
 
     let mut show_help = false;
+    // Global transport handle for Space = play/pause (lazily reopened)
+    let mut transport_ui: Option<ShmTransport> = ShmTransport::open().ok();
 
     loop {
         if state::check_save_signal() {
@@ -458,6 +461,14 @@ pub fn run() -> Result<()> {
                         let sel = s.selected;
                         if sel < s.tracks.len() {
                             s.tracks[sel].solo = !s.tracks[sel].solo;
+                        }
+                    }
+                    KeyCode::Char(' ') => {
+                        if transport_ui.is_none() {
+                            transport_ui = ShmTransport::open().ok();
+                        }
+                        if let Some(ref mut t) = transport_ui {
+                            t.toggle_playing();
                         }
                     }
                     KeyCode::Char('?') => {

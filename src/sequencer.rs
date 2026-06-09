@@ -390,10 +390,17 @@ fn sequencer_thread(
 
     let mut modbus = ModulationBus::open().or_else(|_| ModulationBus::create()).ok();
 
-    let transport = match ShmTransport::open() {
+    let mut transport = match ShmTransport::open() {
         Ok(t) => t,
         Err(_) => ShmTransport::create(sample_rate as u32)?,
     };
+
+    // Seed the global play flag from loaded/default state once; from here on
+    // the SHM flag is the source of truth (any module or `los ctl` may flip it).
+    {
+        let s = state.lock().unwrap();
+        transport.set_playing(s.playing);
+    }
 
     let mut last_steps: Vec<i32> = vec![-1];
 
@@ -406,9 +413,13 @@ fn sequencer_thread(
             modbus = ModulationBus::open().or_else(|_| ModulationBus::create()).ok();
         }
 
-        let (bpm, playing) = {
-            let s = state.lock().unwrap();
-            (s.bpm, s.playing)
+        // The SHM transport play flag is the source of truth; s.playing is a
+        // mirror kept for the UI and save files.
+        let playing = transport.playing();
+        let bpm = {
+            let mut s = state.lock().unwrap();
+            s.playing = playing;
+            s.bpm
         };
 
         let clock = transport.clock();
@@ -835,6 +846,10 @@ pub fn run(instance: usize) -> Result<()> {
         }
     });
 
+    // UI-side transport handle for play/stop keys (lazily reopened if the
+    // transport doesn't exist yet when a key is first pressed)
+    let mut transport_ui: Option<ShmTransport> = ShmTransport::open().ok();
+
     let mut mode = String::from("normal");
     let mut submode = String::new();
     let mut input_buffer = String::new();
@@ -885,7 +900,15 @@ pub fn run(instance: usize) -> Result<()> {
             if let Ok(params) = state::load_module_state::<state::SequencerParams>("sequencer", instance) {
                 let mut s = state.lock().unwrap();
                 if let Some(bpm) = params.bpm { s.bpm = bpm; }
-                if let Some(playing) = params.playing { s.playing = playing; }
+                if let Some(playing) = params.playing {
+                    s.playing = playing;
+                    if transport_ui.is_none() {
+                        transport_ui = ShmTransport::open().ok();
+                    }
+                    if let Some(ref mut t) = transport_ui {
+                        t.set_playing(playing);
+                    }
+                }
                 if !params.tracks.is_empty() {
                     s.tracks.clear();
                     s.current_steps.clear();
@@ -1503,22 +1526,33 @@ pub fn run(instance: usize) -> Result<()> {
                             s.selected = 0;
                         }
 
-                        // Transport
+                        // Transport (writes the global SHM play flag; the
+                        // sequencer thread mirrors it back into s.playing)
                         KeyCode::Char(' ') => {
                             pending_count = None;
                             pending_d = false;
                             pending_y = false;
                             pending_g = false;
-                            let mut s = state.lock().unwrap();
-                            s.playing = !s.playing;
+                            if transport_ui.is_none() {
+                                transport_ui = ShmTransport::open().ok();
+                            }
+                            if let Some(ref mut t) = transport_ui {
+                                let playing = t.toggle_playing();
+                                state.lock().unwrap().playing = playing;
+                            }
                         }
                         KeyCode::Char('s') => {
                             pending_count = None;
                             pending_d = false;
                             pending_y = false;
                             pending_g = false;
-                            let mut s = state.lock().unwrap();
-                            s.playing = false;
+                            if transport_ui.is_none() {
+                                transport_ui = ShmTransport::open().ok();
+                            }
+                            if let Some(ref mut t) = transport_ui {
+                                t.set_playing(false);
+                            }
+                            state.lock().unwrap().playing = false;
                         }
                         KeyCode::Char('u') => {
                             // Count-prefixed: 3u undoes 3 times

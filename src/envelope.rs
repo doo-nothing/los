@@ -480,6 +480,7 @@ fn draw_ui(
                 Line::from("  c          Toggle cycle/loop mode"),
                 Line::from("  g          Toggle gate (sustain)"),
                 Line::from(""),
+                Line::from("  space      Play/pause (global)"),
                 Line::from("  ?          Toggle this help"),
                 Line::from("  Close pane: tmux prefix + x"),
             ];
@@ -551,6 +552,8 @@ pub fn run(instance: usize) -> Result<()> {
 
     let mut selected = 0usize;
     let mut show_help = false;
+    // Global transport handle for Space = play/pause (lazily reopened)
+    let mut transport_ui: Option<ShmTransport> = ShmTransport::open().ok();
     let mut at_pending = false;
 
     loop {
@@ -726,6 +729,14 @@ pub fn run(instance: usize) -> Result<()> {
                                     ch.eoc_fired = false;
                                 }
                             }
+                        }
+                    }
+                    KeyCode::Char(' ') => {
+                        if transport_ui.is_none() {
+                            transport_ui = ShmTransport::open().ok();
+                        }
+                        if let Some(ref mut t) = transport_ui {
+                            t.toggle_playing();
                         }
                     }
                     KeyCode::Char('?') => {

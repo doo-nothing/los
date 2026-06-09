@@ -15,7 +15,7 @@ Status markers: **✅ today** · **🔜 v1** (see `docs/plans/v1-polish.md`) ·
 | Coarse | Shift-variant of an adjust key = ~10× step: `L` vs `l`. 🔜 |
 | `?` | Help overlay. ✅ |
 | `Ctrl-s` | Save module state. ✅ |
-| `Space` | Global transport play/pause (except sequencer insert mode). 🔜 |
+| `Space` | Global transport play/pause (except sequencer insert mode); also `Ctrl-b p`/`Ctrl-b s` and `los ctl`. ✅ |
 | `u` / `Ctrl-r` | Undo / redo, count-prefixed. ✅ sequencer · 🔜 all modules |
 | `@` | Open source picker on a bindable param. 🔜 (✅ today as `@N` track digit) |
 | `:` | Ex command line. 🔜 |

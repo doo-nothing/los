@@ -18,7 +18,7 @@ use ratatui::{
     Terminal,
 };
 
-use crate::shm::{AudioRingbuf, Manifest, ModulationBus};
+use crate::shm::{AudioRingbuf, Manifest, ModulationBus, ShmTransport};
 use crate::state;
 
 const BUFFER_SIZE: usize = 512;
@@ -198,6 +198,7 @@ fn draw_ui(
                 Line::from("  g/G        Increase/decrease gain"),
                 Line::from("  t/T        Trigger level"),
                 Line::from(""),
+                Line::from("  space      Play/pause (global)"),
                 Line::from("  ?          Toggle this help"),
                 Line::from("  Close pane: tmux prefix + x"),
             ];
@@ -260,6 +261,8 @@ pub fn run(instance: usize) -> Result<()> {
     });
 
     let mut show_help = false;
+    // Global transport handle for Space = play/pause (lazily reopened)
+    let mut transport_ui: Option<ShmTransport> = ShmTransport::open().ok();
 
     loop {
         // Check for save-on-signal
@@ -348,6 +351,14 @@ pub fn run(instance: usize) -> Result<()> {
                     KeyCode::Char('N') => {
                         let mut s = state.lock().unwrap();
                         s.modbus_channel = s.modbus_channel.saturating_sub(1);
+                    }
+                    KeyCode::Char(' ') => {
+                        if transport_ui.is_none() {
+                            transport_ui = ShmTransport::open().ok();
+                        }
+                        if let Some(ref mut t) = transport_ui {
+                            t.toggle_playing();
+                        }
                     }
                     KeyCode::Char('?') => {
                         show_help = !show_help;
