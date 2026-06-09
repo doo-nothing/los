@@ -34,6 +34,7 @@ struct ScopeState {
     trigger_level: f32,
     source: usize,        // 0=audio, 1=modbus
     modbus_channel: usize,
+    selected: usize,      // selected param row (not persisted)
 }
 
 impl Default for ScopeState {
@@ -47,7 +48,63 @@ impl Default for ScopeState {
             trigger_level: 0.0,
             source: 0,
             modbus_channel: 0,
+            selected: 0,
         }
+    }
+}
+
+// Param rows (axis rule: vertical list — j/k select, h/l adjust, H/L coarse)
+const ROW_MODE: usize = 0;
+const ROW_SOURCE: usize = 1;
+const ROW_CHANNEL: usize = 2;
+const ROW_MODBUS_CH: usize = 3;
+const ROW_ZOOM: usize = 4;
+const ROW_GAIN: usize = 5;
+const ROW_TRIGGER: usize = 6;
+const NUM_ROWS: usize = 7;
+
+/// Adjust the selected param row by `steps` (negative = left/decrease).
+/// Cyclic rows (mode/source/channel/modbus channel) wrap; continuous rows
+/// step fine, or ×10 with `coarse`.
+fn adjust(s: &mut ScopeState, steps: i32, coarse: bool) {
+    use crate::keys::{cycle, step_f32};
+    match s.selected {
+        ROW_MODE => s.mode = cycle(s.mode, steps, 4),
+        ROW_SOURCE => s.source = cycle(s.source, steps, 2),
+        ROW_CHANNEL => s.channel = cycle(s.channel, steps, 3),
+        ROW_MODBUS_CH => s.modbus_channel = cycle(s.modbus_channel, steps, 32),
+        ROW_ZOOM => s.zoom = step_f32(s.zoom, steps, 0.1, coarse, 0.5, 10.0),
+        ROW_GAIN => s.gain = step_f32(s.gain, steps, 0.1, coarse, 0.1, 10.0),
+        ROW_TRIGGER => s.trigger_level = step_f32(s.trigger_level, steps, 0.05, coarse, -1.0, 1.0),
+        _ => {}
+    }
+}
+
+fn row_display(s: &ScopeState, row: usize) -> String {
+    match row {
+        ROW_MODE => format!(
+            "Mode:{}",
+            match s.mode {
+                0 => "Braille",
+                1 => "HalfBlock",
+                2 => "Bars",
+                _ => "Dots",
+            }
+        ),
+        ROW_SOURCE => format!("Src:{}", if s.source == 0 { "Audio" } else { "Mod" }),
+        ROW_CHANNEL => format!(
+            "Ch:{}",
+            match s.channel {
+                0 => "L",
+                1 => "R",
+                _ => "S",
+            }
+        ),
+        ROW_MODBUS_CH => format!("ModCh:{}", s.modbus_channel),
+        ROW_ZOOM => format!("Zoom:{:.1}x", s.zoom),
+        ROW_GAIN => format!("Gain:{:.1}x", s.gain),
+        ROW_TRIGGER => format!("Trig:{:+.2}", s.trigger_level),
+        _ => String::new(),
     }
 }
 
@@ -117,22 +174,19 @@ fn draw_ui(
             ])
             .split(area);
 
-        let mode_str = match state.mode {
-            0 => "Braille",
-            1 => "HalfBlock",
-            2 => "Bars",
-            _ => "Dots",
-        };
-        let channel_str = match state.channel {
-            0 => "L",
-            1 => "R",
-            _ => "S",
-        };
-        let source_str = if state.source == 0 { "Audio" } else { "Mod" };
-        let status = format!(
-            "Src: {} | Mode: {} | Ch: {} | Zoom: {:.1}x | Gain: {:.1}x | Trig: {:.2}",
-            source_str, mode_str, channel_str, state.zoom, state.gain, state.trigger_level
-        );
+        // Param list rendered as one status line; the selected row is
+        // bracketed (j/k select, h/l adjust, H/L coarse)
+        let status = (0..NUM_ROWS)
+            .map(|row| {
+                let text = row_display(state, row);
+                if row == state.selected {
+                    format!("[{}]", text)
+                } else {
+                    format!(" {} ", text)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("|");
         let status_widget = Paragraph::new(status).style(Style::default().fg(Color::Cyan));
         f.render_widget(status_widget, chunks[1]);
 
@@ -184,19 +238,16 @@ fn draw_ui(
             let help_text = vec![
                 Line::from("━━━ Scope Help ━━━"),
                 Line::from(""),
-                Line::from("Display:"),
-                Line::from("  m          Cycle render mode"),
-                Line::from("             (Braille/HalfBlock/Bars/Dots)"),
-                Line::from("  c          Cycle channel (L/R/Stereo)"),
+                Line::from("Params (j/k select, h/l adjust):"),
+                Line::from("  j/k        Select param"),
+                Line::from("  h/l        Adjust selected param"),
+                Line::from("  H/L        Coarse adjust (10x)"),
+                Line::from("  #h/#l ...  Count prefix repeats"),
+                Line::from("  gg / G     First / last param"),
                 Line::from(""),
-                Line::from("Source:"),
-                Line::from("  b          Toggle audio/modbus source"),
-                Line::from("  n/N        Next/prev modbus channel"),
-                Line::from(""),
-                Line::from("Controls:"),
-                Line::from("  +/-        Zoom in/out"),
-                Line::from("  g/G        Increase/decrease gain"),
-                Line::from("  t/T        Trigger level"),
+                Line::from("Params: Mode, Src (audio/modbus),"),
+                Line::from("  Ch (L/R/Stereo), ModCh, Zoom,"),
+                Line::from("  Gain, Trig"),
                 Line::from(""),
                 Line::from("  space      Play/pause (global)"),
                 Line::from("  ?          Toggle this help"),
@@ -261,6 +312,8 @@ pub fn run(instance: usize) -> Result<()> {
     });
 
     let mut show_help = false;
+    let mut count = crate::keys::Count::default();
+    let mut pending_g = false;
     // Global transport handle for Space = play/pause (lazily reopened)
     let mut transport_ui: Option<ShmTransport> = ShmTransport::open().ok();
 
@@ -308,49 +361,46 @@ pub fn run(instance: usize) -> Result<()> {
                     continue;
                 }
                 match key.code {
-                    KeyCode::Char('m') => {
+                    KeyCode::Char(c) if c.is_ascii_digit() && count.push(c) => {}
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        let n = count.take() as i32;
                         let mut s = state.lock().unwrap();
-                        s.mode = (s.mode + 1) % 4;
+                        s.selected = crate::keys::cycle(s.selected, n, NUM_ROWS);
                     }
-                    KeyCode::Char('c') => {
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        let n = count.take() as i32;
                         let mut s = state.lock().unwrap();
-                        s.channel = (s.channel + 1) % 3;
+                        s.selected = crate::keys::cycle(s.selected, -n, NUM_ROWS);
                     }
-                    KeyCode::Char('+') | KeyCode::Char('=') => {
-                        let mut s = state.lock().unwrap();
-                        s.zoom = (s.zoom + 0.5).min(10.0);
+                    KeyCode::Char('h') | KeyCode::Left => {
+                        let n = count.take() as i32;
+                        adjust(&mut state.lock().unwrap(), -n, false);
                     }
-                    KeyCode::Char('-') => {
-                        let mut s = state.lock().unwrap();
-                        s.zoom = (s.zoom - 0.5).max(0.5);
+                    KeyCode::Char('l') | KeyCode::Right => {
+                        let n = count.take() as i32;
+                        adjust(&mut state.lock().unwrap(), n, false);
+                    }
+                    KeyCode::Char('H') => {
+                        let n = count.take() as i32;
+                        adjust(&mut state.lock().unwrap(), -n, true);
+                    }
+                    KeyCode::Char('L') => {
+                        let n = count.take() as i32;
+                        adjust(&mut state.lock().unwrap(), n, true);
                     }
                     KeyCode::Char('g') => {
-                        let mut s = state.lock().unwrap();
-                        s.gain = (s.gain + 0.5).min(10.0);
+                        count.clear();
+                        if pending_g {
+                            pending_g = false;
+                            state.lock().unwrap().selected = 0;
+                        } else {
+                            pending_g = true;
+                            continue;
+                        }
                     }
                     KeyCode::Char('G') => {
-                        let mut s = state.lock().unwrap();
-                        s.gain = (s.gain - 0.5).max(0.1);
-                    }
-                    KeyCode::Char('t') => {
-                        let mut s = state.lock().unwrap();
-                        s.trigger_level = (s.trigger_level + 0.1).min(1.0);
-                    }
-                    KeyCode::Char('T') => {
-                        let mut s = state.lock().unwrap();
-                        s.trigger_level = (s.trigger_level - 0.1).max(-1.0);
-                    }
-                    KeyCode::Char('b') => {
-                        let mut s = state.lock().unwrap();
-                        s.source = (s.source + 1) % 2;
-                    }
-                    KeyCode::Char('n') => {
-                        let mut s = state.lock().unwrap();
-                        s.modbus_channel = (s.modbus_channel + 1) % 32;
-                    }
-                    KeyCode::Char('N') => {
-                        let mut s = state.lock().unwrap();
-                        s.modbus_channel = s.modbus_channel.saturating_sub(1);
+                        count.clear();
+                        state.lock().unwrap().selected = NUM_ROWS - 1;
                     }
                     KeyCode::Char(' ') => {
                         if transport_ui.is_none() {
@@ -361,11 +411,68 @@ pub fn run(instance: usize) -> Result<()> {
                         }
                     }
                     KeyCode::Char('?') => {
+                        count.clear();
                         show_help = !show_help;
                     }
-                    _ => {}
+                    _ => {
+                        count.clear();
+                    }
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adjust_cycles_enum_rows() {
+        let mut s = ScopeState { selected: ROW_MODE, ..Default::default() };
+        adjust(&mut s, 1, false);
+        assert_eq!(s.mode, 1);
+        adjust(&mut s, -2, false);
+        assert_eq!(s.mode, 3, "mode wraps backward");
+        s.selected = ROW_SOURCE;
+        adjust(&mut s, 1, false);
+        assert_eq!(s.source, 1);
+        adjust(&mut s, 1, false);
+        assert_eq!(s.source, 0, "source wraps");
+        s.selected = ROW_MODBUS_CH;
+        adjust(&mut s, -1, false);
+        assert_eq!(s.modbus_channel, 31, "modbus channel wraps backward");
+    }
+
+    #[test]
+    fn adjust_clamps_continuous_rows() {
+        let mut s = ScopeState { selected: ROW_ZOOM, ..Default::default() };
+        adjust(&mut s, -100, false);
+        assert_eq!(s.zoom, 0.5);
+        adjust(&mut s, 100, false);
+        assert_eq!(s.zoom, 10.0);
+        s.selected = ROW_TRIGGER;
+        adjust(&mut s, 100, true);
+        assert_eq!(s.trigger_level, 1.0);
+    }
+
+    #[test]
+    fn coarse_is_ten_times_fine() {
+        let mut fine = ScopeState { selected: ROW_GAIN, ..Default::default() };
+        adjust(&mut fine, 1, false);
+        let mut coarse = ScopeState { selected: ROW_GAIN, ..Default::default() };
+        adjust(&mut coarse, 1, true);
+        assert!((coarse.gain - 1.0) > (fine.gain - 1.0) * 9.9);
+    }
+
+    #[test]
+    fn counted_adjust_equals_repeated() {
+        let mut a = ScopeState { selected: ROW_ZOOM, ..Default::default() };
+        adjust(&mut a, 5, false);
+        let mut b = ScopeState { selected: ROW_ZOOM, ..Default::default() };
+        for _ in 0..5 {
+            adjust(&mut b, 1, false);
+        }
+        assert!((a.zoom - b.zoom).abs() < 1e-6);
     }
 }

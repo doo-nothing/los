@@ -470,15 +470,18 @@ fn draw_ui(
                 Line::from("━━━ Envelope Help ━━━"),
                 Line::from(""),
                 Line::from("Navigation:"),
-                Line::from("  [ / ]      Previous/next channel"),
+                Line::from("  [ / ]      Previous/next channel (counts)"),
+                Line::from("  gg / G     First / last channel"),
                 Line::from("  j/k, ↑/↓   Select parameter"),
                 Line::from("  h/l, ←/→   Adjust value"),
+                Line::from("  H/L        Coarse adjust (10x)"),
+                Line::from("  #j/#l ...  Count prefix repeats"),
                 Line::from(""),
                 Line::from("Actions:"),
                 Line::from("  t          Trigger envelope manually"),
                 Line::from("  @#         Assign selected param to track # (1-8, 0=off)"),
                 Line::from("  c          Toggle cycle/loop mode"),
-                Line::from("  g          Toggle gate (sustain)"),
+                Line::from("  o          Toggle gate on/off (sustain)"),
                 Line::from(""),
                 Line::from("  space      Play/pause (global)"),
                 Line::from("  ?          Toggle this help"),
@@ -495,6 +498,23 @@ fn draw_ui(
     })?;
 
     Ok(())
+}
+
+const NUM_ROWS: usize = 5; // rise, fall, shape, atten, trigger-track
+
+/// Adjust a param row on the current channel (doctrine: h/l fine, H/L coarse ×10).
+fn adjust(s: &mut EnvelopeState, row: usize, steps: i32, coarse: bool) {
+    use crate::keys::step_f32;
+    let ch = s.current_channel;
+    let p = &mut s.params[ch];
+    match row {
+        0 => p.rise_param = step_f32(p.rise_param, steps, 0.005, coarse, 0.0, 1.0),
+        1 => p.fall_param = step_f32(p.fall_param, steps, 0.005, coarse, 0.0, 1.0),
+        2 => p.shape_param = step_f32(p.shape_param, steps, 0.005, coarse, 0.0, 1.0),
+        3 => p.attenuverter = step_f32(p.attenuverter, steps, 0.05, coarse, -1.0, 1.0),
+        4 => p.trigger_track = (p.trigger_track + steps).clamp(-1, crate::NUM_TRACKS as i32 - 1),
+        _ => {}
+    }
 }
 
 pub fn run(instance: usize) -> Result<()> {
@@ -555,6 +575,8 @@ pub fn run(instance: usize) -> Result<()> {
     // Global transport handle for Space = play/pause (lazily reopened)
     let mut transport_ui: Option<ShmTransport> = ShmTransport::open().ok();
     let mut at_pending = false;
+    let mut count = crate::keys::Count::default();
+    let mut pending_g = false;
 
     loop {
         if state::check_save_signal() {
@@ -605,6 +627,9 @@ pub fn run(instance: usize) -> Result<()> {
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
+                if !matches!(key.code, KeyCode::Char('g')) {
+                    pending_g = false;
+                }
                 // Ctrl-s: save
                 if key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL {
                     let s = state.lock().unwrap();
@@ -633,61 +658,7 @@ pub fn run(instance: usize) -> Result<()> {
                 }
 
                 match key.code {
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        selected = (selected + 1) % 5;
-                    }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        selected = if selected == 0 { 4 } else { selected - 1 };
-                    }
-                    KeyCode::Char('h') | KeyCode::Left => {
-                        let mut s = state.lock().unwrap();
-                        let ch = s.current_channel;
-                        match selected {
-                            0 => s.params[ch].rise_param = (s.params[ch].rise_param - 0.005).max(0.0),
-                            1 => s.params[ch].fall_param = (s.params[ch].fall_param - 0.005).max(0.0),
-                            2 => s.params[ch].shape_param = (s.params[ch].shape_param - 0.005).max(0.0),
-                            3 => s.params[ch].attenuverter = (s.params[ch].attenuverter - 0.05).max(-1.0),
-                            4 => s.params[ch].trigger_track = (s.params[ch].trigger_track - 1).max(-1),
-                            _ => {}
-                        }
-                    }
-                    KeyCode::Char('l') | KeyCode::Right => {
-                        let mut s = state.lock().unwrap();
-                        let ch = s.current_channel;
-                        match selected {
-                            0 => s.params[ch].rise_param = (s.params[ch].rise_param + 0.005).min(1.0),
-                            1 => s.params[ch].fall_param = (s.params[ch].fall_param + 0.005).min(1.0),
-                            2 => s.params[ch].shape_param = (s.params[ch].shape_param + 0.005).min(1.0),
-                            3 => s.params[ch].attenuverter = (s.params[ch].attenuverter + 0.05).min(1.0),
-                            4 => s.params[ch].trigger_track = (s.params[ch].trigger_track + 1).min(15),
-                            _ => {}
-                        }
-                    }
-                    KeyCode::Char('[') => {
-                        let mut s = state.lock().unwrap();
-                        if s.current_channel > 0 {
-                            s.current_channel -= 1;
-                        }
-                        selected = 0;
-                    }
-                    KeyCode::Char(']') => {
-                        let mut s = state.lock().unwrap();
-                        if s.current_channel + 1 < NUM_CHANNELS {
-                            s.current_channel += 1;
-                        }
-                        selected = 0;
-                    }
-                    KeyCode::Char('t') => {
-                        let mut s = state.lock().unwrap();
-                        let ch = s.current_channel;
-                        s.channels[ch].stage = Stage::Rise;
-                        s.channels[ch].phase = 0.0;
-                        s.channels[ch].eor_fired = false;
-                        s.channels[ch].eoc_fired = false;
-                    }
-                    KeyCode::Char('@') => {
-                        at_pending = true;
-                    }
+                    // @N digit binding takes precedence over count digits
                     KeyCode::Char(d) if at_pending && d.is_ascii_digit() => {
                         let tnum = (d as u8 - b'0') as i32;
                         let track = if tnum == 0 { -1 } else if tnum <= crate::NUM_TRACKS as i32 { tnum - 1 } else { -2 };
@@ -705,12 +676,76 @@ pub fn run(instance: usize) -> Result<()> {
                         }
                         at_pending = false;
                     }
+                    KeyCode::Char(c) if c.is_ascii_digit() && count.push(c) => {}
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        selected = crate::keys::cycle(selected, count.take() as i32, NUM_ROWS);
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        selected = crate::keys::cycle(selected, -(count.take() as i32), NUM_ROWS);
+                    }
+                    KeyCode::Char('h') | KeyCode::Left => {
+                        let n = count.take() as i32;
+                        adjust(&mut state.lock().unwrap(), selected, -n, false);
+                    }
+                    KeyCode::Char('l') | KeyCode::Right => {
+                        let n = count.take() as i32;
+                        adjust(&mut state.lock().unwrap(), selected, n, false);
+                    }
+                    KeyCode::Char('H') => {
+                        let n = count.take() as i32;
+                        adjust(&mut state.lock().unwrap(), selected, -n, true);
+                    }
+                    KeyCode::Char('L') => {
+                        let n = count.take() as i32;
+                        adjust(&mut state.lock().unwrap(), selected, n, true);
+                    }
+                    KeyCode::Char('[') => {
+                        let n = count.take();
+                        let mut s = state.lock().unwrap();
+                        s.current_channel = s.current_channel.saturating_sub(n);
+                        selected = 0;
+                    }
+                    KeyCode::Char(']') => {
+                        let n = count.take();
+                        let mut s = state.lock().unwrap();
+                        s.current_channel = (s.current_channel + n).min(NUM_CHANNELS - 1);
+                        selected = 0;
+                    }
+                    KeyCode::Char('g') if !at_pending => {
+                        count.clear();
+                        if pending_g {
+                            pending_g = false;
+                            let mut s = state.lock().unwrap();
+                            s.current_channel = 0;
+                            selected = 0;
+                        } else {
+                            pending_g = true;
+                        }
+                    }
+                    KeyCode::Char('G') => {
+                        count.clear();
+                        let mut s = state.lock().unwrap();
+                        s.current_channel = NUM_CHANNELS - 1;
+                        selected = 0;
+                    }
+                    KeyCode::Char('t') => {
+                        let mut s = state.lock().unwrap();
+                        let ch = s.current_channel;
+                        s.channels[ch].stage = Stage::Rise;
+                        s.channels[ch].phase = 0.0;
+                        s.channels[ch].eor_fired = false;
+                        s.channels[ch].eoc_fired = false;
+                    }
+                    KeyCode::Char('@') => {
+                        at_pending = true;
+                    }
                     KeyCode::Char('c') => {
                         let mut s = state.lock().unwrap();
                         let ch = s.current_channel;
                         s.params[ch].loop_mode = !s.params[ch].loop_mode;
                     }
-                    KeyCode::Char('g') => {
+                    KeyCode::Char('o') => {
+                        count.clear();
                         let mut s = state.lock().unwrap();
                         s.gate = !s.gate;
                         if !s.gate {
@@ -744,6 +779,7 @@ pub fn run(instance: usize) -> Result<()> {
                     }
                     _ => {
                         at_pending = false;
+                        count.clear();
                     }
                 }
             }
@@ -953,5 +989,38 @@ mod envelope_tests {
         }
 
         assert_eq!(ch.stage, original_stage, "Off should stay Off on release");
+    }
+}
+
+#[cfg(test)]
+mod doctrine_tests {
+    use super::*;
+
+    #[test]
+    fn adjust_steps_params_on_current_channel() {
+        let mut s = EnvelopeState { current_channel: 1, ..Default::default() };
+        let rise0 = s.params[1].rise_param;
+        adjust(&mut s, 0, 2, false);
+        assert!((s.params[1].rise_param - (rise0 + 0.01)).abs() < 1e-6);
+        assert_eq!(s.params[0].rise_param, rise0, "other channels untouched");
+    }
+
+    #[test]
+    fn adjust_clamps_and_coarse() {
+        let mut s = EnvelopeState::default();
+        adjust(&mut s, 3, -100, false);
+        assert_eq!(s.params[0].attenuverter, -1.0);
+        adjust(&mut s, 2, 1, true);
+        let expected = 0.5 + 0.05; // default shape 0.5 + coarse step
+        assert!((s.params[0].shape_param - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn trigger_track_row_clamps() {
+        let mut s = EnvelopeState::default();
+        adjust(&mut s, 4, -10, false);
+        assert_eq!(s.params[0].trigger_track, -1);
+        adjust(&mut s, 4, 100, false);
+        assert_eq!(s.params[0].trigger_track, crate::NUM_TRACKS as i32 - 1);
     }
 }

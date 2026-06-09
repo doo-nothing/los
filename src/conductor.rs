@@ -385,6 +385,11 @@ pub fn run_conductor() -> Result<()> {
     
     let mut selected: usize = 0;
     let mut show_help = false;
+    let mut count = crate::keys::Count::default();
+    let mut pending_g = false;
+    let mut pending_d = false;
+    // Some(filename) while waiting for y/n delete confirmation
+    let mut confirm_delete: Option<String> = None;
     // Global transport handle for Space = play/pause (lazily reopened)
     let mut transport_ui: Option<ShmTransport> = ShmTransport::open().ok();
     
@@ -422,8 +427,20 @@ pub fn run_conductor() -> Result<()> {
                     .constraints([Constraint::Length(3), Constraint::Min(0)])
                     .split(area);
                 
-                let title = Paragraph::new("LOS Conductor")
-                    .style(Style::default().fg(Color::Cyan).add_modifier(ratatui::style::Modifier::BOLD))
+                let header = if let Some(ref name) = confirm_delete {
+                    format!("Delete {}? (y/n)", name)
+                } else if pending_d {
+                    String::from("LOS Conductor — d…")
+                } else {
+                    String::from("LOS Conductor")
+                };
+                let header_style = if confirm_delete.is_some() {
+                    Style::default().fg(Color::Red).add_modifier(ratatui::style::Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Cyan).add_modifier(ratatui::style::Modifier::BOLD)
+                };
+                let title = Paragraph::new(header)
+                    .style(header_style)
                     .block(Block::default().borders(Borders::ALL));
                 f.render_widget(title, chunks[0]);
                 
@@ -459,16 +476,48 @@ pub fn run_conductor() -> Result<()> {
                     }
                     continue;
                 }
-                
+
+                // Pending delete confirmation: y deletes, anything else cancels
+                if let Some(name) = confirm_delete.take() {
+                    if key.code == KeyCode::Char('y') {
+                        let path = state::states_dir().join(&name);
+                        let _ = std::fs::remove_file(&path);
+                    }
+                    needs_refresh = true;
+                    continue;
+                }
+                if !matches!(key.code, KeyCode::Char('g')) {
+                    pending_g = false;
+                }
+                if !matches!(key.code, KeyCode::Char('d')) {
+                    pending_d = false;
+                }
+
                 match key.code {
+                    KeyCode::Char(c) if c.is_ascii_digit() && count.push(c) => {}
                     KeyCode::Char('j') | KeyCode::Down => {
-                        if selected + 1 < entries.len() {
-                            selected += 1;
-                        }
+                        let n = count.take();
+                        selected = (selected + n).min(entries.len().saturating_sub(1));
                         needs_refresh = true;
                     }
                     KeyCode::Char('k') | KeyCode::Up => {
-                        selected = selected.saturating_sub(1);
+                        let n = count.take();
+                        selected = selected.saturating_sub(n);
+                        needs_refresh = true;
+                    }
+                    KeyCode::Char('g') => {
+                        count.clear();
+                        if pending_g {
+                            pending_g = false;
+                            selected = 0;
+                        } else {
+                            pending_g = true;
+                        }
+                        needs_refresh = true;
+                    }
+                    KeyCode::Char('G') => {
+                        count.clear();
+                        selected = entries.len().saturating_sub(1);
                         needs_refresh = true;
                     }
                     KeyCode::Char('s') => {
@@ -573,8 +622,9 @@ pub fn run_conductor() -> Result<()> {
                         needs_refresh = true;
                         
                     }
-                    KeyCode::Char('l') if selected < entries.len() => {
+                    KeyCode::Enter | KeyCode::Char('l') if selected < entries.len() => {
                         // Full module reload while keeping the conductor alive.
+                        count.clear();
                         let path = state::states_dir().join(&entries[selected]);
                         if let Err(e) = reload_modules_from_state(&path) {
                             eprintln!("[conductor] reload failed: {}", e);
@@ -582,9 +632,14 @@ pub fn run_conductor() -> Result<()> {
                         needs_refresh = true;
                     }
                     KeyCode::Char('d') if selected < entries.len() => {
-                        // Delete selected state
-                        let path = state::states_dir().join(&entries[selected]);
-                        let _ = std::fs::remove_file(&path);
+                        // dd chord: first d arms, second d asks for confirmation
+                        count.clear();
+                        if pending_d {
+                            pending_d = false;
+                            confirm_delete = Some(entries[selected].clone());
+                        } else {
+                            pending_d = true;
+                        }
                         needs_refresh = true;
                     }
                     KeyCode::Char(' ') => {
@@ -596,10 +651,13 @@ pub fn run_conductor() -> Result<()> {
                         }
                     }
                     KeyCode::Char('?') => {
+                        count.clear();
                         show_help = true;
                         needs_refresh = true;
                     }
-                    _ => {}
+                    _ => {
+                        count.clear();
+                    }
                 }
             }
         }
@@ -609,10 +667,11 @@ pub fn run_conductor() -> Result<()> {
                 let help_text = vec![
                     Line::from("━━━ Conductor Help ━━━"),
                     Line::from(""),
-                    Line::from("  j/k, ↑/↓  Navigate state list"),
+                    Line::from("  j/k, ↑/↓  Navigate state list (counts: 3j)"),
+                    Line::from("  gg / G     First / last state"),
                     Line::from("  s          Save current session state"),
-                    Line::from("  l          Load selected state (full session reload)"),
-                    Line::from("  d          Delete selected state"),
+                    Line::from("  Enter / l  Load selected state (full session reload)"),
+                    Line::from("  dd         Delete selected state (asks y/n)"),
                 Line::from("  space      Play/pause (global)"),
                 Line::from("  ?          Toggle this help"),
                 Line::from("  Close pane: tmux prefix + x"),

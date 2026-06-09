@@ -314,11 +314,11 @@ fn draw_ui(
                 Line::from("Parameters:"),
                 Line::from("  j/k, ↑/↓  Select parameter"),
                 Line::from("  h/l, ←/→  Adjust value"),
+                Line::from("  H/L        Coarse adjust (10x)"),
+                Line::from("  #j/#l ...  Count prefix repeats"),
+                Line::from("  gg / G     First / last param"),
                 Line::from(""),
-                Line::from("Output modes:"),
-                Line::from("  1          Main (sine/saw/square)"),
-                Line::from("  2          Main + Sub"),
-                Line::from("  3          Mix"),
+                Line::from("Output row: Main / Main+Sub / Mix"),
                 Line::from(""),
                 Line::from("Track assignment:"),
                 Line::from("  @#         Assign selected param to track # (1-8, 0=off)"),
@@ -338,6 +338,20 @@ fn draw_ui(
     })?;
 
     Ok(())
+}
+
+const NUM_ROWS: usize = 4; // shape, sub, fm, output
+
+/// Adjust a param row by `steps` (doctrine: h/l fine, H/L coarse ×10).
+fn adjust(s: &mut VoiceState, row: usize, steps: i32, coarse: bool) {
+    use crate::keys::{cycle, step_f32};
+    match row {
+        0 => s.shape = step_f32(s.shape, steps, 0.05, coarse, 0.0, 1.0),
+        1 => s.sub = step_f32(s.sub, steps, 0.05, coarse, 0.0, 1.0),
+        2 => s.fm = step_f32(s.fm, steps, 0.05, coarse, 0.0, 1.0),
+        3 => s.output = cycle(s.output as usize, steps, 3) as u8,
+        _ => {}
+    }
 }
 
 pub fn run(instance: usize) -> Result<()> {
@@ -392,9 +406,11 @@ pub fn run(instance: usize) -> Result<()> {
 
     let mut selected = 0usize;
     let mut show_help = false;
+    let mut count = crate::keys::Count::default();
     // Global transport handle for Space = play/pause (lazily reopened)
     let mut transport_ui: Option<ShmTransport> = ShmTransport::open().ok();
     let mut at_pending = false;
+    let mut pending_g = false;
 
     loop {
         // Check for save-on-signal
@@ -442,6 +458,9 @@ pub fn run(instance: usize) -> Result<()> {
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
+                if !matches!(key.code, KeyCode::Char('g')) {
+                    pending_g = false;
+                }
                 // Ctrl-s: save module state
                 if key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL {
                     let s = state.lock().unwrap();
@@ -464,35 +483,7 @@ pub fn run(instance: usize) -> Result<()> {
                     continue;
                 }
                 match key.code {
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        selected = (selected + 1) % 4;
-                    }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        selected = if selected == 0 { 3 } else { selected - 1 };
-                    }
-                    KeyCode::Char('h') | KeyCode::Left => {
-                        let mut s = state.lock().unwrap();
-                        match selected {
-                            0 => s.shape = (s.shape - 0.05).max(0.0),
-                            1 => s.sub = (s.sub - 0.05).max(0.0),
-                            2 => s.fm = (s.fm - 0.05).max(0.0),
-                            3 => s.output = if s.output == 0 { 2 } else { s.output - 1 },
-                            _ => {}
-                        }
-                    }
-                    KeyCode::Char('l') | KeyCode::Right => {
-                        let mut s = state.lock().unwrap();
-                        match selected {
-                            0 => s.shape = (s.shape + 0.05).min(1.0),
-                            1 => s.sub = (s.sub + 0.05).min(1.0),
-                            2 => s.fm = (s.fm + 0.05).min(1.0),
-                            3 => s.output = (s.output + 1) % 3,
-                            _ => {}
-                        }
-                    }
-                    KeyCode::Char('@') => {
-                        at_pending = true;
-                    }
+                    // @N digit binding takes precedence over count digits
                     KeyCode::Char(d) if at_pending && d.is_ascii_digit() => {
                         let tnum = (d as u8 - b'0') as i32;
                         let track = if tnum == 0 { -1 } else if tnum <= crate::NUM_TRACKS as i32 { tnum - 1 } else { -2 };
@@ -508,17 +499,44 @@ pub fn run(instance: usize) -> Result<()> {
                         }
                         at_pending = false;
                     }
-                    KeyCode::Char('1') => {
-                        let mut s = state.lock().unwrap();
-                        s.output = 0;
+                    KeyCode::Char(c) if c.is_ascii_digit() && count.push(c) => {}
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        selected = crate::keys::cycle(selected, count.take() as i32, NUM_ROWS);
                     }
-                    KeyCode::Char('2') => {
-                        let mut s = state.lock().unwrap();
-                        s.output = 1;
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        selected = crate::keys::cycle(selected, -(count.take() as i32), NUM_ROWS);
                     }
-                    KeyCode::Char('3') => {
-                        let mut s = state.lock().unwrap();
-                        s.output = 2;
+                    KeyCode::Char('h') | KeyCode::Left => {
+                        let n = count.take() as i32;
+                        adjust(&mut state.lock().unwrap(), selected, -n, false);
+                    }
+                    KeyCode::Char('l') | KeyCode::Right => {
+                        let n = count.take() as i32;
+                        adjust(&mut state.lock().unwrap(), selected, n, false);
+                    }
+                    KeyCode::Char('H') => {
+                        let n = count.take() as i32;
+                        adjust(&mut state.lock().unwrap(), selected, -n, true);
+                    }
+                    KeyCode::Char('L') => {
+                        let n = count.take() as i32;
+                        adjust(&mut state.lock().unwrap(), selected, n, true);
+                    }
+                    KeyCode::Char('g') if !at_pending => {
+                        count.clear();
+                        if pending_g {
+                            pending_g = false;
+                            selected = 0;
+                        } else {
+                            pending_g = true;
+                        }
+                    }
+                    KeyCode::Char('G') => {
+                        count.clear();
+                        selected = NUM_ROWS - 1;
+                    }
+                    KeyCode::Char('@') => {
+                        at_pending = true;
                     }
                     KeyCode::Char(' ') => {
                         if transport_ui.is_none() {
@@ -533,9 +551,47 @@ pub fn run(instance: usize) -> Result<()> {
                     }
                     _ => {
                         at_pending = false;
+                        count.clear();
+                        pending_g = false;
                     }
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adjust_steps_and_clamps_params() {
+        let mut s = VoiceState::default();
+        let shape0 = s.shape;
+        adjust(&mut s, 0, 1, false);
+        assert!((s.shape - (shape0 + 0.05)).abs() < 1e-6);
+        adjust(&mut s, 0, -100, false);
+        assert_eq!(s.shape, 0.0, "shape clamps at 0");
+        adjust(&mut s, 1, 100, true);
+        assert_eq!(s.sub, 1.0, "sub clamps at 1");
+    }
+
+    #[test]
+    fn adjust_output_cycles() {
+        let mut s = VoiceState::default();
+        assert_eq!(s.output, 0);
+        adjust(&mut s, 3, 1, false);
+        assert_eq!(s.output, 1);
+        adjust(&mut s, 3, 2, false);
+        assert_eq!(s.output, 0, "output wraps");
+        adjust(&mut s, 3, -1, false);
+        assert_eq!(s.output, 2, "output wraps backward");
+    }
+
+    #[test]
+    fn coarse_adjust_is_ten_times() {
+        let mut s = VoiceState::default();
+        adjust(&mut s, 2, 1, true);
+        assert!((s.fm - 0.5).abs() < 1e-6);
     }
 }
