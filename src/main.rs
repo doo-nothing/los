@@ -129,6 +129,9 @@ fn main() -> Result<()> {
                 if let Ok(t) = shm::ShmTransport::open() {
                     println!("transport: clock={} playing={}", t.clock(), t.playing());
                 }
+                if let Ok(ev) = shm::EventRingbuf::open_producer() {
+                    println!("events: {}", ev.debug_status());
+                }
                 Ok(())
             }
             "add" => {
