@@ -54,6 +54,34 @@ impl Default for EnvelopeChannel {
     }
 }
 
+/// What fires a channel: any note event, nothing (manual `t`/cycle only),
+/// or one specific sequencer track's notes.
+#[derive(Clone, Debug, PartialEq)]
+enum Trigger {
+    Any,
+    Off,
+    Source(SourceAddr),
+}
+
+impl Trigger {
+    /// Stable string form used in params/undo: absent = Any, "off" = Off.
+    fn to_param(&self) -> Option<String> {
+        match self {
+            Trigger::Any => None,
+            Trigger::Off => Some(String::from("off")),
+            Trigger::Source(a) => Some(a.to_string()),
+        }
+    }
+
+    fn from_param(s: Option<&str>) -> Self {
+        match s {
+            None => Trigger::Any,
+            Some("off") => Trigger::Off,
+            Some(a) => SourceAddr::parse(a).map(Trigger::Source).unwrap_or(Trigger::Any),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct ChannelParams {
     rise_param: f32,   // 0.0-1.0 → 1ms to 10s (exponential)
@@ -62,9 +90,7 @@ struct ChannelParams {
     loop_mode: bool,
     attenuverter: f32, // -1.0 to 1.0
     // Receiver-side bindings (routing.rs source addresses).
-    // trigger_src: a sequencer track whose note events fire this channel
-    // (None = any note event). The others modulate the param when bound.
-    trigger_src: Option<SourceAddr>,
+    trigger: Trigger,
     rise_src: Option<SourceAddr>,
     fall_src: Option<SourceAddr>,
     shape_src: Option<SourceAddr>,
@@ -111,7 +137,7 @@ impl Default for ChannelParams {
             shape_param: 0.5,  // ~1.0 (linear-ish)
             loop_mode: false,
             attenuverter: 1.0,
-            trigger_src: None, // ch0 = sequencer/0/t1 in EnvelopeState::default
+            trigger: Trigger::Any, // ch0 = sequencer/0/t1 in EnvelopeState::default
             rise_src: None,
             fall_src: None,
             shape_src: None,
@@ -135,7 +161,9 @@ impl Default for EnvelopeState {
     fn default() -> Self {
         let mut params = vec![ChannelParams::default(); NUM_CHANNELS];
         // Channel 1 defaults to sequencer track 1; channels 2-4 to any-note
-        params[0].trigger_src = SourceAddr::parse("sequencer/0/t1");
+        if let Some(a) = SourceAddr::parse("sequencer/0/t1") {
+            params[0].trigger = Trigger::Source(a);
+        }
         Self {
             channels: vec![EnvelopeChannel::default(); NUM_CHANNELS],
             params,
@@ -172,9 +200,12 @@ fn env_thread(
 
     let dt = 1.0 / SAMPLE_RATE as f32;
 
-    // Per-channel resolved bindings: (trigger note-track, rise/fall/shape/atten
+    // Per-channel resolved bindings: (trigger mode, rise/fall/shape/atten
     // modbus channels). Refreshed periodically through the manifest.
-    let mut resolved: Vec<(Option<u8>, [Option<usize>; 4])> = vec![(None, [None; 4]); NUM_CHANNELS];
+    // Trigger resolves to: None = any note, Some(None) = off / non-note
+    // source, Some(Some(t)) = notes from sequencer track t.
+    type ResolvedTrigger = Option<Option<u8>>;
+    let mut resolved: Vec<(ResolvedTrigger, [Option<usize>; 4])> = vec![(None, [None; 4]); NUM_CHANNELS];
     let mut refresh_in = 0u32;
 
     loop {
@@ -195,7 +226,11 @@ fn env_thread(
             let s = state.lock().unwrap();
             for (i, r) in resolved.iter_mut().enumerate().take(s.params.len()) {
                 let p = &s.params[i];
-                r.0 = p.trigger_src.as_ref().and_then(routing::note_source_track);
+                r.0 = match &p.trigger {
+                    Trigger::Any => None,
+                    Trigger::Off => Some(None),
+                    Trigger::Source(a) => Some(routing::note_source_track(a)),
+                };
                 r.1 = [
                     p.rise_src.as_ref().and_then(|a| routing::resolve(&entries, a)),
                     p.fall_src.as_ref().and_then(|a| routing::resolve(&entries, a)),
@@ -243,18 +278,18 @@ fn env_thread(
             let ch = &mut s.channels[i];
             let (trigger_filter, mod_chans) = resolved[i];
 
-            let should_trigger = match (params.trigger_src.is_some(), trigger_filter, track_trigger) {
-                // bound to a specific track: only its notes (or a manual trigger)
-                (true, Some(want), Some(got)) => got == want || triggers[i],
-                (true, _, _) => triggers[i],
-                // unbound: any note event
-                (false, _, got) => got.is_some() || triggers[i],
+            let should_trigger = match (&trigger_filter, track_trigger) {
+                (None, got) => got.is_some() || triggers[i], // any note
+                (Some(None), _) => triggers[i],              // off: manual only
+                (Some(Some(want)), Some(got)) => got == *want || triggers[i],
+                (Some(Some(_)), None) => triggers[i],
             };
 
-            let should_release = match (params.trigger_src.is_some(), trigger_filter, release_track) {
-                (true, Some(want), Some(got)) => got == want,
-                (true, _, _) => false,
-                (false, _, got) => got.is_some(),
+            let should_release = match (&trigger_filter, release_track) {
+                (None, got) => got.is_some(),
+                (Some(None), _) => false,
+                (Some(Some(want)), Some(got)) => got == *want,
+                (Some(Some(_)), None) => false,
             };
 
             // Apply trigger/release
@@ -417,11 +452,11 @@ fn draw_ui(
             a.as_ref().map(|a| format!(" @{}", a)).unwrap_or_default()
         };
 
-        let trigger_str = params
-            .trigger_src
-            .as_ref()
-            .map(|a| a.to_string())
-            .unwrap_or_else(|| String::from("any note"));
+        let trigger_str = match &params.trigger {
+            Trigger::Any => String::from("any note"),
+            Trigger::Off => String::from("off"),
+            Trigger::Source(a) => a.to_string(),
+        };
 
         let rise_time = param_to_time(params.rise_param);
         let fall_time = param_to_time(params.fall_param);
@@ -562,13 +597,14 @@ fn draw_ui(
 
 fn snapshot_params(s: &EnvelopeState) -> state::EnvelopeParams {
     state::EnvelopeParams {
+        format: state::STATE_FORMAT,
         channels: s.params.iter().map(|p| state::EnvelopeChannelParams {
             rise: p.rise_param,
             fall: p.fall_param,
             shape: p.shape_param,
             loop_mode: p.loop_mode,
             attenuverter: p.attenuverter,
-            trigger_src: p.trigger_src.as_ref().map(|a| a.to_string()),
+            trigger_src: p.trigger.to_param(),
             rise_src: p.rise_src.as_ref().map(|a| a.to_string()),
             fall_src: p.fall_src.as_ref().map(|a| a.to_string()),
             shape_src: p.shape_src.as_ref().map(|a| a.to_string()),
@@ -589,11 +625,15 @@ fn apply_params(s: &mut EnvelopeState, params: &state::EnvelopeParams) {
         s.params[i].shape_param = ch.shape;
         s.params[i].loop_mode = ch.loop_mode;
         s.params[i].attenuverter = ch.attenuverter;
-        s.params[i].trigger_src = ch.trigger_src.as_deref().and_then(SourceAddr::parse);
-        s.params[i].rise_src = ch.rise_src.as_deref().and_then(SourceAddr::parse);
-        s.params[i].fall_src = ch.fall_src.as_deref().and_then(SourceAddr::parse);
-        s.params[i].shape_src = ch.shape_src.as_deref().and_then(SourceAddr::parse);
-        s.params[i].atten_src = ch.atten_src.as_deref().and_then(SourceAddr::parse);
+        // Binding fields only exist in format-2 files; older files keep the
+        // defaults (ch1 triggered by sequencer/0/t1) instead of unbinding.
+        if params.format >= state::STATE_FORMAT {
+            s.params[i].trigger = Trigger::from_param(ch.trigger_src.as_deref());
+            s.params[i].rise_src = ch.rise_src.as_deref().and_then(SourceAddr::parse);
+            s.params[i].fall_src = ch.fall_src.as_deref().and_then(SourceAddr::parse);
+            s.params[i].shape_src = ch.shape_src.as_deref().and_then(SourceAddr::parse);
+            s.params[i].atten_src = ch.atten_src.as_deref().and_then(SourceAddr::parse);
+        }
     }
 }
 
@@ -615,13 +655,13 @@ impl crate::undo::ParamUndo for EnvelopeState {
             5 => Some(V::Bool(p.loop_mode)),
             r if (BIND_OFF..BIND_OFF + 5).contains(&r) => {
                 let b = match r - BIND_OFF {
-                    0 => &p.rise_src,
-                    1 => &p.fall_src,
-                    2 => &p.shape_src,
-                    3 => &p.atten_src,
-                    _ => &p.trigger_src,
+                    0 => p.rise_src.as_ref().map(|a| a.to_string()),
+                    1 => p.fall_src.as_ref().map(|a| a.to_string()),
+                    2 => p.shape_src.as_ref().map(|a| a.to_string()),
+                    3 => p.atten_src.as_ref().map(|a| a.to_string()),
+                    _ => p.trigger.to_param(),
                 };
-                Some(V::Src(b.as_ref().map(|a| a.to_string())))
+                Some(V::Src(b))
             }
             _ => None,
         }
@@ -638,13 +678,16 @@ impl crate::undo::ParamUndo for EnvelopeState {
             (3, V::F32(v)) => p.attenuverter = v,
             (5, V::Bool(v)) => p.loop_mode = v,
             (r, V::Src(a)) if (BIND_OFF..BIND_OFF + 5).contains(&r) => {
-                let addr = a.as_deref().and_then(SourceAddr::parse);
-                match r - BIND_OFF {
-                    0 => p.rise_src = addr,
-                    1 => p.fall_src = addr,
-                    2 => p.shape_src = addr,
-                    3 => p.atten_src = addr,
-                    _ => p.trigger_src = addr,
+                if r - BIND_OFF == 4 {
+                    p.trigger = Trigger::from_param(a.as_deref());
+                } else {
+                    let addr = a.as_deref().and_then(SourceAddr::parse);
+                    match r - BIND_OFF {
+                        0 => p.rise_src = addr,
+                        1 => p.fall_src = addr,
+                        2 => p.shape_src = addr,
+                        _ => p.atten_src = addr,
+                    }
                 }
             }
             _ => {}
@@ -751,13 +794,21 @@ pub fn run(instance: usize) -> Result<()> {
             if let Event::Key(key) = event::read()? {
                 ex_msg = None;
                 if picker.is_active() {
-                    if let crate::picker::PickerEvent::Chosen(addr) = picker.handle_key(key.code) {
+                    use crate::picker::PickerEvent;
+                    let chosen: Option<Option<String>> = match picker.handle_key(key.code) {
+                        // first special: unbind (params rows) / any-note (trigger row)
+                        PickerEvent::Chosen(addr) => Some(addr.map(|a| a.to_string())),
+                        // second special on the trigger row: off
+                        PickerEvent::ChosenSpecial(1) => Some(Some(String::from("off"))),
+                        _ => None,
+                    };
+                    if let Some(value) = chosen {
                         use crate::undo::{ParamUndo, ParamValue};
                         let mut s = state.lock().unwrap();
                         let ch = s.current_channel;
                         let slot = ch * CH_SLOT_STRIDE + BIND_OFF + selected.min(4);
                         let old = s.get_param(slot);
-                        s.set_param(slot, ParamValue::Src(addr.map(|a| a.to_string())));
+                        s.set_param(slot, ParamValue::Src(value));
                         let new = s.get_param(slot);
                         if let (Some(old), Some(new)) = (old, new) {
                             history.record(slot, "Bind", old, new);
@@ -903,15 +954,30 @@ pub fn run(instance: usize) -> Result<()> {
                             .unwrap_or_default();
                         let s = state.lock().unwrap();
                         let ch = s.current_channel;
-                        let current = match selected {
-                            0 => s.params[ch].rise_src.clone(),
-                            1 => s.params[ch].fall_src.clone(),
-                            2 => s.params[ch].shape_src.clone(),
-                            3 => s.params[ch].atten_src.clone(),
-                            _ => s.params[ch].trigger_src.clone(),
-                        };
-                        drop(s);
-                        picker.open(sources, current.as_ref());
+                        if selected == 4 {
+                            // trigger row: any-note / off / specific source
+                            let (current, special) = match &s.params[ch].trigger {
+                                Trigger::Any => (None, 0),
+                                Trigger::Off => (None, 1),
+                                Trigger::Source(a) => (Some(a.clone()), 0),
+                            };
+                            drop(s);
+                            picker.open_with(
+                                vec![String::from("— any note —"), String::from("— off —")],
+                                sources,
+                                current.as_ref(),
+                                special,
+                            );
+                        } else {
+                            let current = match selected {
+                                0 => s.params[ch].rise_src.clone(),
+                                1 => s.params[ch].fall_src.clone(),
+                                2 => s.params[ch].shape_src.clone(),
+                                _ => s.params[ch].atten_src.clone(),
+                            };
+                            drop(s);
+                            picker.open(sources, current.as_ref());
+                        }
                     }
                     KeyCode::Char('c') => {
                         count.clear();
@@ -1026,7 +1092,7 @@ mod envelope_tests {
             shape_param: 0.5,
             loop_mode: false,
             attenuverter: 1.0,
-            trigger_src: None,
+            trigger: Trigger::Any,
             rise_src: None,
             fall_src: None,
             shape_src: None,
@@ -1063,7 +1129,7 @@ mod envelope_tests {
             shape_param: 0.5,
             loop_mode: false,
             attenuverter: 1.0,
-            trigger_src: None,
+            trigger: Trigger::Any,
             rise_src: None,
             fall_src: None,
             shape_src: None,
@@ -1211,9 +1277,36 @@ mod doctrine_tests {
     #[test]
     fn trigger_row_is_binding_only() {
         let mut s = EnvelopeState::default();
-        let before = s.params[0].trigger_src.clone();
+        let before = s.params[0].trigger.clone();
         adjust(&mut s, 4, -10, false);
         adjust(&mut s, 4, 100, true);
-        assert_eq!(s.params[0].trigger_src, before, "h/l must not touch the binding");
+        assert_eq!(s.params[0].trigger, before, "h/l must not touch the binding");
+    }
+
+    #[test]
+    fn trigger_param_roundtrip_includes_off() {
+        assert_eq!(Trigger::Any.to_param(), None);
+        assert_eq!(Trigger::Off.to_param().as_deref(), Some("off"));
+        let a = SourceAddr::parse("sequencer/0/t2").unwrap();
+        assert_eq!(Trigger::Source(a.clone()).to_param().as_deref(), Some("sequencer/0/t2"));
+
+        assert_eq!(Trigger::from_param(None), Trigger::Any);
+        assert_eq!(Trigger::from_param(Some("off")), Trigger::Off);
+        assert_eq!(Trigger::from_param(Some("sequencer/0/t2")), Trigger::Source(a));
+    }
+
+    #[test]
+    fn old_format_envelope_state_keeps_default_trigger() {
+        let mut s = EnvelopeState::default();
+        assert!(matches!(s.params[0].trigger, Trigger::Source(_)));
+        let old = state::EnvelopeParams {
+            channels: vec![state::EnvelopeChannelParams::default(); NUM_CHANNELS],
+            ..Default::default()
+        };
+        apply_params(&mut s, &old);
+        assert!(
+            matches!(s.params[0].trigger, Trigger::Source(_)),
+            "old file must not reset the default trigger"
+        );
     }
 }
