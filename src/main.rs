@@ -105,6 +105,32 @@ fn main() -> Result<()> {
                 conductor::load_session(&path)
             }
             "ctl" => ctl(args.get(2).map(|s| s.as_str()).unwrap_or("toggle")),
+            "ps" => {
+                let m = shm::Manifest::open()
+                    .map_err(|_| anyhow::anyhow!("no manifest found — is a session running?"))?;
+                let entries = m.entries();
+                println!("manifest: {} live entries, next free modbus channel: {}", entries.len(), m.next_channel());
+                for e in &entries {
+                    let alive = unsafe { libc::kill(e.pid as i32, 0) == 0 };
+                    let outputs = match e.mod_base {
+                        Some(b) => format!("  ch{}-{}", b, b + e.mod_count - 1),
+                        None => String::new(),
+                    };
+                    println!(
+                        "  {} {}  pid {}{}{}{}",
+                        e.module_name,
+                        e.instance,
+                        e.pid,
+                        if alive { "" } else { "  [DEAD]" },
+                        if e.audio_shm.is_some() { "  [audio]" } else { "" },
+                        outputs
+                    );
+                }
+                if let Ok(t) = shm::ShmTransport::open() {
+                    println!("transport: clock={} playing={}", t.clock(), t.playing());
+                }
+                Ok(())
+            }
             "add" => {
                 let module = args.get(2).map(|s| s.as_str()).unwrap_or("");
                 if module.is_empty() {

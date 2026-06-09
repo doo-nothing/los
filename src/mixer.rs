@@ -52,7 +52,7 @@ fn mixer_thread(
     state: Arc<Mutex<MixerInner>>,
     shutdown: std::sync::mpsc::Receiver<()>,
 ) -> Result<()> {
-    let manifest = Manifest::open().or_else(|_| Manifest::create())?;
+    let mut manifest = Manifest::open().or_else(|_| Manifest::create())?;
 
     let mut transport = ShmTransport::open()
         .or_else(|_| ShmTransport::create(48000))?;
@@ -133,6 +133,7 @@ fn mixer_thread(
             break;
         }
 
+        manifest.reap_dead();
         let entries = manifest.entries();
 
         let mut inner = state.lock().unwrap();
@@ -407,7 +408,11 @@ pub fn run() -> Result<()> {
     state::setup_reload_signal();
     state::write_pid_file("mixer", 0);
     let mut manifest = Manifest::open().or_else(|_| Manifest::create())?;
-    manifest.register("mixer", 0, None, 0)?;
+    // Never die over a registration problem — the mixer owns the audio
+    // output and advances the transport clock for everyone.
+    if let Err(e) = manifest.register("mixer", 0, None, 0) {
+        eprintln!("[mixer] manifest registration failed (continuing): {}", e);
+    }
 
     for attempt in 0..20 {
         match enable_raw_mode() {
