@@ -649,6 +649,12 @@ unsafe impl Send for EventRingbuf {}
 
 impl Drop for EventRingbuf {
     fn drop(&mut self) {
+        // Consumers vacate their slot so they never block the producer
+        // after a clean exit (unclean deaths are reaped by the producer).
+        if !self.ptr.is_null() && self.consumer_id < NUM_CONSUMERS {
+            atomic_store_release(self.read_idx_ptr(self.consumer_id), u64::MAX);
+            unsafe { ptr::write_volatile(self.consumer_pid_ptr(self.consumer_id), 0) };
+        }
         if !self.ptr.is_null() {
             unsafe { libc::munmap(self.ptr as *mut libc::c_void, self.total_size) };
         }
@@ -681,15 +687,44 @@ impl EventRingbuf {
         unsafe { self.ptr.add(offset) }
     }
 
-    fn min_read_index(&self) -> u64 {
-        let mut min = u64::MAX;
+    /// Pid registry: one u32 per consumer slot, written on open so the
+    /// producer can tell a dead consumer from a slow one.
+    fn consumer_pid_ptr(&self, consumer_id: usize) -> *mut u32 {
+        unsafe { self.ptr.add(144 + consumer_id * 4) as *mut u32 }
+    }
+
+    /// Smallest read index over *joined* consumers (None = no consumers, no
+    /// backpressure). u64::MAX marks an unjoined/vacated slot.
+    fn min_read_index(&self) -> Option<u64> {
+        let mut min = None;
         for i in 0..NUM_CONSUMERS {
             let r = atomic_load_acquire(self.read_idx_ptr(i));
-            if r < min {
-                min = r;
+            if r != u64::MAX && min.is_none_or(|m| r < m) {
+                min = Some(r);
             }
         }
         min
+    }
+
+    /// Vacate consumer slots whose process is gone. A killed module (tmux,
+    /// crash) leaves its read index frozen; once the writer laps it the ring
+    /// blocks for everyone, forever — this is what froze the sequencer's
+    /// note events. pid 0 covers rings created before the registry existed.
+    fn reap_dead_consumers(&self) {
+        for i in 0..NUM_CONSUMERS {
+            let r = atomic_load_acquire(self.read_idx_ptr(i));
+            if r == u64::MAX {
+                continue;
+            }
+            let pid = unsafe { ptr::read_volatile(self.consumer_pid_ptr(i)) };
+            let dead = pid == 0
+                || (unsafe { libc::kill(pid as i32, 0) } != 0
+                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH));
+            if dead {
+                atomic_store_release(self.read_idx_ptr(i), u64::MAX);
+                unsafe { ptr::write_volatile(self.consumer_pid_ptr(i), 0) };
+            }
+        }
     }
 
     pub fn create() -> Result<Self> {
@@ -736,6 +771,7 @@ impl EventRingbuf {
             ptr::write_unaligned(ptr as *mut u64, 0);            // write_index
             for i in 0..NUM_CONSUMERS {
                 ptr::write_unaligned(ptr.add(16 + i * 8) as *mut u64, u64::MAX);
+                ptr::write_unaligned(ptr.add(144 + i * 4) as *mut u32, 0); // pid registry
             }
         }
 
@@ -823,10 +859,12 @@ impl EventRingbuf {
 
         // Initialize this consumer's read index to the current write index
         // so it only sees events written after it joins, and doesn't block
-        // the producer with stale state.
+        // the producer with stale state. Register our pid so the producer
+        // can vacate this slot if we die uncleanly.
         unsafe {
             let w = ptr::read_volatile(ptr as *const u64);
             ptr::write_volatile(ptr.add(16 + consumer_id * 8) as *mut u64, w);
+            ptr::write_volatile(ptr.add(144 + consumer_id * 4) as *mut u32, std::process::id());
         }
 
         Ok(Self {
@@ -839,12 +877,29 @@ impl EventRingbuf {
         })
     }
 
+    /// One-line diagnostic: write index + every joined consumer's lag.
+    pub fn debug_status(&self) -> String {
+        let w = atomic_load_acquire(self.write_idx_ptr());
+        let mut parts = vec![format!("w={}", w)];
+        for i in 0..NUM_CONSUMERS {
+            let r = atomic_load_acquire(self.read_idx_ptr(i));
+            if r != u64::MAX {
+                parts.push(format!("c{}={} (lag {})", i, r, w.saturating_sub(r)));
+            }
+        }
+        parts.join("  ")
+    }
+
     pub fn write_event(&mut self, event: &AudioEvent) -> Result<()> {
         let w = atomic_load_acquire(self.write_idx_ptr());
-        let min_r = self.min_read_index();
 
-        if w - min_r >= self.num_slots as u64 {
-            anyhow::bail!("event buffer full");
+        let full = |min_r: Option<u64>| min_r.is_some_and(|r| w - r >= self.num_slots as u64);
+        if full(self.min_read_index()) {
+            // a dead consumer may be the blocker — vacate corpses and retry
+            self.reap_dead_consumers();
+            if full(self.min_read_index()) {
+                anyhow::bail!("event buffer full (live consumer lagging)");
+            }
         }
 
         let dest = self.slot_ptr(w);
@@ -1505,6 +1560,80 @@ mod shm_tests {
         assert_eq!(ev.target, 1);
         assert!((ev.value - 1.0).abs() < 0.001);
         assert_eq!(ev.step, 3);
+    }
+
+    #[test]
+    fn dead_consumer_does_not_block_the_ring() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ = unsafe { libc::shm_unlink(CString::new(SHM_EVENTS_NAME).unwrap().as_ptr()) };
+        let mut producer = EventRingbuf::create().expect("create");
+
+        // a consumer joins, reads nothing, and "dies" (frozen index, dead pid)
+        let consumer = EventRingbuf::open(4).expect("join slot 4");
+        let dead_pid = {
+            let c = std::process::Command::new("true").spawn().unwrap();
+            let pid = c.id();
+            let _ = c.wait_with_output();
+            pid
+        };
+        unsafe { ptr::write_volatile(consumer.consumer_pid_ptr(4), dead_pid) };
+        std::mem::forget(consumer); // skip Drop — simulate an unclean death
+
+        // fill the ring past the corpse's horizon: must keep working
+        for i in 0..600u32 {
+            producer
+                .write_event(&AudioEvent::note_on(60, 100, i))
+                .unwrap_or_else(|e| panic!("write {} failed: {}", i, e));
+        }
+
+        // a live consumer joining now still works
+        let mut live = EventRingbuf::open(0).expect("join live");
+        producer.write_event(&AudioEvent::note_on(61, 100, 0)).expect("write after join");
+        assert!(live.read_event().is_some(), "live consumer sees new events");
+    }
+
+    #[test]
+    fn live_slow_consumer_still_applies_backpressure() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ = unsafe { libc::shm_unlink(CString::new(SHM_EVENTS_NAME).unwrap().as_ptr()) };
+        let mut producer = EventRingbuf::create().expect("create");
+        let _live = EventRingbuf::open(0).expect("join"); // our own (live) pid, never reads
+
+        let mut wrote = 0u32;
+        for i in 0..600u32 {
+            if producer.write_event(&AudioEvent::note_on(60, 100, i)).is_err() {
+                break;
+            }
+            wrote += 1;
+        }
+        assert_eq!(wrote, 256, "a live lagging consumer must still bound the ring");
+    }
+
+    #[test]
+    fn consumer_drop_vacates_slot() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ = unsafe { libc::shm_unlink(CString::new(SHM_EVENTS_NAME).unwrap().as_ptr()) };
+        let mut producer = EventRingbuf::create().expect("create");
+        {
+            let _c = EventRingbuf::open(3).expect("join");
+        } // clean Drop here
+        for i in 0..600u32 {
+            producer
+                .write_event(&AudioEvent::note_on(60, 100, i))
+                .expect("vacated slot must not block");
+        }
+    }
+
+    #[test]
+    fn no_consumers_means_no_backpressure() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ = unsafe { libc::shm_unlink(CString::new(SHM_EVENTS_NAME).unwrap().as_ptr()) };
+        let mut producer = EventRingbuf::create().expect("create");
+        for i in 0..600u32 {
+            producer
+                .write_event(&AudioEvent::note_on(60, 100, i))
+                .expect("writes must not stall with zero consumers");
+        }
     }
 
     #[test]
