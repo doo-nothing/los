@@ -108,6 +108,22 @@ fn row_display(s: &ScopeState, row: usize) -> String {
     }
 }
 
+fn snapshot_params(s: &ScopeState) -> state::ScopeParams {
+    state::ScopeParams {
+        mode: Some(s.mode),
+        channel: Some(s.channel),
+        zoom: Some(s.zoom),
+        gain: Some(s.gain),
+    }
+}
+
+fn apply_params(s: &mut ScopeState, params: &state::ScopeParams) {
+    if let Some(v) = params.mode { s.mode = v; }
+    if let Some(v) = params.channel { s.channel = v; }
+    if let Some(v) = params.zoom { s.zoom = v; }
+    if let Some(v) = params.gain { s.gain = v; }
+}
+
 fn scope_thread(
     state: Arc<Mutex<ScopeState>>,
     shutdown: std::sync::mpsc::Receiver<()>,
@@ -162,6 +178,7 @@ fn draw_ui(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &ScopeState,
     show_help: bool,
+    overlay: Option<&str>,
 ) -> Result<()> {
     terminal.draw(|f| {
         let area = f.area();
@@ -187,7 +204,10 @@ fn draw_ui(
             })
             .collect::<Vec<_>>()
             .join("|");
-        let status_widget = Paragraph::new(status).style(Style::default().fg(Color::Cyan));
+        let status_widget = match overlay {
+            Some(text) => Paragraph::new(text.to_string()).style(Style::default().fg(Color::Yellow)),
+            None => Paragraph::new(status).style(Style::default().fg(Color::Cyan)),
+        };
         f.render_widget(status_widget, chunks[1]);
 
         let data: Vec<(f64, f64)> = state
@@ -249,6 +269,7 @@ fn draw_ui(
                 Line::from("  Ch (L/R/Stereo), ModCh, Zoom,"),
                 Line::from("  Gain, Trig"),
                 Line::from(""),
+                Line::from("  :w/:e/:q   Patch save/load, quit (:x save+quit)"),
                 Line::from("  space      Play/pause (global)"),
                 Line::from("  ?          Toggle this help"),
                 Line::from("  Close pane: tmux prefix + x"),
@@ -294,11 +315,7 @@ pub fn run(instance: usize) -> Result<()> {
     
     // Load saved state if available
     if let Ok(params) = state::load_module_state::<state::ScopeParams>("scope", instance) {
-        let mut s = state.lock().unwrap();
-        if let Some(v) = params.mode { s.mode = v; }
-        if let Some(v) = params.channel { s.channel = v; }
-        if let Some(v) = params.zoom { s.zoom = v; }
-        if let Some(v) = params.gain { s.gain = v; }
+        apply_params(&mut state.lock().unwrap(), &params);
     }
     
     let state_clone = Arc::clone(&state);
@@ -314,49 +331,87 @@ pub fn run(instance: usize) -> Result<()> {
     let mut show_help = false;
     let mut count = crate::keys::Count::default();
     let mut pending_g = false;
+    let mut ex = crate::excmd::ExLine::default();
+    let mut ex_msg: Option<String> = None;
+    let mut patch_name: Option<String> = None;
+    let mut baseline = state::to_toml_string(&snapshot_params(&state.lock().unwrap())).unwrap_or_default();
+    let mut should_quit = false;
     // Global transport handle for Space = play/pause (lazily reopened)
     let mut transport_ui: Option<ShmTransport> = ShmTransport::open().ok();
 
     loop {
         // Check for save-on-signal
         if state::check_save_signal() {
-            let s = state.lock().unwrap();
-            let params = state::ScopeParams {
-                mode: Some(s.mode),
-                channel: Some(s.channel),
-                zoom: Some(s.zoom),
-                gain: Some(s.gain),
-            };
-            drop(s);
+            let params = snapshot_params(&state.lock().unwrap());
             let _ = state::save_module_state("scope", instance, &params);
         }
         
         // Check for reload-on-signal
         if state::check_reload_signal() {
             if let Ok(params) = state::load_module_state::<state::ScopeParams>("scope", instance) {
-                let mut s = state.lock().unwrap();
-                if let Some(v) = params.mode { s.mode = v; }
-                if let Some(v) = params.channel { s.channel = v; }
-                if let Some(v) = params.zoom { s.zoom = v; }
-                if let Some(v) = params.gain { s.gain = v; }
+                apply_params(&mut state.lock().unwrap(), &params);
             }
         }
         
         let current_state = state.lock().unwrap().clone();
-        draw_ui(&mut terminal, &current_state, show_help)?;
+        let overlay = if ex.is_active() {
+            Some(ex.display())
+        } else {
+            ex_msg.clone()
+        };
+        draw_ui(&mut terminal, &current_state, show_help, overlay.as_deref())?;
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
+                ex_msg = None;
+                if ex.is_active() {
+                    let candidates = crate::excmd::patch_names(&state::patches_dir());
+                    if let crate::excmd::ExEvent::Submit(cmd) = ex.handle_key(key.code, &candidates) {
+                        use crate::excmd::ExCommand;
+                        let params = snapshot_params(&state.lock().unwrap());
+                        match cmd {
+                            ExCommand::Write(name) => {
+                                ex_msg = Some(match crate::excmd::ex_write(name, &mut patch_name, &mut baseline, &params) {
+                                    Ok(m) | Err(m) => m,
+                                });
+                            }
+                            ExCommand::Edit(name) => match state::load_patch::<state::ScopeParams>(&name) {
+                                Ok(p) => {
+                                    apply_params(&mut state.lock().unwrap(), &p);
+                                    baseline = state::to_toml_string(&snapshot_params(&state.lock().unwrap())).unwrap_or_default();
+                                    patch_name = Some(name.clone());
+                                    ex_msg = Some(format!("Loaded {}", name));
+                                }
+                                Err(e) => ex_msg = Some(e.to_string()),
+                            },
+                            ExCommand::Quit { force } => {
+                                if !force && crate::excmd::is_dirty(&params, &baseline) {
+                                    ex_msg = Some(String::from("Unsaved changes (:q! to discard, :w <name> to save)"));
+                                } else {
+                                    should_quit = true;
+                                }
+                            }
+                            ExCommand::WriteQuit(name) => {
+                                match crate::excmd::ex_write(name, &mut patch_name, &mut baseline, &params) {
+                                    Ok(_) => should_quit = true,
+                                    Err(m) => ex_msg = Some(m),
+                                }
+                            }
+                            ExCommand::Set(k, _) => ex_msg = Some(format!("Unknown setting: {}", k)),
+                            ExCommand::Unknown(c) => ex_msg = Some(format!("Not a command: {}", c)),
+                        }
+                    }
+                    if should_quit {
+                        break;
+                    }
+                    continue;
+                }
+                if !matches!(key.code, KeyCode::Char('g')) {
+                    pending_g = false;
+                }
                 // Ctrl-s: save module state
                 if key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL {
-                    let s = state.lock().unwrap();
-                    let params = state::ScopeParams {
-                        mode: Some(s.mode),
-                        channel: Some(s.channel),
-                        zoom: Some(s.zoom),
-                        gain: Some(s.gain),
-                    };
-                    drop(s);
+                    let params = snapshot_params(&state.lock().unwrap());
                     let _ = state::save_module_state("scope", 0, &params);
                     continue;
                 }
@@ -410,6 +465,10 @@ pub fn run(instance: usize) -> Result<()> {
                             t.toggle_playing();
                         }
                     }
+                    KeyCode::Char(':') => {
+                        count.clear();
+                        ex.open();
+                    }
                     KeyCode::Char('?') => {
                         count.clear();
                         show_help = !show_help;
@@ -420,7 +479,14 @@ pub fn run(instance: usize) -> Result<()> {
                 }
             }
         }
+        if should_quit {
+            break;
+        }
     }
+
+    crossterm::terminal::disable_raw_mode()?;
+    execute!(io::stdout(), crossterm::terminal::LeaveAlternateScreen)?;
+    Ok(())
 }
 
 #[cfg(test)]

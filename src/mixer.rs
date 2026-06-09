@@ -200,6 +200,28 @@ fn capitalize(s: &str) -> String {
     }
 }
 
+fn snapshot_params(s: &MixerInner) -> state::MixerParams {
+    state::MixerParams {
+        master: Some(s.master),
+        tracks: s.tracks.iter().map(|t| state::MixerTrackParam {
+            level: t.level,
+            pan: t.pan,
+            mute: t.mute,
+            solo: t.solo,
+        }).collect(),
+    }
+}
+
+fn apply_params(s: &mut MixerInner, params: &state::MixerParams) {
+    if let Some(v) = params.master { s.master = v; }
+    for (i, tp) in params.tracks.iter().enumerate().take(s.tracks.len()) {
+        s.tracks[i].level = tp.level;
+        s.tracks[i].pan = tp.pan;
+        s.tracks[i].mute = tp.mute;
+        s.tracks[i].solo = tp.solo;
+    }
+}
+
 /// Adjust the level of the selected strip (track or master, doctrine steps).
 fn adjust_level(s: &mut MixerInner, steps: i32, coarse: bool) {
     use crate::keys::step_f32;
@@ -225,6 +247,7 @@ fn select_strip(s: &mut MixerInner, delta: i32) {
     s.selected = crate::keys::cycle(s.selected, delta, n);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_ui(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     tracks: &[TrackState],
@@ -232,6 +255,7 @@ fn draw_ui(
     master_meter: f32,
     selected: usize,
     show_help: bool,
+    overlay: Option<&str>,
 ) -> Result<()> {
     terminal.draw(|f| {
         let area = f.area();
@@ -305,6 +329,7 @@ fn draw_ui(
                 Line::from("  gg / G    First track / master"),
                 Line::from("  m         Toggle mute"),
                 Line::from("  s         Toggle solo"),
+                Line::from("  :w/:e/:q  Patch save/load, quit"),
                 Line::from("  space      Play/pause (global)"),
                 Line::from("  ?         Toggle help"),
                 Line::from("  ^s        Save state"),
@@ -316,6 +341,14 @@ fn draw_ui(
                     .border_style(Style::default().fg(Color::Cyan))
                     .title("Help"));
             f.render_widget(help, area);
+        }
+
+        if let Some(text) = overlay {
+            let r = Rect::new(0, area.height.saturating_sub(1), area.width, 1);
+            f.render_widget(
+                Paragraph::new(text.to_string()).style(Style::default().fg(Color::Yellow)),
+                r,
+            );
         }
     })?;
 
@@ -372,35 +405,23 @@ pub fn run() -> Result<()> {
     let mut show_help = false;
     let mut count = crate::keys::Count::default();
     let mut pending_g = false;
+    let mut ex = crate::excmd::ExLine::default();
+    let mut ex_msg: Option<String> = None;
+    let mut patch_name: Option<String> = None;
+    let mut baseline = state::to_toml_string(&snapshot_params(&inner.lock().unwrap())).unwrap_or_default();
+    let mut should_quit = false;
     // Global transport handle for Space = play/pause (lazily reopened)
     let mut transport_ui: Option<ShmTransport> = ShmTransport::open().ok();
 
     loop {
         if state::check_save_signal() {
-            let s = inner.lock().unwrap();
-            let params = state::MixerParams {
-                master: Some(s.master),
-                tracks: s.tracks.iter().map(|t| state::MixerTrackParam {
-                    level: t.level,
-                    pan: t.pan,
-                    mute: t.mute,
-                    solo: t.solo,
-                }).collect(),
-            };
-            drop(s);
+            let params = snapshot_params(&inner.lock().unwrap());
             let _ = state::save_module_state("mixer", 0, &params);
         }
 
         if state::check_reload_signal() {
             if let Ok(params) = state::load_module_state::<state::MixerParams>("mixer", 0) {
-                let mut s = inner.lock().unwrap();
-                if let Some(v) = params.master { s.master = v; }
-                for (i, tp) in params.tracks.iter().enumerate().take(s.tracks.len()) {
-                    s.tracks[i].level = tp.level;
-                    s.tracks[i].pan = tp.pan;
-                    s.tracks[i].mute = tp.mute;
-                    s.tracks[i].solo = tp.solo;
-                }
+                apply_params(&mut inner.lock().unwrap(), &params);
             }
         }
 
@@ -409,6 +430,11 @@ pub fn run() -> Result<()> {
             (s.tracks.clone(), s.master, s.master_meter, s.selected)
         };
 
+        let overlay = if ex.is_active() {
+            Some(ex.display())
+        } else {
+            ex_msg.clone()
+        };
         draw_ui(
             &mut terminal,
             &snapshot.0,
@@ -416,25 +442,59 @@ pub fn run() -> Result<()> {
             snapshot.2,
             snapshot.3,
             show_help,
+            overlay.as_deref(),
         )?;
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
+                ex_msg = None;
+                if ex.is_active() {
+                    let candidates = crate::excmd::patch_names(&state::patches_dir());
+                    if let crate::excmd::ExEvent::Submit(cmd) = ex.handle_key(key.code, &candidates) {
+                        use crate::excmd::ExCommand;
+                        let params = snapshot_params(&inner.lock().unwrap());
+                        match cmd {
+                            ExCommand::Write(name) => {
+                                ex_msg = Some(match crate::excmd::ex_write(name, &mut patch_name, &mut baseline, &params) {
+                                    Ok(m) | Err(m) => m,
+                                });
+                            }
+                            ExCommand::Edit(name) => match state::load_patch::<state::MixerParams>(&name) {
+                                Ok(p) => {
+                                    apply_params(&mut inner.lock().unwrap(), &p);
+                                    baseline = state::to_toml_string(&snapshot_params(&inner.lock().unwrap())).unwrap_or_default();
+                                    patch_name = Some(name.clone());
+                                    ex_msg = Some(format!("Loaded {}", name));
+                                }
+                                Err(e) => ex_msg = Some(e.to_string()),
+                            },
+                            ExCommand::Quit { force } => {
+                                if !force && crate::excmd::is_dirty(&params, &baseline) {
+                                    ex_msg = Some(String::from("Unsaved changes (:q! to discard, :w <name> to save)"));
+                                } else {
+                                    should_quit = true;
+                                }
+                            }
+                            ExCommand::WriteQuit(name) => {
+                                match crate::excmd::ex_write(name, &mut patch_name, &mut baseline, &params) {
+                                    Ok(_) => should_quit = true,
+                                    Err(m) => ex_msg = Some(m),
+                                }
+                            }
+                            ExCommand::Set(k, _) => ex_msg = Some(format!("Unknown setting: {}", k)),
+                            ExCommand::Unknown(c) => ex_msg = Some(format!("Not a command: {}", c)),
+                        }
+                    }
+                    if should_quit {
+                        break;
+                    }
+                    continue;
+                }
                 if !matches!(key.code, KeyCode::Char('g')) {
                     pending_g = false;
                 }
                 if key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL {
-                    let s = inner.lock().unwrap();
-                    let params = state::MixerParams {
-                        master: Some(s.master),
-                        tracks: s.tracks.iter().map(|t| state::MixerTrackParam {
-                            level: t.level,
-                            pan: t.pan,
-                            mute: t.mute,
-                            solo: t.solo,
-                        }).collect(),
-                    };
-                    drop(s);
+                    let params = snapshot_params(&inner.lock().unwrap());
                     let _ = state::save_module_state("mixer", 0, &params);
                     continue;
                 }
@@ -502,6 +562,10 @@ pub fn run() -> Result<()> {
                             t.toggle_playing();
                         }
                     }
+                    KeyCode::Char(':') => {
+                        count.clear();
+                        ex.open();
+                    }
                     KeyCode::Char('?') => {
                         count.clear();
                         show_help = !show_help;
@@ -512,7 +576,14 @@ pub fn run() -> Result<()> {
                 }
             }
         }
+        if should_quit {
+            break;
+        }
     }
+
+    crossterm::terminal::disable_raw_mode()?;
+    execute!(io::stdout(), crossterm::terminal::LeaveAlternateScreen)?;
+    Ok(())
 }
 
 #[cfg(test)]
