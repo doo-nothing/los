@@ -61,6 +61,8 @@ Capped at 100 commands. When full, the oldest command is dropped on push.
 
 - **`u`** in normal mode: undo last action; show "Undo: <description>" in status bar
 - **`Ctrl-r`** (both modes): redo last undone action; show "Redo: <description>"
+- **Counts**: `3u` / `3<Ctrl-r>` undo/redo 3 times, stopping early if history
+  runs out; status shows "Undo ×3: <description>" with the actual count done
 - With empty history, show "Nothing to undo" / "Nothing to redo" so the keypress is acknowledged
 - Status message auto-clears after 2 seconds or on next keypress
 
@@ -72,8 +74,9 @@ A future phase can serialize commands alongside `SequencerParams`.
 ## Test Plan
 
 Implemented in `#[cfg(test)] mod tests` at the bottom of `src/sequencer.rs`
-(20 tests), plus extras: history cap, no-op filtering, redo clamps the
-selected step after a length change, undo focuses the changed location.
+(24 tests), plus extras: history cap, no-op filtering, redo clamps the
+selected step after a length change, undo focuses the changed location,
+count-prefixed undo/redo (runs N times, stops at history end).
 
 1. Toggle step, undo, verify step is restored
 2. Cut step, undo, verify step is restored

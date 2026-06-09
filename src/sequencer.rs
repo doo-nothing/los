@@ -341,6 +341,28 @@ impl History {
     }
 }
 
+/// Run an undo or redo op up to `count` times, stopping early when history
+/// runs out. Returns the status-bar message ("Undo: ...", "Undo ×3: ...", or
+/// "Nothing to undo").
+fn history_status(label: &str, count: usize, mut op: impl FnMut() -> Option<&'static str>) -> String {
+    let mut done = 0;
+    let mut last_desc = "";
+    while done < count {
+        match op() {
+            Some(desc) => {
+                last_desc = desc;
+                done += 1;
+            }
+            None => break,
+        }
+    }
+    match done {
+        0 => format!("Nothing to {}", label.to_lowercase()),
+        1 => format!("{}: {}", label, last_desc),
+        n => format!("{} ×{}: {}", label, n, last_desc),
+    }
+}
+
 /// Record a step edit, skipping no-ops so `u` always reverts a visible change.
 fn push_step_edit(history: &mut History, track: usize, step: usize, old_step: Step, new_step: Step) {
     if old_step != new_step {
@@ -704,8 +726,8 @@ fn draw_ui(
                 Line::from("  gt#        Go to track #"),
                 Line::from("  space      Play/pause"),
                 Line::from("  s          Stop"),
-                Line::from("  u          Undo"),
-                Line::from("  ^r         Redo"),
+                Line::from("  u / #u     Undo (# times)"),
+                Line::from("  ^r / #^r   Redo (# times)"),
                 Line::from("  t<NUM>     Set BPM"),
                 Line::from(""),
                 Line::from("Insert mode:"),
@@ -956,9 +978,9 @@ pub fn run(instance: usize) -> Result<()> {
                     continue;
                 }
 
-                // Ctrl-r: redo
+                // Ctrl-r: redo (count-prefixed: 3<C-r> redoes 3 times)
                 if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::CONTROL {
-                    pending_count = None;
+                    let count = pending_count.take().and_then(|c| c.parse().ok()).unwrap_or(1).max(1);
                     pending_d = false;
                     pending_y = false;
                     pending_g = false;
@@ -968,10 +990,7 @@ pub fn run(instance: usize) -> Result<()> {
                     submode.clear();
                     input_buffer.clear();
                     let mut s = state.lock().unwrap();
-                    undo_msg = Some(match history.redo(&mut s) {
-                        Some(desc) => format!("Redo: {}", desc),
-                        None => String::from("Nothing to redo"),
-                    });
+                    undo_msg = Some(history_status("Redo", count, || history.redo(&mut s)));
                     undo_time = Some(Instant::now());
                     continue;
                 }
@@ -1502,15 +1521,13 @@ pub fn run(instance: usize) -> Result<()> {
                             s.playing = false;
                         }
                         KeyCode::Char('u') => {
-                            pending_count = None;
+                            // Count-prefixed: 3u undoes 3 times
+                            let count = pending_count.take().and_then(|c| c.parse().ok()).unwrap_or(1).max(1);
                             pending_d = false;
                             pending_y = false;
                             pending_g = false;
                             let mut s = state.lock().unwrap();
-                            undo_msg = Some(match history.undo(&mut s) {
-                                Some(desc) => format!("Undo: {}", desc),
-                                None => String::from("Nothing to undo"),
-                            });
+                            undo_msg = Some(history_status("Undo", count, || history.undo(&mut s)));
                             undo_time = Some(Instant::now());
                         }
                         KeyCode::Char('t') => {
@@ -2033,5 +2050,61 @@ mod tests {
         let mut h = History::new();
         assert_eq!(h.undo(&mut s), None);
         assert_eq!(h.redo(&mut s), None);
+    }
+
+    #[test]
+    fn count_undo_runs_n_times() {
+        let mut s = state_with_tracks(1);
+        let mut h = History::new();
+        for sel in 1..=3 {
+            s.selected = sel;
+            toggle_step(&mut s, &mut h);
+        }
+        let msg = history_status("Undo", 3, || h.undo(&mut s));
+        assert_eq!(msg, "Undo ×3: Toggle step");
+        assert!(!s.tracks[0].steps[1].active);
+        assert!(!s.tracks[0].steps[2].active);
+        assert!(!s.tracks[0].steps[3].active);
+    }
+
+    #[test]
+    fn count_undo_stops_at_history_end() {
+        let mut s = state_with_tracks(1);
+        let mut h = History::new();
+        s.selected = 1;
+        toggle_step(&mut s, &mut h);
+        s.selected = 2;
+        toggle_step(&mut s, &mut h);
+        let msg = history_status("Undo", 10, || h.undo(&mut s));
+        assert_eq!(msg, "Undo ×2: Toggle step");
+        assert_eq!(h.undo(&mut s), None);
+    }
+
+    #[test]
+    fn count_redo_runs_n_times() {
+        let mut s = state_with_tracks(1);
+        let mut h = History::new();
+        for sel in 1..=3 {
+            s.selected = sel;
+            toggle_step(&mut s, &mut h);
+        }
+        assert_eq!(history_status("Undo", 3, || h.undo(&mut s)), "Undo ×3: Toggle step");
+        let msg = history_status("Redo", 2, || h.redo(&mut s));
+        assert_eq!(msg, "Redo ×2: Toggle step");
+        assert!(s.tracks[0].steps[1].active);
+        assert!(s.tracks[0].steps[2].active);
+        assert!(!s.tracks[0].steps[3].active);
+    }
+
+    #[test]
+    fn single_undo_message_has_no_multiplier() {
+        let mut s = state_with_tracks(1);
+        let mut h = History::new();
+        s.selected = 1;
+        toggle_step(&mut s, &mut h);
+        assert_eq!(history_status("Undo", 1, || h.undo(&mut s)), "Undo: Toggle step");
+        assert_eq!(history_status("Undo", 1, || h.undo(&mut s)), "Nothing to undo");
+        assert_eq!(history_status("Redo", 5, || h.redo(&mut s)), "Redo: Toggle step");
+        assert_eq!(history_status("Redo", 1, || h.redo(&mut s)), "Nothing to redo");
     }
 }
