@@ -19,6 +19,28 @@ const SHM_DATA_SIZE: usize = DEFAULT_SLOT_FRAMES as usize
 const DATA_OFFSET: usize = 64;
 const EVENT_DATA_OFFSET: usize = 256; // larger header for 16 consumer read indices
 
+// Names of the global SHM objects. Test builds get distinct `/los_test_*`
+// names so `cargo test` can never unlink or overwrite the shared memory of a
+// live session — the unit tests below create and destroy these objects
+// freely, which once wiped the manifest out from under a running mixer.
+#[cfg(not(test))]
+const SHM_TRANSPORT_NAME: &str = "/los_transport";
+#[cfg(not(test))]
+const SHM_EVENTS_NAME: &str = "/los_events_v2";
+#[cfg(not(test))]
+const SHM_MODBUS_NAME: &str = "/los_mod";
+#[cfg(not(test))]
+const SHM_MANIFEST_NAME: &str = "/los_manifest";
+
+#[cfg(test)]
+const SHM_TRANSPORT_NAME: &str = "/los_test_transport";
+#[cfg(test)]
+const SHM_EVENTS_NAME: &str = "/los_test_events_v2";
+#[cfg(test)]
+const SHM_MODBUS_NAME: &str = "/los_test_mod";
+#[cfg(test)]
+const SHM_MANIFEST_NAME: &str = "/los_test_manifest";
+
 // ── helpers ────────────────────────────────────────────────────────────────
 
 /// Atomically load a u64 from shared memory.
@@ -328,7 +350,7 @@ impl Drop for ShmTransport {
             unsafe { libc::close(self.fd) };
         }
         if self.owned {
-            let cname = CString::new("/los_transport").unwrap();
+            let cname = CString::new(SHM_TRANSPORT_NAME).unwrap();
             unsafe { libc::shm_unlink(cname.as_ptr()) };
         }
     }
@@ -336,7 +358,7 @@ impl Drop for ShmTransport {
 
 impl ShmTransport {
     fn name() -> &'static str {
-        "/los_transport"
+        SHM_TRANSPORT_NAME
     }
 
     pub fn create(sample_rate: u32) -> Result<Self> {
@@ -623,7 +645,7 @@ impl Drop for EventRingbuf {
 
 impl EventRingbuf {
     fn name() -> &'static str {
-        "/los_events_v2"
+        SHM_EVENTS_NAME
     }
 
     fn write_idx_ptr(&self) -> *mut u64 {
@@ -876,7 +898,7 @@ impl Drop for ModulationBus {
             unsafe { libc::close(self.fd) };
         }
         if self.owned {
-            let cname = CString::new("/los_mod").unwrap();
+            let cname = CString::new(SHM_MODBUS_NAME).unwrap();
             unsafe { libc::shm_unlink(cname.as_ptr()) };
         }
     }
@@ -884,7 +906,7 @@ impl Drop for ModulationBus {
 
 impl ModulationBus {
     fn name() -> &'static str {
-        "/los_mod"
+        SHM_MODBUS_NAME
     }
 
     fn channel_ptr(&self, channel: usize) -> *mut f32 {
@@ -1026,7 +1048,7 @@ impl Drop for Manifest {
             unsafe { libc::close(self.fd) };
         }
         if self.owned {
-            let cname = CString::new("/los_manifest").unwrap();
+            let cname = CString::new(SHM_MANIFEST_NAME).unwrap();
             unsafe { libc::shm_unlink(cname.as_ptr()) };
         }
     }
@@ -1054,18 +1076,18 @@ impl Manifest {
     }
 
     pub fn create() -> Result<Self> {
-        let cname = CString::new("/los_manifest").unwrap();
+        let cname = CString::new(SHM_MANIFEST_NAME).unwrap();
         let total = MANIFEST_TOTAL_SIZE;
 
         let fd = unsafe {
             let fd = libc::shm_open(cname.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o644);
             if fd < 0 {
-                anyhow::bail!("shm_open(/los_manifest) failed: {}", std::io::Error::last_os_error());
+                anyhow::bail!("shm_open({}) failed: {}", SHM_MANIFEST_NAME, std::io::Error::last_os_error());
             }
             if libc::ftruncate(fd, total as libc::off_t) < 0 {
                 libc::close(fd);
                 libc::shm_unlink(cname.as_ptr());
-                anyhow::bail!("ftruncate(/los_manifest) failed: {}", std::io::Error::last_os_error());
+                anyhow::bail!("ftruncate({}) failed: {}", SHM_MANIFEST_NAME, std::io::Error::last_os_error());
             }
             fd
         };
@@ -1082,7 +1104,7 @@ impl Manifest {
             if p == libc::MAP_FAILED {
                 libc::close(fd);
                 libc::shm_unlink(cname.as_ptr());
-                anyhow::bail!("mmap(/los_manifest) failed: {}", std::io::Error::last_os_error());
+                anyhow::bail!("mmap({}) failed: {}", SHM_MANIFEST_NAME, std::io::Error::last_os_error());
             }
             p as *mut u8
         };
@@ -1102,12 +1124,12 @@ impl Manifest {
     }
 
     pub fn open() -> Result<Self> {
-        let cname = CString::new("/los_manifest").unwrap();
+        let cname = CString::new(SHM_MANIFEST_NAME).unwrap();
 
         let fd = unsafe {
             let fd = libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0);
             if fd < 0 {
-                anyhow::bail!("shm_open(/los_manifest) failed: {}", std::io::Error::last_os_error());
+                anyhow::bail!("shm_open({}) failed: {}", SHM_MANIFEST_NAME, std::io::Error::last_os_error());
             }
             fd
         };
@@ -1123,7 +1145,7 @@ impl Manifest {
             );
             if p == libc::MAP_FAILED {
                 libc::close(fd);
-                anyhow::bail!("mmap(/los_manifest) failed: {}", std::io::Error::last_os_error());
+                anyhow::bail!("mmap({}) failed: {}", SHM_MANIFEST_NAME, std::io::Error::last_os_error());
             }
             p as *mut u8
         };
@@ -1217,6 +1239,20 @@ mod shm_tests {
 
     // All SHM tests must run serially because they use fixed SHM names.
     static SHM_TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn shm_names_are_test_isolated() {
+        // Tests unlink and recreate these objects freely; if any of them
+        // resolves to a production name, `cargo test` destroys the shared
+        // memory of a live los session (this wiped the manifest out from
+        // under a running mixer once).
+        for name in [SHM_TRANSPORT_NAME, SHM_EVENTS_NAME, SHM_MODBUS_NAME, SHM_MANIFEST_NAME] {
+            assert!(
+                name.starts_with("/los_test_"),
+                "{name} would clobber a live session's SHM"
+            );
+        }
+    }
 
     #[test]
     fn audio_event_size_is_32_bytes() {
@@ -1342,7 +1378,7 @@ mod shm_tests {
     #[test]
     fn modulation_bus_create_and_rw() {
         let _guard = SHM_TEST_MUTEX.lock().unwrap();
-        let _ = unsafe { libc::shm_unlink(CString::new("/los_mod").unwrap().as_ptr()) };
+        let _ = unsafe { libc::shm_unlink(CString::new(SHM_MODBUS_NAME).unwrap().as_ptr()) };
         let mut bus = ModulationBus::create().expect("create modbus");
 
         bus.set(0, 0.75);
@@ -1355,7 +1391,7 @@ mod shm_tests {
     #[test]
     fn modulation_bus_open_reads_existing() {
         let _guard = SHM_TEST_MUTEX.lock().unwrap();
-        let _ = unsafe { libc::shm_unlink(CString::new("/los_mod").unwrap().as_ptr()) };
+        let _ = unsafe { libc::shm_unlink(CString::new(SHM_MODBUS_NAME).unwrap().as_ptr()) };
         let mut bus1 = ModulationBus::create().expect("create");
         bus1.set(5, 0.42);
 
@@ -1366,7 +1402,7 @@ mod shm_tests {
     #[test]
     fn modulation_bus_out_of_bounds_returns_zero() {
         let _guard = SHM_TEST_MUTEX.lock().unwrap();
-        let _ = unsafe { libc::shm_unlink(CString::new("/los_mod").unwrap().as_ptr()) };
+        let _ = unsafe { libc::shm_unlink(CString::new(SHM_MODBUS_NAME).unwrap().as_ptr()) };
         let bus = ModulationBus::create().expect("create");
         assert_eq!(bus.get(32), 0.0);
         assert_eq!(bus.get(1000), 0.0);
@@ -1375,7 +1411,7 @@ mod shm_tests {
     #[test]
     fn modulation_bus_set_out_of_bounds_is_noop() {
         let _guard = SHM_TEST_MUTEX.lock().unwrap();
-        let _ = unsafe { libc::shm_unlink(CString::new("/los_mod").unwrap().as_ptr()) };
+        let _ = unsafe { libc::shm_unlink(CString::new(SHM_MODBUS_NAME).unwrap().as_ptr()) };
         let mut bus = ModulationBus::create().expect("create");
         bus.set(32, 1.0);
         bus.set(100, 1.0);
@@ -1384,7 +1420,7 @@ mod shm_tests {
     #[test]
     fn modulation_bus_initially_zero() {
         let _guard = SHM_TEST_MUTEX.lock().unwrap();
-        let _ = unsafe { libc::shm_unlink(CString::new("/los_mod").unwrap().as_ptr()) };
+        let _ = unsafe { libc::shm_unlink(CString::new(SHM_MODBUS_NAME).unwrap().as_ptr()) };
         let bus = ModulationBus::create().expect("create");
         for ch in 0..MODBUS_NUM_CHANNELS {
             assert_eq!(bus.get(ch), 0.0, "channel {} should be zero", ch);
@@ -1397,7 +1433,7 @@ mod shm_tests {
 
         // Clean up both SHM objects
         let _ = unsafe { libc::shm_unlink(CString::new(EventRingbuf::name()).unwrap().as_ptr()) };
-        let _ = unsafe { libc::shm_unlink(CString::new("/los_mod").unwrap().as_ptr()) };
+        let _ = unsafe { libc::shm_unlink(CString::new(SHM_MODBUS_NAME).unwrap().as_ptr()) };
 
         // Set up IPC
         let mut producer = EventRingbuf::create().expect("create events");
@@ -1447,7 +1483,7 @@ mod shm_tests {
         // This test verifies the bug fix: modules that only call open()
         // fail silently when modbus doesn't exist. They MUST fall back to create().
         let _guard = SHM_TEST_MUTEX.lock().unwrap();
-        let _ = unsafe { libc::shm_unlink(CString::new("/los_mod").unwrap().as_ptr()) };
+        let _ = unsafe { libc::shm_unlink(CString::new(SHM_MODBUS_NAME).unwrap().as_ptr()) };
 
         // open() without create() should fail
         assert!(ModulationBus::open().is_err(), "open() should fail when modbus doesn't exist");
@@ -1470,7 +1506,7 @@ mod shm_tests {
     #[test]
     fn manifest_create_and_register() {
         let _guard = SHM_TEST_MUTEX.lock().unwrap();
-        let _ = unsafe { libc::shm_unlink(CString::new("/los_manifest").unwrap().as_ptr()) };
+        let _ = unsafe { libc::shm_unlink(CString::new(SHM_MANIFEST_NAME).unwrap().as_ptr()) };
         let mut m = Manifest::create().expect("create manifest");
 
         let slot = m.register("voice", 0, Some("/los_audio_voice_0")).expect("register");
@@ -1489,7 +1525,7 @@ mod shm_tests {
     #[test]
     fn manifest_multiple_modules() {
         let _guard = SHM_TEST_MUTEX.lock().unwrap();
-        let _ = unsafe { libc::shm_unlink(CString::new("/los_manifest").unwrap().as_ptr()) };
+        let _ = unsafe { libc::shm_unlink(CString::new(SHM_MANIFEST_NAME).unwrap().as_ptr()) };
         let mut m = Manifest::create().expect("create manifest");
 
         m.register("sequencer", 0, None).expect("register sequencer");
@@ -1507,7 +1543,7 @@ mod shm_tests {
     #[test]
     fn manifest_open_from_another_process() {
         let _guard = SHM_TEST_MUTEX.lock().unwrap();
-        let _ = unsafe { libc::shm_unlink(CString::new("/los_manifest").unwrap().as_ptr()) };
+        let _ = unsafe { libc::shm_unlink(CString::new(SHM_MANIFEST_NAME).unwrap().as_ptr()) };
         let mut m1 = Manifest::create().expect("create manifest");
         m1.register("voice", 0, Some("/los_audio_voice_0")).expect("register");
 
@@ -1521,7 +1557,7 @@ mod shm_tests {
     #[test]
     fn manifest_full() {
         let _guard = SHM_TEST_MUTEX.lock().unwrap();
-        let _ = unsafe { libc::shm_unlink(CString::new("/los_manifest").unwrap().as_ptr()) };
+        let _ = unsafe { libc::shm_unlink(CString::new(SHM_MANIFEST_NAME).unwrap().as_ptr()) };
         let mut m = Manifest::create().expect("create manifest");
 
         // Fill all 16 slots
