@@ -129,6 +129,36 @@ fn apply_params(s: &mut ScopeState, params: &state::ScopeParams) {
     if let Some(v) = params.gain { s.gain = v; }
 }
 
+impl crate::undo::ParamUndo for ScopeState {
+    fn get_param(&self, slot: usize) -> Option<crate::undo::ParamValue> {
+        use crate::undo::ParamValue as V;
+        match slot {
+            ROW_MODE => Some(V::Usize(self.mode)),
+            ROW_SOURCE => Some(V::Usize(self.source)),
+            ROW_CHANNEL => Some(V::Usize(self.channel)),
+            ROW_MODBUS_CH => Some(V::Usize(self.modbus_channel)),
+            ROW_ZOOM => Some(V::F32(self.zoom)),
+            ROW_GAIN => Some(V::F32(self.gain)),
+            ROW_TRIGGER => Some(V::F32(self.trigger_level)),
+            _ => None,
+        }
+    }
+
+    fn set_param(&mut self, slot: usize, value: crate::undo::ParamValue) {
+        use crate::undo::ParamValue as V;
+        match (slot, value) {
+            (ROW_MODE, V::Usize(v)) => self.mode = v,
+            (ROW_SOURCE, V::Usize(v)) => self.source = v,
+            (ROW_CHANNEL, V::Usize(v)) => self.channel = v,
+            (ROW_MODBUS_CH, V::Usize(v)) => self.modbus_channel = v,
+            (ROW_ZOOM, V::F32(v)) => self.zoom = v,
+            (ROW_GAIN, V::F32(v)) => self.gain = v,
+            (ROW_TRIGGER, V::F32(v)) => self.trigger_level = v,
+            _ => {}
+        }
+    }
+}
+
 fn scope_thread(
     state: Arc<Mutex<ScopeState>>,
     shutdown: std::sync::mpsc::Receiver<()>,
@@ -275,6 +305,7 @@ fn draw_ui(
                 Line::from("  Ch (L/R/Stereo), ModCh, Zoom,"),
                 Line::from("  Gain, Trig"),
                 Line::from(""),
+                Line::from("  u / ^r     Undo / redo (counts; sweeps coalesce)"),
                 Line::from("  :w/:e/:q   Patch save/load, quit (:x save+quit)"),
                 Line::from("  space      Play/pause (global)"),
                 Line::from("  ?          Toggle this help"),
@@ -369,6 +400,7 @@ pub fn run(instance: usize) -> Result<()> {
     let mut count = crate::keys::Count::default();
     let mut pending_g = false;
     let mut picker = crate::picker::Picker::default();
+    let mut history = crate::undo::ParamHistory::default();
     let mut ex = crate::excmd::ExLine::default();
     let mut ex_msg: Option<String> = None;
     let mut patch_name: Option<String> = None;
@@ -414,7 +446,13 @@ pub fn run(instance: usize) -> Result<()> {
                     if let crate::picker::PickerEvent::Chosen(Some(addr)) = picker.handle_key(key.code) {
                         let entries = manifest.entries();
                         if let Some(ch) = crate::routing::resolve(&entries, &addr) {
-                            state.lock().unwrap().modbus_channel = ch;
+                            use crate::undo::{ParamUndo, ParamValue};
+                            let mut s = state.lock().unwrap();
+                            let old = s.get_param(ROW_MODBUS_CH);
+                            s.modbus_channel = ch;
+                            if let Some(old) = old {
+                                history.record(ROW_MODBUS_CH, "View source", old, ParamValue::Usize(ch));
+                            }
                         }
                     }
                     continue;
@@ -465,6 +503,12 @@ pub fn run(instance: usize) -> Result<()> {
                     pending_g = false;
                 }
                 // Ctrl-s: save module state
+                if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::CONTROL {
+                    let n = count.take();
+                    let mut s = state.lock().unwrap();
+                    ex_msg = Some(crate::undo::history_status("Redo", n, || history.redo(&mut *s)));
+                    continue;
+                }
                 if key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL {
                     let params = snapshot_params(&state.lock().unwrap());
                     let _ = state::save_module_state("scope", 0, &params);
@@ -482,21 +526,28 @@ pub fn run(instance: usize) -> Result<()> {
                         let mut s = state.lock().unwrap();
                         s.selected = crate::keys::cycle(s.selected, -n, NUM_ROWS);
                     }
-                    KeyCode::Char('h') | KeyCode::Left => {
+                    KeyCode::Char('h' | 'l' | 'H' | 'L') | KeyCode::Left | KeyCode::Right => {
+                        let c = match key.code {
+                            KeyCode::Char(c) => c,
+                            KeyCode::Left => 'h',
+                            _ => 'l',
+                        };
                         let n = count.take() as i32;
-                        adjust(&mut state.lock().unwrap(), -n, false);
-                    }
-                    KeyCode::Char('l') | KeyCode::Right => {
-                        let n = count.take() as i32;
-                        adjust(&mut state.lock().unwrap(), n, false);
-                    }
-                    KeyCode::Char('H') => {
-                        let n = count.take() as i32;
-                        adjust(&mut state.lock().unwrap(), -n, true);
-                    }
-                    KeyCode::Char('L') => {
-                        let n = count.take() as i32;
-                        adjust(&mut state.lock().unwrap(), n, true);
+                        let (steps, coarse) = match c {
+                            'h' => (-n, false),
+                            'l' => (n, false),
+                            'H' => (-n, true),
+                            _ => (n, true),
+                        };
+                        use crate::undo::ParamUndo;
+                        let mut s = state.lock().unwrap();
+                        let slot = s.selected;
+                        let old = s.get_param(slot);
+                        adjust(&mut s, steps, coarse);
+                        let new = s.get_param(slot);
+                        if let (Some(old), Some(new)) = (old, new) {
+                            history.record(slot, "Adjust", old, new);
+                        }
                     }
                     KeyCode::Char('g') => {
                         count.clear();
@@ -519,6 +570,11 @@ pub fn run(instance: usize) -> Result<()> {
                         if let Some(ref mut t) = transport_ui {
                             t.toggle_playing();
                         }
+                    }
+                    KeyCode::Char('u') => {
+                        let n = count.take();
+                        let mut s = state.lock().unwrap();
+                        ex_msg = Some(crate::undo::history_status("Undo", n, || history.undo(&mut *s)));
                     }
                     KeyCode::Char('@') => {
                         count.clear();

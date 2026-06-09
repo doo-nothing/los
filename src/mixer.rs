@@ -222,6 +222,52 @@ fn apply_params(s: &mut MixerInner, params: &state::MixerParams) {
     }
 }
 
+/// Undo slots: strip*4 + (0 level, 1 pan, 2 mute, 3 solo); master = MASTER_SLOT.
+const MASTER_SLOT: usize = 1_000_000;
+
+impl crate::undo::ParamUndo for MixerInner {
+    fn get_param(&self, slot: usize) -> Option<crate::undo::ParamValue> {
+        use crate::undo::ParamValue as V;
+        if slot == MASTER_SLOT {
+            return Some(V::F32(self.master));
+        }
+        let t = self.tracks.get(slot / 4)?;
+        match slot % 4 {
+            0 => Some(V::F32(t.level)),
+            1 => Some(V::F32(t.pan)),
+            2 => Some(V::Bool(t.mute)),
+            _ => Some(V::Bool(t.solo)),
+        }
+    }
+
+    fn set_param(&mut self, slot: usize, value: crate::undo::ParamValue) {
+        use crate::undo::ParamValue as V;
+        if slot == MASTER_SLOT {
+            if let V::F32(v) = value {
+                self.master = v;
+            }
+            return;
+        }
+        let Some(t) = self.tracks.get_mut(slot / 4) else { return };
+        match (slot % 4, value) {
+            (0, V::F32(v)) => t.level = v,
+            (1, V::F32(v)) => t.pan = v,
+            (2, V::Bool(v)) => t.mute = v,
+            (3, V::Bool(v)) => t.solo = v,
+            _ => {}
+        }
+    }
+}
+
+/// The undo slot for the selected strip's param (`kind`: 0 level, 1 pan...).
+fn strip_slot(s: &MixerInner, kind: usize) -> usize {
+    if s.selected < s.tracks.len() {
+        s.selected * 4 + kind
+    } else {
+        MASTER_SLOT
+    }
+}
+
 /// Adjust the level of the selected strip (track or master, doctrine steps).
 fn adjust_level(s: &mut MixerInner, steps: i32, coarse: bool) {
     use crate::keys::step_f32;
@@ -329,6 +375,7 @@ fn draw_ui(
                 Line::from("  gg / G    First track / master"),
                 Line::from("  m         Toggle mute"),
                 Line::from("  s         Toggle solo"),
+                Line::from("  u / ^r    Undo / redo"),
                 Line::from("  :w/:e/:q  Patch save/load, quit"),
                 Line::from("  space      Play/pause (global)"),
                 Line::from("  ?         Toggle help"),
@@ -405,6 +452,7 @@ pub fn run() -> Result<()> {
     let mut show_help = false;
     let mut count = crate::keys::Count::default();
     let mut pending_g = false;
+    let mut history = crate::undo::ParamHistory::default();
     let mut ex = crate::excmd::ExLine::default();
     let mut ex_msg: Option<String> = None;
     let mut patch_name: Option<String> = None;
@@ -493,6 +541,12 @@ pub fn run() -> Result<()> {
                 if !matches!(key.code, KeyCode::Char('g')) {
                     pending_g = false;
                 }
+                if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::CONTROL {
+                    let n = count.take();
+                    let mut s = inner.lock().unwrap();
+                    ex_msg = Some(crate::undo::history_status("Redo", n, || history.redo(&mut *s)));
+                    continue;
+                }
                 if key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL {
                     let params = snapshot_params(&inner.lock().unwrap());
                     let _ = state::save_module_state("mixer", 0, &params);
@@ -506,23 +560,46 @@ pub fn run() -> Result<()> {
                     KeyCode::Char('l') | KeyCode::Right => {
                         select_strip(&mut inner.lock().unwrap(), count.take() as i32);
                     }
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        adjust_level(&mut inner.lock().unwrap(), -(count.take() as i32), false);
+                    KeyCode::Char('j' | 'k' | 'J' | 'K') | KeyCode::Down | KeyCode::Up => {
+                        let c = match key.code {
+                            KeyCode::Char(c) => c,
+                            KeyCode::Down => 'j',
+                            _ => 'k',
+                        };
+                        let n = count.take() as i32;
+                        let (steps, coarse) = match c {
+                            'j' => (-n, false),
+                            'k' => (n, false),
+                            'J' => (-n, true),
+                            _ => (n, true),
+                        };
+                        use crate::undo::ParamUndo;
+                        let mut s = inner.lock().unwrap();
+                        let slot = strip_slot(&s, 0);
+                        let old = s.get_param(slot);
+                        adjust_level(&mut s, steps, coarse);
+                        let new = s.get_param(slot);
+                        if let (Some(old), Some(new)) = (old, new) {
+                            history.record(slot, "Level", old, new);
+                        }
                     }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        adjust_level(&mut inner.lock().unwrap(), count.take() as i32, false);
+                    KeyCode::Char('<' | ',' | '>' | '.') => {
+                        let n = count.take() as i32;
+                        let steps = if matches!(key.code, KeyCode::Char('<' | ',')) { -n } else { n };
+                        use crate::undo::ParamUndo;
+                        let mut s = inner.lock().unwrap();
+                        let slot = strip_slot(&s, 1);
+                        let old = s.get_param(slot);
+                        adjust_pan(&mut s, steps);
+                        let new = s.get_param(slot);
+                        if let (Some(old), Some(new)) = (old, new) {
+                            history.record(slot, "Pan", old, new);
+                        }
                     }
-                    KeyCode::Char('J') => {
-                        adjust_level(&mut inner.lock().unwrap(), -(count.take() as i32), true);
-                    }
-                    KeyCode::Char('K') => {
-                        adjust_level(&mut inner.lock().unwrap(), count.take() as i32, true);
-                    }
-                    KeyCode::Char('<') | KeyCode::Char(',') => {
-                        adjust_pan(&mut inner.lock().unwrap(), -(count.take() as i32));
-                    }
-                    KeyCode::Char('>') | KeyCode::Char('.') => {
-                        adjust_pan(&mut inner.lock().unwrap(), count.take() as i32);
+                    KeyCode::Char('u') => {
+                        let n = count.take();
+                        let mut s = inner.lock().unwrap();
+                        ex_msg = Some(crate::undo::history_status("Undo", n, || history.undo(&mut *s)));
                     }
                     KeyCode::Char('g') => {
                         count.clear();
@@ -538,20 +615,20 @@ pub fn run() -> Result<()> {
                         let mut s = inner.lock().unwrap();
                         s.selected = s.tracks.len(); // master strip
                     }
-                    KeyCode::Char('m') => {
+                    KeyCode::Char(c @ ('m' | 's')) => {
                         count.clear();
+                        use crate::undo::ParamValue;
                         let mut s = inner.lock().unwrap();
                         let sel = s.selected;
                         if sel < s.tracks.len() {
-                            s.tracks[sel].mute = !s.tracks[sel].mute;
-                        }
-                    }
-                    KeyCode::Char('s') => {
-                        count.clear();
-                        let mut s = inner.lock().unwrap();
-                        let sel = s.selected;
-                        if sel < s.tracks.len() {
-                            s.tracks[sel].solo = !s.tracks[sel].solo;
+                            let (kind, desc) = if c == 'm' { (2, "Mute") } else { (3, "Solo") };
+                            let was = if c == 'm' { s.tracks[sel].mute } else { s.tracks[sel].solo };
+                            if c == 'm' {
+                                s.tracks[sel].mute = !was;
+                            } else {
+                                s.tracks[sel].solo = !was;
+                            }
+                            history.record(sel * 4 + kind, desc, ParamValue::Bool(was), ParamValue::Bool(!was));
                         }
                     }
                     KeyCode::Char(' ') => {

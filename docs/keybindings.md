@@ -16,7 +16,7 @@ Status markers: **✅ today** · **🔜 v1** (see `docs/plans/v1-polish.md`) ·
 | `?` | Help overlay. ✅ |
 | `Ctrl-s` | Save module state. ✅ |
 | `Space` | Global transport play/pause (except sequencer insert mode); also `Ctrl-b p`/`Ctrl-b s` and `los ctl`. ✅ |
-| `u` / `Ctrl-r` | Undo / redo, count-prefixed. ✅ sequencer · 🔜 all modules |
+| `u` / `Ctrl-r` | Undo / redo, count-prefixed; value sweeps coalesce into one entry. ✅ |
 | `@` | Open the source picker on a bindable param (live sources from the manifest; Enter binds, x unbinds). ✅ |
 | `:` | Ex command line (`:w :e :q :q! :x :set`); not in conductor (session save/load lives there). ✅ |
 | `gg` / `G` | First / last of the module's primary collection (sequencer tracks, envelope/mixer channels, voice/scope params, conductor states). ✅ |
@@ -142,17 +142,17 @@ Requires a per-module dirty flag (changed since last save) for `:q` vs `:q!`.
 `1/2/3` output shortcuts removed — digits are counts ·
 `@` source picker on bindable rows · new rows: `notes` (which seq track's
 notes to play; unbound = all) and `amp` (amplitude source, default
-`envelope/0/ch1`; unbound = 1.0) (✅) · `:` (✅) · undo 🔜
+`envelope/0/ch1`; unbound = 1.0) · `:` · undo (all ✅)
 
 ### Envelope
 `j/k` select · `h/l` adjust · `H/L` coarse · `[`/`]` channel (counts) ·
 `gg/G` first/last channel · `t` trigger · `c` cycle · `o` gate (moved off `g`
-to free the gg chord) · `@` source picker per param + trigger · `:` (✅) · undo 🔜
+to free the gg chord) · `@` source picker per param + trigger · `:` · undo (all ✅)
 
 ### Mixer
 `h/l` select channel (counts) · `j/k` level down/up · `J/K` coarse ·
 `<`/`>` pan (replaces `+/-`) · `gg` first track / `G` master · `m` mute ·
-`s` solo · `:` (✅) · undo 🔜
+`s` solo · `:` · undo (all ✅)
 
 ### Scope
 Rebuilt as a vertical param list (✅): `j/k` select (mode, source, channel,
