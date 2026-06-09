@@ -593,5 +593,6 @@ Phase 3: Multi-track sequencer       ✅ Complete
 Phase 4: Envelope module             ✅ Complete
 Phase 5: Track routing / modulation  ✅ Complete
 Phase 6: Module lifecycle            ✅ Complete
+Phase 7: Sequencer undo/redo         ✅ Complete
 ```
 
