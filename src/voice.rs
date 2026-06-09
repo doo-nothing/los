@@ -418,6 +418,7 @@ fn draw_ui(
 
 fn snapshot_params(s: &VoiceState) -> state::VoiceParams {
     state::VoiceParams {
+        format: state::STATE_FORMAT,
         shape: Some(s.shape),
         sub: Some(s.sub),
         fm: Some(s.fm),
@@ -444,12 +445,17 @@ fn apply_params(s: &mut VoiceState, params: &state::VoiceParams) {
     if let Some(v) = params.gate { s.gate = v; }
     if let Some(v) = params.level { s.level = v; }
     if let Some(v) = params.velocity { s.velocity = v; }
-    s.shape_src = params.shape_src.as_deref().and_then(SourceAddr::parse);
-    s.sub_src = params.sub_src.as_deref().and_then(SourceAddr::parse);
-    s.fm_src = params.fm_src.as_deref().and_then(SourceAddr::parse);
-    s.level_src = params.level_src.as_deref().and_then(SourceAddr::parse);
-    s.amp_src = params.amp_src.as_deref().and_then(SourceAddr::parse);
-    s.notes_src = params.notes_src.as_deref().and_then(SourceAddr::parse);
+    // Binding fields only exist in format-2 files. An old file simply lacks
+    // them — keep the defaults (e.g. amp -> envelope/0/ch1) rather than
+    // unbinding everything.
+    if params.format >= state::STATE_FORMAT {
+        s.shape_src = params.shape_src.as_deref().and_then(SourceAddr::parse);
+        s.sub_src = params.sub_src.as_deref().and_then(SourceAddr::parse);
+        s.fm_src = params.fm_src.as_deref().and_then(SourceAddr::parse);
+        s.level_src = params.level_src.as_deref().and_then(SourceAddr::parse);
+        s.amp_src = params.amp_src.as_deref().and_then(SourceAddr::parse);
+        s.notes_src = params.notes_src.as_deref().and_then(SourceAddr::parse);
+    }
 }
 
 /// The binding slot for each param row (rows 0-2 modulate values; 4-5 are
@@ -796,5 +802,30 @@ mod tests {
         let mut s = VoiceState::default();
         adjust(&mut s, 2, 1, true);
         assert!((s.fm - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn old_format_state_keeps_default_bindings() {
+        let mut s = VoiceState::default();
+        assert!(s.amp_src.is_some(), "default amp binding present");
+        // simulate a pre-v2 state file: format 0, no binding fields
+        let old = state::VoiceParams {
+            shape: Some(0.7),
+            ..Default::default()
+        };
+        apply_params(&mut s, &old);
+        assert_eq!(s.shape, 0.7, "values still apply");
+        assert!(s.amp_src.is_some(), "old file must not unbind amp");
+    }
+
+    #[test]
+    fn v2_state_unbind_is_honored() {
+        let mut s = VoiceState::default();
+        let p = state::VoiceParams {
+            format: state::STATE_FORMAT,
+            ..Default::default()
+        };
+        apply_params(&mut s, &p);
+        assert!(s.amp_src.is_none(), "format-2 file with no amp_src = unbound");
     }
 }

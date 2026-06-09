@@ -160,6 +160,10 @@ pub struct PaneState {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct VoiceParams {
+    /// Params format: files older than STATE_FORMAT keep the module's
+    /// default bindings instead of clobbering them with absent fields.
+    #[serde(default)]
+    pub format: u32,
     pub shape: Option<f32>,
     pub sub: Option<f32>,
     pub fm: Option<f32>,
@@ -243,6 +247,8 @@ pub struct ScopeParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EnvelopeParams {
+    #[serde(default)]
+    pub format: u32,
     #[serde(default)]
     pub channels: Vec<EnvelopeChannelParams>,
     #[serde(default)]

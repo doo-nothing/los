@@ -10,12 +10,16 @@ use crate::routing::SourceAddr;
 pub enum PickerEvent {
     Pending,
     Cancelled,
-    /// Some(addr) = bind to this source; None = unbind.
+    /// Some(addr) = bind to this source; None = the first special row
+    /// (usually "— none —" = unbind).
     Chosen(Option<SourceAddr>),
+    /// A special row other than the first (e.g. "— off —" at index 1).
+    ChosenSpecial(usize),
 }
 
 #[derive(Debug, Default)]
 pub struct Picker {
+    specials: Vec<String>,
     sources: Vec<SourceAddr>,
     selected: usize,
     active: bool,
@@ -23,10 +27,25 @@ pub struct Picker {
 
 impl Picker {
     pub fn open(&mut self, sources: Vec<SourceAddr>, current: Option<&SourceAddr>) {
+        self.open_with(vec![String::from("— none —")], sources, current, 0);
+    }
+
+    /// Open with custom special rows ahead of the sources (e.g. the
+    /// envelope trigger's "— any note —" / "— off —"). `current_special`
+    /// selects a special row when `current` is None.
+    pub fn open_with(
+        &mut self,
+        specials: Vec<String>,
+        sources: Vec<SourceAddr>,
+        current: Option<&SourceAddr>,
+        current_special: usize,
+    ) {
+        let n = specials.len();
         self.selected = current
             .and_then(|c| sources.iter().position(|s| s == c))
-            .map(|i| i + 1) // row 0 is "— none —"
-            .unwrap_or(0);
+            .map(|i| i + n)
+            .unwrap_or(current_special.min(n.saturating_sub(1)));
+        self.specials = specials;
         self.sources = sources;
         self.active = true;
     }
@@ -37,7 +56,7 @@ impl Picker {
 
     /// Rows to render, with the selected index.
     pub fn rows(&self) -> (Vec<String>, usize) {
-        let mut rows = vec![String::from("— none —")];
+        let mut rows = self.specials.clone();
         rows.extend(self.sources.iter().map(|s| s.to_string()));
         (rows, self.selected)
     }
@@ -45,7 +64,8 @@ impl Picker {
     pub fn handle_key(&mut self, code: KeyCode) -> PickerEvent {
         match code {
             KeyCode::Char('j') | KeyCode::Down => {
-                self.selected = (self.selected + 1).min(self.sources.len());
+                self.selected =
+                    (self.selected + 1).min(self.specials.len() + self.sources.len() - 1);
                 PickerEvent::Pending
             }
             KeyCode::Char('k') | KeyCode::Up => {
@@ -57,15 +77,18 @@ impl Picker {
                 PickerEvent::Pending
             }
             KeyCode::Char('G') => {
-                self.selected = self.sources.len();
+                self.selected = self.specials.len() + self.sources.len() - 1;
                 PickerEvent::Pending
             }
             KeyCode::Enter => {
                 self.active = false;
+                let n = self.specials.len();
                 if self.selected == 0 {
                     PickerEvent::Chosen(None)
+                } else if self.selected < n {
+                    PickerEvent::ChosenSpecial(self.selected)
                 } else {
-                    PickerEvent::Chosen(Some(self.sources[self.selected - 1].clone()))
+                    PickerEvent::Chosen(Some(self.sources[self.selected - n].clone()))
                 }
             }
             KeyCode::Char('x') => {
@@ -141,5 +164,33 @@ mod tests {
         assert_eq!(p.rows().1, 3, "clamped to last row");
         p.handle_key(KeyCode::Char('g'));
         assert_eq!(p.rows().1, 0);
+    }
+
+    #[test]
+    fn specials_offset_sources_and_report_off() {
+        let mut p = Picker::default();
+        p.open_with(
+            vec!["— any note —".into(), "— off —".into()],
+            sources(),
+            None,
+            0,
+        );
+        // row 1 = off
+        p.handle_key(KeyCode::Char('j'));
+        assert_eq!(p.handle_key(KeyCode::Enter), PickerEvent::ChosenSpecial(1));
+
+        // row 2 = first source
+        p.open_with(
+            vec!["— any note —".into(), "— off —".into()],
+            sources(),
+            None,
+            1,
+        );
+        assert_eq!(p.rows().1, 1, "opens on the current special");
+        p.handle_key(KeyCode::Char('j'));
+        assert_eq!(
+            p.handle_key(KeyCode::Enter),
+            PickerEvent::Chosen(Some(SourceAddr::parse("sequencer/0/t1").unwrap()))
+        );
     }
 }
