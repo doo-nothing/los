@@ -14,9 +14,17 @@ v1. After this: new voices and fx modules.
 | Nav doctrine | Axis rule: navigate along layout axis, adjust perpendicular |
 | Adjust keys | `#` counts everywhere + Shift = coarse (~10x) |
 | Undo | All modules, u / Ctrl-r / counts; coalesce per sweep |
-| Patches & quit | Shared vi ex-style `:` command line (`:w`, `:e`, `:q`) |
+| Patches & quit | Shared vi ex-style `:` command line (`:w`, `:e`, `:q`, `:q!`, `:x`/`:wq`, `:set`) |
 | Old saves | Clean break — state format version bump, old saves ignored |
 | v1 scope | All of the above + multi-voice fixes + conductor add/remove |
+| Sequencer grammar | Full operator+motion grammar: y/d/c × w/b/e/0/$/t#/f#, x/p in normal mode |
+| Register | Unified vi register (step range or track; p pastes contextually; steps overwrite, tracks insert). `#p` = paste N times; `#P`/`#L`/`#R` stay Euclidean (documented quirk) |
+| `t` key | BPM moves to `:set bpm` so t/f become true motions |
+| Vi extras in v1 | Dot-repeat (`.`), visual mode (`v`/`V`), `o`/`O` new track, `>>`/`<<` rotate |
+| Orca-inspired depth | Post-v1 (chance, ratchet, clock division, swing) — documented in keybindings.md |
+
+Full key reference and grammar vocabulary: `docs/keybindings.md` (canonical;
+help overlays and README derive from it).
 
 ## Problems being solved
 
@@ -150,16 +158,24 @@ the param value.
    README. Small, independent, immediately satisfying.
 2. **Keybinding doctrine** — scope refactor, counts + Shift coarse in
    voice/envelope/mixer/scope, conductor dd/confirm/Enter, voice digit keys
-   removed, help overlays standardized.
-3. **Routing core** — manifest channel claiming + labels, source addresses,
+   removed, help overlays standardized against keybindings.md.
+3. **Ex command line + patches** — shared `:` component, :w/:w name/:e/:q/
+   :q!/:x/:set, dirty-flag tracking, patches dir. Moves sequencer BPM to
+   `:set bpm` (frees `t`).
+4. **Sequencer grammar** — operator-pending mode (y/d/c × motions), true
+   word semantics (w/b/e), t#/f# motions, unified register, x/p/~ in normal
+   mode, visual mode (v/V), dot-repeat, o/O, >>/<<. Builds on the Command
+   undo machinery; every grammar action is undoable.
+5. **Routing core** — manifest channel claiming + labels, source addresses,
    `@` picker, voice notes/amp inputs, note-event filtering, consumer-id
    scheme fix, scope label browser, state format v2.
-4. **Undo everywhere** — shared History, coalescing, all modules.
-5. **Ex command line + patches** — `:` component, :w/:e/:q, patches dir.
-6. **Conductor lifecycle** — add/remove UI, modules/routing view,
+6. **Undo everywhere** — shared History extraction, per-sweep coalescing,
+   voice/envelope/mixer/scope.
+7. **Conductor lifecycle** — add/remove UI, modules/routing view,
    `los add` CLI.
-7. **Docs final pass** — DESIGN.md (dynamic allocation protocol, keybinding
-   doctrine section), README keymap reference, roadmap v1 close-out.
+8. **Docs final pass** — DESIGN.md (dynamic allocation protocol, keybinding
+   doctrine section), README keymap reference from keybindings.md, roadmap
+   v1 close-out.
 
 Each PR updates DESIGN.md/README for what it changes; tests required
 (routing resolution, undo coalescing, ex-command parsing, count handling).
