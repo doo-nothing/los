@@ -162,9 +162,12 @@ modbus rows opens the picker; the channel row shows the live source label
 (`envelope/0/sum`). `:` ✅.
 
 ### Conductor
-`j/k` list nav (counts) · `gg/G` · `Enter` load (`l` alias) · `s` save
-session · `dd` + y/n confirm to delete (✅) · `a` add module, `x` remove
-module 🔜
+Two views, `Tab` switches. **States**: `j/k` nav (counts) · `gg/G` ·
+`Enter` load (`l` alias) · `s` save session · `dd` + y/n confirm to delete.
+**Modules** (manifest-driven, shows each module's claimed outputs — the
+routing overview): `j/k`/`gg/G` nav · `a` add module (type picker; instance
+auto-numbered) · `x` + y/n remove (saves state first; mixer/conductor are
+protected). Also `los add <module> [instance]` from any shell. All ✅
 
 ## Future (🔮 post-v1, documented so the grammar reserves space)
 

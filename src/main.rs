@@ -49,6 +49,7 @@ fn usage() {
     eprintln!("  los load <state-file.toml>    Load a saved session state");
     eprintln!("  los <state-file.toml>         Same as 'load'");
     eprintln!("  los ctl [play|stop|toggle|status]  Control the global transport");
+    eprintln!("  los add <module> [instance]   Spawn a module in the running session");
     eprintln!("  los --help                    Show this help");
     eprintln!();
     eprintln!("Modules:");
@@ -104,6 +105,17 @@ fn main() -> Result<()> {
                 conductor::load_session(&path)
             }
             "ctl" => ctl(args.get(2).map(|s| s.as_str()).unwrap_or("toggle")),
+            "add" => {
+                let module = args.get(2).map(|s| s.as_str()).unwrap_or("");
+                if module.is_empty() {
+                    anyhow::bail!(
+                        "Usage: los add <module> [instance] (addable: {})",
+                        conductor::ADDABLE_MODULES.join(", ")
+                    );
+                }
+                let instance = args.get(3).and_then(|s| s.parse().ok());
+                conductor::add_module(module, instance)
+            }
             _ if args[1].ends_with(".toml") => {
                 conductor::load_session(&args[1])
             }

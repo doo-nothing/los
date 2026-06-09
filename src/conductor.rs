@@ -186,6 +186,67 @@ fn install_transport_keys(exe: &str) {
     ]);
 }
 
+/// Module types the conductor (and `los add`) can spawn at runtime.
+pub const ADDABLE_MODULES: &[&str] = &["voice", "envelope", "sequencer", "scope", "tone"];
+
+/// Spawn a new module instance in a fresh pane of the modules window.
+/// Picks the next free instance number from the manifest when not given.
+pub fn add_module(module: &str, instance: Option<usize>) -> Result<()> {
+    anyhow::ensure!(
+        ADDABLE_MODULES.contains(&module),
+        "unknown module {module} (addable: {})",
+        ADDABLE_MODULES.join(", ")
+    );
+    let instance = instance.unwrap_or_else(|| {
+        Manifest::open()
+            .map(|m| {
+                m.entries()
+                    .iter()
+                    .filter(|e| e.module_name == module)
+                    .map(|e| e.instance + 1)
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0)
+    });
+    let exe = exe_path()?;
+    let title = format!("{} {}", capitalize(module), instance);
+    // split, set the title, spawn, retile
+    let pane_id = tmux_cmd(&[
+        "split-window", "-t", "los:modules", "-P", "-F", "#{pane_id}",
+        &format!("{} {} {}", exe, module, instance),
+    ])?;
+    tmux_cmd_ok(&["select-pane", "-t", pane_id.trim(), "-T", &title]);
+    tmux_cmd_ok(&["select-layout", "-t", "los:modules", "tiled"]);
+    Ok(())
+}
+
+/// Cleanly remove a running module: save its state, then kill its pane
+/// (process exit unregisters it from the manifest).
+pub fn remove_module(module: &str, instance: usize) -> Result<()> {
+    if let Some(pid) = Manifest::open().ok().and_then(|m| {
+        m.entries()
+            .iter()
+            .find(|e| e.module_name == module && e.instance == instance)
+            .map(|e| e.pid)
+    }) {
+        state::send_save_signal(pid);
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    let title = format!("{} {}", capitalize(module), instance);
+    let stdout = tmux_cmd(&["list-panes", "-t", "los:modules", "-F", "#{pane_id}\t#{pane_title}"])?;
+    for line in stdout.lines() {
+        if let Some((pane_id, pane_title)) = line.split_once('\t') {
+            if pane_title.trim() == title {
+                tmux_cmd(&["kill-pane", "-t", pane_id])?;
+                tmux_cmd_ok(&["select-layout", "-t", "los:modules", "tiled"]);
+                return Ok(());
+            }
+        }
+    }
+    anyhow::bail!("no pane titled '{}' found", title)
+}
+
 pub fn create_session() -> Result<()> {
     state::ensure_dirs()?;
     let _ = tmux_cmd(&["kill-session", "-t", "los"]);
@@ -404,6 +465,13 @@ pub fn run_conductor() -> Result<()> {
     let mut pending_d = false;
     // Some(filename) while waiting for y/n delete confirmation
     let mut confirm_delete: Option<String> = None;
+    // Modules view (Tab toggles): manifest-driven list + lifecycle keys
+    let mut view_modules = false;
+    let mut modules: Vec<crate::shm::ManifestEntry> = Vec::new();
+    let mut msel: usize = 0;
+    let mut add_picker: Option<usize> = None;
+    let mut confirm_remove: Option<(String, usize)> = None;
+    let mut manifest_ro: Option<Manifest> = Manifest::open().ok();
     // Global transport handle for Space = play/pause (lazily reopened)
     let mut transport_ui: Option<ShmTransport> = ShmTransport::open().ok();
     
@@ -412,6 +480,15 @@ pub fn run_conductor() -> Result<()> {
     let mut needs_refresh = true;
     
     loop {
+        if view_modules {
+            if manifest_ro.is_none() {
+                manifest_ro = Manifest::open().ok();
+            }
+            modules = manifest_ro.as_ref().map(|m| m.entries()).unwrap_or_default();
+            modules.sort_by(|a, b| (&a.module_name, a.instance).cmp(&(&b.module_name, b.instance)));
+            msel = msel.min(modules.len().saturating_sub(1));
+            needs_refresh = true; // live view: redraw each tick
+        }
         if needs_refresh || entries.is_empty() {
             entries.clear();
             if let Ok(dir) = std::fs::read_dir(state::states_dir()) {
@@ -443,12 +520,16 @@ pub fn run_conductor() -> Result<()> {
                 
                 let header = if let Some(ref name) = confirm_delete {
                     format!("Delete {}? (y/n)", name)
+                } else if let Some((ref m, i)) = confirm_remove {
+                    format!("Remove {} {}? (y/n)", m, i)
                 } else if pending_d {
                     String::from("LOS Conductor — d…")
+                } else if view_modules {
+                    String::from("LOS Conductor — Modules (a add, x remove, Tab states)")
                 } else {
-                    String::from("LOS Conductor")
+                    String::from("LOS Conductor — States (Tab modules)")
                 };
-                let header_style = if confirm_delete.is_some() {
+                let header_style = if confirm_delete.is_some() || confirm_remove.is_some() {
                     Style::default().fg(Color::Red).add_modifier(ratatui::style::Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::Cyan).add_modifier(ratatui::style::Modifier::BOLD)
@@ -458,7 +539,55 @@ pub fn run_conductor() -> Result<()> {
                     .block(Block::default().borders(Borders::ALL));
                 f.render_widget(title, chunks[0]);
                 
-                if entries.is_empty() {
+                if view_modules {
+                    let items: Vec<ListItem> = modules.iter().enumerate().map(|(i, e)| {
+                        let outputs = match e.mod_base {
+                            Some(base) => {
+                                let labels = crate::routing::output_labels(&e.module_name);
+                                let shown: Vec<&str> = labels.iter().take(e.mod_count).copied().collect();
+                                format!("  outputs ch{}-{}: {}", base, base + e.mod_count - 1, shown.join(","))
+                            }
+                            None => String::new(),
+                        };
+                        let audio = if e.audio_shm.is_some() { "  [audio]" } else { "" };
+                        let text = format!("{} {}  pid {}{}{}", e.module_name, e.instance, e.pid, audio, outputs);
+                        let style = if i == msel {
+                            Style::default().fg(Color::Yellow).add_modifier(ratatui::style::Modifier::BOLD)
+                        } else {
+                            Style::default()
+                        };
+                        ListItem::new(text).style(style)
+                    }).collect();
+                    let list = List::new(items)
+                        .block(Block::default().borders(Borders::ALL).title("Running Modules"));
+                    f.render_widget(list, chunks[1]);
+
+                    if let Some(sel) = add_picker {
+                        let rows: Vec<ListItem> = ADDABLE_MODULES.iter().enumerate().map(|(i, m)| {
+                            let style = if i == sel {
+                                Style::default().fg(Color::Black).bg(Color::Yellow)
+                            } else {
+                                Style::default().fg(Color::White)
+                            };
+                            ListItem::new(*m).style(style)
+                        }).collect();
+                        let h = (ADDABLE_MODULES.len() as u16 + 2).min(area.height);
+                        let r = ratatui::layout::Rect::new(
+                            (area.width.saturating_sub(24)) / 2,
+                            (area.height.saturating_sub(h)) / 2,
+                            24.min(area.width),
+                            h,
+                        );
+                        f.render_widget(ratatui::widgets::Clear, r);
+                        let list = List::new(rows).block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .border_style(Style::default().fg(Color::Yellow))
+                                .title("Add module"),
+                        );
+                        f.render_widget(list, r);
+                    }
+                } else if entries.is_empty() {
                     let empty = Paragraph::new("No saved states. Press ? for help.")
                         .style(Style::default().fg(Color::Gray));
                     f.render_widget(empty, chunks[1]);
@@ -496,6 +625,104 @@ pub fn run_conductor() -> Result<()> {
                     if key.code == KeyCode::Char('y') {
                         let path = state::states_dir().join(&name);
                         let _ = std::fs::remove_file(&path);
+                    }
+                    needs_refresh = true;
+                    continue;
+                }
+
+                // Pending module-removal confirmation
+                if let Some((module, inst)) = confirm_remove.take() {
+                    if key.code == KeyCode::Char('y') {
+                        if let Err(e) = remove_module(&module, inst) {
+                            eprintln!("[conductor] remove failed: {}", e);
+                        }
+                    }
+                    needs_refresh = true;
+                    continue;
+                }
+
+                // Add-module type picker
+                if let Some(sel) = add_picker {
+                    match key.code {
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            add_picker = Some((sel + 1).min(ADDABLE_MODULES.len() - 1));
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            add_picker = Some(sel.saturating_sub(1));
+                        }
+                        KeyCode::Enter => {
+                            add_picker = None;
+                            if let Err(e) = add_module(ADDABLE_MODULES[sel], None) {
+                                eprintln!("[conductor] add failed: {}", e);
+                            }
+                        }
+                        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('a') => {
+                            add_picker = None;
+                        }
+                        _ => {}
+                    }
+                    needs_refresh = true;
+                    continue;
+                }
+
+                // Tab toggles between states and modules views
+                if key.code == KeyCode::Tab {
+                    view_modules = !view_modules;
+                    count.clear();
+                    needs_refresh = true;
+                    continue;
+                }
+
+                // Modules view keys
+                if view_modules {
+                    match key.code {
+                        KeyCode::Char(c) if c.is_ascii_digit() && count.push(c) => {}
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            msel = (msel + count.take()).min(modules.len().saturating_sub(1));
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            msel = msel.saturating_sub(count.take());
+                        }
+                        KeyCode::Char('g') => {
+                            if pending_g {
+                                pending_g = false;
+                                msel = 0;
+                            } else {
+                                pending_g = true;
+                            }
+                        }
+                        KeyCode::Char('G') => {
+                            msel = modules.len().saturating_sub(1);
+                        }
+                        KeyCode::Char('a') => {
+                            count.clear();
+                            add_picker = Some(0);
+                        }
+                        KeyCode::Char('x') => {
+                            count.clear();
+                            if let Some(e) = modules.get(msel) {
+                                if e.module_name == "mixer" || e.module_name == "conductor" {
+                                    // removing the mixer kills audio output; keep it manual
+                                } else {
+                                    confirm_remove = Some((e.module_name.clone(), e.instance));
+                                }
+                            }
+                        }
+                        KeyCode::Char(' ') => {
+                            if transport_ui.is_none() {
+                                transport_ui = ShmTransport::open().ok();
+                            }
+                            if let Some(ref mut t) = transport_ui {
+                                t.toggle_playing();
+                            }
+                        }
+                        KeyCode::Char('?') => {
+                            show_help = true;
+                        }
+                        _ => {
+                            count.clear();
+                            pending_g = false;
+                        }
                     }
                     needs_refresh = true;
                     continue;
@@ -687,6 +914,9 @@ pub fn run_conductor() -> Result<()> {
                     Line::from("  s          Save current session state"),
                     Line::from("  Enter / l  Load selected state (full session reload)"),
                     Line::from("  dd         Delete selected state (asks y/n)"),
+                    Line::from("  Tab        Switch states ⇄ modules view"),
+                    Line::from("  a          Add module (modules view)"),
+                    Line::from("  x          Remove module (modules view, asks y/n)"),
                 Line::from("  space      Play/pause (global)"),
                 Line::from("  ?          Toggle this help"),
                 Line::from("  Close pane: tmux prefix + x"),
