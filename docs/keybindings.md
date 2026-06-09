@@ -18,7 +18,7 @@ Status markers: **✅ today** · **🔜 v1** (see `docs/plans/v1-polish.md`) ·
 | `Space` | Global transport play/pause (except sequencer insert mode); also `Ctrl-b p`/`Ctrl-b s` and `los ctl`. ✅ |
 | `u` / `Ctrl-r` | Undo / redo, count-prefixed. ✅ sequencer · 🔜 all modules |
 | `@` | Open source picker on a bindable param. 🔜 (✅ today as `@N` track digit) |
-| `:` | Ex command line. 🔜 |
+| `:` | Ex command line (`:w :e :q :q! :x :set`); not in conductor (session save/load lives there). ✅ |
 | `gg` / `G` | First / last of the module's primary collection (sequencer tracks, envelope/mixer channels, voice/scope params, conductor states). ✅ |
 
 ## Vocabulary
@@ -116,11 +116,11 @@ entry/tuning), **visual** 🔜, **operator-pending** 🔜, **ex** 🔜.
 |-----|--------|--------|
 | `Space` | play/pause (normal mode; global flag 🔜) | ✅ |
 | `s` | stop | ✅ |
-| `t<num>` | BPM prompt — **replaced by `:set bpm <n>`** to free `t` as a motion | ✅ → 🔜 removed |
+| `:set bpm <n>` | set BPM (the old `t<num>` prompt is removed; `t` is reserved for the till motion) | ✅ |
 | `u` / `Ctrl-r` / counts | undo / redo | ✅ |
 | `?` | help | ✅ |
 
-## Ex command line (all modules) 🔜
+## Ex command line (all modules except conductor) ✅
 
 | Command | Action |
 |---------|--------|
@@ -140,23 +140,23 @@ Requires a per-module dirty flag (changed since last save) for `:q` vs `:q!`.
 `j/k` select param · `h/l` adjust · `H/L` coarse · counts · `gg/G` (✅) ·
 `1/2/3` output shortcuts removed — digits are counts (✅) ·
 `@` source picker on any row 🔜 · new bindable rows: `notes` (source track
-filter), `amp` (default env ch 1) 🔜 · undo/`:` 🔜
+filter), `amp` (default env ch 1) 🔜 · `:` (✅) · undo 🔜
 
 ### Envelope
 `j/k` select · `h/l` adjust · `H/L` coarse · `[`/`]` channel (counts) ·
 `gg/G` first/last channel · `t` trigger · `c` cycle · `o` gate (moved off `g`
-to free the gg chord) (✅) · undo/`:`/picker 🔜
+to free the gg chord) · `:` (✅) · undo/picker 🔜
 
 ### Mixer
 `h/l` select channel (counts) · `j/k` level down/up · `J/K` coarse ·
 `<`/`>` pan (replaces `+/-`) · `gg` first track / `G` master · `m` mute ·
-`s` solo (✅) · undo/`:` 🔜
+`s` solo · `:` (✅) · undo 🔜
 
 ### Scope
 Rebuilt as a vertical param list (✅): `j/k` select (mode, source, channel,
 modbus ch, zoom, gain, trigger) · `h/l` adjust · `H/L` coarse · counts ·
 `gg/G` · the old `g/G t/T n/N m c b +/-` keys are gone. `@` picker for the
-modbus source row 🔜.
+modbus source row 🔜. `:` ✅.
 
 ### Conductor
 `j/k` list nav (counts) · `gg/G` · `Enter` load (`l` alias) · `s` save

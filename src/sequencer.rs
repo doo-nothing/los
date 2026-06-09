@@ -18,7 +18,7 @@ use ratatui::{
 };
 
 use crate::shm::{AudioEvent, EventRingbuf, Manifest, ModulationBus, ShmTransport};
-use crate::state::{self, TrackMode, TrackParam};
+use crate::state::{self, TrackMode};
 
 const NUM_STEPS: usize = 16;
 
@@ -738,8 +738,9 @@ fn draw_ui(
                 Line::from("  space      Play/pause"),
                 Line::from("  s          Stop"),
                 Line::from("  u / #u     Undo (# times)"),
+                Line::from("  :w/:e/:q   Patch save/load, quit (:x save+quit)"),
                 Line::from("  ^r / #^r   Redo (# times)"),
-                Line::from("  t<NUM>     Set BPM"),
+                Line::from("  :set bpm N Set BPM (also pulses/length/rotation)"),
                 Line::from(""),
                 Line::from("Insert mode:"),
                 Line::from("  Esc        Return to normal"),
@@ -768,6 +769,67 @@ fn draw_ui(
     })?;
 
     Ok(())
+}
+
+fn snapshot_params(s: &SequencerState) -> state::SequencerParams {
+    state::SequencerParams {
+        bpm: Some(s.bpm),
+        playing: Some(s.playing),
+        euclidean_pulses: None,
+        euclidean_length: None,
+        euclidean_rotation: None,
+        steps: vec![],
+        tracks: s.tracks.iter().map(|trk| state::TrackParam {
+            steps: trk.steps.iter().map(|step| state::StepParam {
+                active: step.active,
+                note: step.note,
+                velocity: step.velocity,
+                mod_value: step.mod_value,
+            }).collect(),
+            length: Some(trk.length),
+            pulses: Some(trk.pulses),
+            rotation: Some(trk.rotation),
+            muted: trk.muted,
+            mode: trk.mode,
+        }).collect(),
+    }
+}
+
+/// Patch view of the params: musical content only — the transport play flag
+/// is session state, not patch state (and would dirty the patch constantly).
+fn patch_params(s: &SequencerState) -> state::SequencerParams {
+    let mut p = snapshot_params(s);
+    p.playing = None;
+    p
+}
+
+/// Rebuild tracks (and bookkeeping vectors) from saved params.
+fn apply_tracks(s: &mut SequencerState, params: &state::SequencerParams) {
+    if params.tracks.is_empty() {
+        return;
+    }
+    s.tracks.clear();
+    s.current_steps.clear();
+    s.last_notes.clear();
+    for tp in &params.tracks {
+        let mut steps = vec![Step::default(); NUM_STEPS];
+        for (i, step) in tp.steps.iter().enumerate().take(steps.len()) {
+            steps[i] = Step { active: step.active, note: step.note, velocity: step.velocity, mod_value: step.mod_value };
+        }
+        s.tracks.push(Track {
+            steps,
+            length: tp.length.unwrap_or(16),
+            pulses: tp.pulses.unwrap_or(5),
+            rotation: tp.rotation.unwrap_or(0),
+            muted: tp.muted,
+            mode: tp.mode,
+        });
+        s.current_steps.push(0);
+        s.last_notes.push(None);
+    }
+    s.current_track = s.current_track.min(s.tracks.len().saturating_sub(1));
+    let len = s.tracks[s.current_track].length;
+    s.selected = s.selected.min(len.saturating_sub(1));
 }
 
 pub fn run(instance: usize) -> Result<()> {
@@ -804,26 +866,7 @@ pub fn run(instance: usize) -> Result<()> {
         if let Some(bpm) = params.bpm { s.bpm = bpm; }
         if let Some(playing) = params.playing { s.playing = playing; }
         if !params.tracks.is_empty() {
-            // Rebuild tracks from saved state exactly — clear defaults first
-            s.tracks.clear();
-            s.current_steps.clear();
-            s.last_notes.clear();
-            for tp in &params.tracks {
-                let mut steps = vec![Step::default(); NUM_STEPS];
-                for (i, step) in tp.steps.iter().enumerate().take(steps.len()) {
-                    steps[i] = Step { active: step.active, note: step.note, velocity: step.velocity, mod_value: step.mod_value };
-                }
-                s.tracks.push(Track {
-                    steps,
-                    length: tp.length.unwrap_or(16),
-                    pulses: tp.pulses.unwrap_or(5),
-                    rotation: tp.rotation.unwrap_or(0),
-                    muted: tp.muted,
-                    mode: tp.mode,
-                });
-                s.current_steps.push(0);
-                s.last_notes.push(None);
-            }
+            apply_tracks(&mut s, &params);
         } else {
             // Fallback: load flat fields into first track
             let trk = &mut s.tracks[0];
@@ -864,34 +907,16 @@ pub fn run(instance: usize) -> Result<()> {
     let mut history = History::new();
     let mut undo_msg: Option<String> = None;
     let mut undo_time: Option<Instant> = None;
+    let mut ex = crate::excmd::ExLine::default();
+    let mut patch_name: Option<String> = None;
+    let mut baseline = state::to_toml_string(&patch_params(&state.lock().unwrap())).unwrap_or_default();
+    let mut should_quit = false;
 
     loop {
         
         // Check for save-on-signal
         if state::check_save_signal() {
-            let s = state.lock().unwrap();
-            let params = state::SequencerParams {
-                bpm: Some(s.bpm),
-                playing: Some(s.playing),
-                euclidean_pulses: None,
-                euclidean_length: None,
-                euclidean_rotation: None,
-                steps: vec![],
-                tracks: s.tracks.iter().map(|trk| state::TrackParam {
-                    steps: trk.steps.iter().map(|step| state::StepParam {
-                        active: step.active,
-                        note: step.note,
-                        velocity: step.velocity,
-                        mod_value: step.mod_value,
-                    }).collect(),
-                    length: Some(trk.length),
-                    pulses: Some(trk.pulses),
-                    rotation: Some(trk.rotation),
-                    muted: trk.muted,
-                    mode: trk.mode,
-                }).collect(),
-            };
-            drop(s);
+            let params = snapshot_params(&state.lock().unwrap());
             let _ = state::save_module_state("sequencer", instance, &params);
         }
         
@@ -909,28 +934,7 @@ pub fn run(instance: usize) -> Result<()> {
                         t.set_playing(playing);
                     }
                 }
-                if !params.tracks.is_empty() {
-                    s.tracks.clear();
-                    s.current_steps.clear();
-                    s.last_notes.clear();
-                    for tp in &params.tracks {
-                        let mut steps = vec![Step::default(); NUM_STEPS];
-                        for (i, step) in tp.steps.iter().enumerate().take(steps.len()) {
-                            steps[i] = Step { active: step.active, note: step.note, velocity: step.velocity, mod_value: step.mod_value };
-                        }
-                        s.tracks.push(Track {
-                            steps,
-                            length: tp.length.unwrap_or(16),
-                            pulses: tp.pulses.unwrap_or(5),
-                            rotation: tp.rotation.unwrap_or(0),
-                            muted: tp.muted,
-                            mode: tp.mode,
-                        });
-                        s.current_steps.push(0);
-                        s.last_notes.push(None);
-                    }
-                    s.current_track = s.current_track.min(s.tracks.len().saturating_sub(1));
-                }
+                apply_tracks(&mut s, &params);
             }
         }
         
@@ -963,7 +967,8 @@ pub fn run(instance: usize) -> Result<()> {
         // Clear undo message after 2 seconds
         if let Some(t) = undo_time { if t.elapsed() > Duration::from_secs(2) { undo_msg = None; undo_time = None; } }
         let current_state = state.lock().unwrap().clone();
-        draw_ui(&mut terminal, &current_state, &mode, &submode, &input_buffer, &pending_count, &gt_target, &gt_input, show_help, &undo_msg)?;
+        let status_msg = if ex.is_active() { Some(ex.display()) } else { undo_msg.clone() };
+        draw_ui(&mut terminal, &current_state, &mode, &submode, &input_buffer, &pending_count, &gt_target, &gt_input, show_help, &status_msg)?;
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
@@ -972,32 +977,108 @@ pub fn run(instance: usize) -> Result<()> {
                 undo_msg = None;
                 undo_time = None;
 
+                // Ex command line captures every key while open
+                if ex.is_active() {
+                    let candidates = crate::excmd::patch_names(&state::patches_dir());
+                    if let crate::excmd::ExEvent::Submit(cmd) = ex.handle_key(key.code, &candidates) {
+                        use crate::excmd::ExCommand;
+                        match cmd {
+                            ExCommand::Write(name) => {
+                                let params = patch_params(&state.lock().unwrap());
+                                undo_msg = Some(match crate::excmd::ex_write(name, &mut patch_name, &mut baseline, &params) {
+                                    Ok(m) | Err(m) => m,
+                                });
+                            }
+                            ExCommand::Edit(name) => match state::load_patch::<state::SequencerParams>(&name) {
+                                Ok(p) => {
+                                    let mut s = state.lock().unwrap();
+                                    if let Some(bpm) = p.bpm { s.bpm = bpm; }
+                                    apply_tracks(&mut s, &p);
+                                    baseline = state::to_toml_string(&patch_params(&s)).unwrap_or_default();
+                                    drop(s);
+                                    history = History::new();
+                                    patch_name = Some(name.clone());
+                                    undo_msg = Some(format!("Loaded {}", name));
+                                }
+                                Err(e) => undo_msg = Some(e.to_string()),
+                            },
+                            ExCommand::Quit { force } => {
+                                let params = patch_params(&state.lock().unwrap());
+                                if !force && crate::excmd::is_dirty(&params, &baseline) {
+                                    undo_msg = Some(String::from("Unsaved changes (:q! to discard, :w <name> to save)"));
+                                } else {
+                                    should_quit = true;
+                                }
+                            }
+                            ExCommand::WriteQuit(name) => {
+                                let params = patch_params(&state.lock().unwrap());
+                                match crate::excmd::ex_write(name, &mut patch_name, &mut baseline, &params) {
+                                    Ok(_) => should_quit = true,
+                                    Err(m) => undo_msg = Some(m),
+                                }
+                            }
+                            ExCommand::Set(k, v) => {
+                                let mut s = state.lock().unwrap();
+                                match k.as_str() {
+                                    "bpm" => match v.parse::<f64>() {
+                                        Ok(b) => {
+                                            let old_bpm = s.bpm;
+                                            s.bpm = b.clamp(20.0, 300.0);
+                                            if old_bpm != s.bpm {
+                                                history.push(Command::SetBpm { old_bpm, new_bpm: s.bpm });
+                                            }
+                                            undo_msg = Some(format!("bpm = {}", s.bpm));
+                                        }
+                                        Err(_) => undo_msg = Some(format!("Invalid bpm: {}", v)),
+                                    },
+                                    "pulses" | "length" | "rotation" => match v.parse::<usize>() {
+                                        Ok(n) => {
+                                            let tidx = s.current_track;
+                                            let old = EuclidState::capture(&s.tracks[tidx]);
+                                            match k.as_str() {
+                                                "pulses" => s.tracks[tidx].pulses = n.min(16),
+                                                "length" => {
+                                                    s.tracks[tidx].length = n.clamp(1, 16);
+                                                    let len = s.tracks[tidx].length;
+                                                    s.selected = s.selected.min(len - 1);
+                                                }
+                                                _ => s.tracks[tidx].rotation = n.min(255),
+                                            }
+                                            let (p, l, r) = (s.tracks[tidx].pulses, s.tracks[tidx].length, s.tracks[tidx].rotation);
+                                            euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
+                                            let new = EuclidState::capture(&s.tracks[tidx]);
+                                            push_track_params(&mut history, tidx, old, new);
+                                            undo_msg = Some(format!("{} = {}", k, n));
+                                        }
+                                        Err(_) => undo_msg = Some(format!("Invalid {}: {}", k, v)),
+                                    },
+                                    _ => undo_msg = Some(format!("Unknown setting: {}", k)),
+                                }
+                            }
+                            ExCommand::Unknown(c) => undo_msg = Some(format!("Not a command: {}", c)),
+                        }
+                        undo_time = Some(Instant::now());
+                    }
+                    if should_quit {
+                        break;
+                    }
+                    continue;
+                }
+
+                // ':' opens the ex command line (any mode, when no prompt is active)
+                if key.code == KeyCode::Char(':') && submode.is_empty() && gt_target.is_none() {
+                    pending_count = None;
+                    pending_d = false;
+                    pending_y = false;
+                    pending_g = false;
+                    ex.open();
+                    continue;
+                }
+
                 // Ctrl-s: save module state
                 if key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL {
-                    let s = state.lock().unwrap();
-                    let params = state::SequencerParams {
-                        bpm: Some(s.bpm),
-                        playing: Some(s.playing),
-                        euclidean_pulses: None,
-                        euclidean_length: None,
-                        euclidean_rotation: None,
-                        steps: vec![],
-                        tracks: s.tracks.iter().map(|trk| TrackParam {
-                            steps: trk.steps.iter().map(|step| state::StepParam {
-                                active: step.active,
-                                note: step.note,
-                                velocity: step.velocity,
-                                mod_value: step.mod_value,
-                            }).collect(),
-                            length: Some(trk.length),
-                            pulses: Some(trk.pulses),
-                            rotation: Some(trk.rotation),
-                            muted: trk.muted,
-                            mode: trk.mode,
-                        }).collect(),
-                    };
-                    drop(s);
-                    let _ = state::save_module_state("sequencer", 0, &params);
+                    let params = snapshot_params(&state.lock().unwrap());
+                    let _ = state::save_module_state("sequencer", instance, &params);
                     continue;
                 }
 
@@ -1094,15 +1175,6 @@ pub fn run(instance: usize) -> Result<()> {
                                         s.tracks[tidx].steps[sel].note = note.clamp(0, 127);
                                         let new_step = s.tracks[tidx].steps[sel];
                                         push_step_edit(&mut history, tidx, sel, old_step, new_step);
-                                    }
-                                }
-                                "bpm" => {
-                                    if let Ok(bpm) = input_buffer.parse::<f64>() {
-                                        let old_bpm = s.bpm;
-                                        s.bpm = bpm.clamp(20.0, 300.0);
-                                        if old_bpm != s.bpm {
-                                            history.push(Command::SetBpm { old_bpm, new_bpm: s.bpm });
-                                        }
                                     }
                                 }
                                 "track" => {
@@ -1564,14 +1636,6 @@ pub fn run(instance: usize) -> Result<()> {
                             undo_msg = Some(history_status("Undo", count, || history.undo(&mut s)));
                             undo_time = Some(Instant::now());
                         }
-                        KeyCode::Char('t') => {
-                            pending_count = None;
-                            pending_d = false;
-                            pending_y = false;
-                            pending_g = false;
-                            submode = String::from("bpm");
-                            input_buffer.clear();
-                        }
 
                         _ => {
                             pending_count = None;
@@ -1699,11 +1763,6 @@ pub fn run(instance: usize) -> Result<()> {
                             gt_input.clear();
                             gt_last_key = Some(Instant::now());
                         }
-                        KeyCode::Char('t') => {
-                            pending_count = None;
-                            submode = String::from("bpm");
-                            input_buffer.clear();
-                        }
                         KeyCode::Char('N') => {
                             pending_count = None;
                             submode = String::from("note");
@@ -1750,7 +1809,14 @@ pub fn run(instance: usize) -> Result<()> {
                 }
             }
         }
+        if should_quit {
+            break;
+        }
     }
+
+    crossterm::terminal::disable_raw_mode()?;
+    execute!(io::stdout(), crossterm::terminal::LeaveAlternateScreen)?;
+    Ok(())
 }
 
 #[cfg(test)]

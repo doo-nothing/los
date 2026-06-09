@@ -1,5 +1,6 @@
 pub mod conductor;
 pub mod envelope;
+pub mod excmd;
 pub mod keys;
 pub mod layout;
 pub mod mixer;

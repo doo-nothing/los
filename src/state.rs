@@ -356,6 +356,23 @@ pub fn load_module_state<T: for<'de> Deserialize<'de>>(module: &str, instance: u
     }
 }
 
+/// Save a module patch to ~/.config/los/patches/<name>.toml (`:w name`).
+pub fn save_patch<T: Serialize>(name: &str, params: &T) -> Result<()> {
+    let path = patches_dir().join(format!("{}.toml", name));
+    let toml_str = to_toml_string(params)?;
+    write_state_file(&path, &toml_str)
+}
+
+/// Load a module patch from ~/.config/los/patches/<name>.toml (`:e name`).
+pub fn load_patch<T: for<'de> Deserialize<'de>>(name: &str) -> Result<T> {
+    let path = patches_dir().join(format!("{}.toml", name));
+    if path.exists() {
+        from_toml_file(&path)
+    } else {
+        anyhow::bail!("patch not found: {}", path.display())
+    }
+}
+
 #[cfg(test)]
 mod reload_tests {
     use super::*;
@@ -497,5 +514,35 @@ mod state_tests {
         let val: toml::Value = toml::from_str(s).context("parse toml")?;
         let t = T::deserialize(val).context("deserialize")?;
         Ok(t)
+    }
+}
+
+#[cfg(test)]
+mod patch_tests {
+    use super::*;
+
+    #[test]
+    fn patch_roundtrip() {
+        let _ = ensure_dirs();
+        let name = "test-patch-roundtrip";
+        let params = ScopeParams {
+            mode: Some(2),
+            channel: Some(1),
+            zoom: Some(3.5),
+            gain: Some(0.7),
+        };
+        save_patch(name, &params).expect("save patch");
+        let loaded: ScopeParams = load_patch(name).expect("load patch");
+        assert_eq!(loaded.mode, Some(2));
+        assert_eq!(loaded.channel, Some(1));
+        assert_eq!(loaded.zoom, Some(3.5));
+        assert_eq!(loaded.gain, Some(0.7));
+        let _ = std::fs::remove_file(patches_dir().join(format!("{}.toml", name)));
+    }
+
+    #[test]
+    fn load_missing_patch_errors() {
+        let _ = ensure_dirs();
+        assert!(load_patch::<ScopeParams>("definitely-not-a-real-patch").is_err());
     }
 }
