@@ -45,6 +45,7 @@ fn usage() {
     eprintln!();
     eprintln!("Usage:");
     eprintln!("  los                           Auto-load last save or create fresh session");
+    eprintln!("  los new                       Fresh session, default params (ignores saves)");
     eprintln!("  los <module> [instance]       Run a module directly (independent pane)");
     eprintln!("  los load <state-file.toml>    Load a saved session state");
     eprintln!("  los <state-file.toml>         Same as 'load'");
@@ -96,6 +97,19 @@ fn main() -> Result<()> {
             "--help" | "-h" => {
                 usage();
                 Ok(())
+            }
+            "new" | "fresh" => {
+                // Fresh session: ignore saved sessions AND clear leftover
+                // per-module tmp state so modules start from defaults.
+                if let Ok(rd) = std::fs::read_dir(state::tmp_dir()) {
+                    for e in rd.flatten() {
+                        if e.path().extension().is_some_and(|x| x == "state") {
+                            let _ = std::fs::remove_file(e.path());
+                        }
+                    }
+                }
+                eprintln!("[los] fresh session (saved states untouched)");
+                conductor::create_session()
             }
             "load" => {
                 let path = args.get(2).cloned().unwrap_or_default();

@@ -15,7 +15,8 @@ A console-based groovebox/synth workstation. Every module runs in its own
 ## Quick start
 
 ```sh
-los
+los        # resume: auto-loads your most recent save
+los new    # fresh session with default params (saves untouched)
 ```
 
 Creates a `tmux` session with all modules in tiled panes, attaches you to it.
