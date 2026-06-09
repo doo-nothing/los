@@ -65,8 +65,8 @@ struct SequencerState {
     current_steps: Vec<usize>,
     selected: usize,
     last_notes: Vec<Option<u8>>,
-    clipboard: Option<Step>,
-    track_clipboard: Option<Track>,
+    register: Option<Register>,
+    visual_anchor: Option<usize>,
 }
 
 impl Default for SequencerState {
@@ -80,8 +80,8 @@ impl Default for SequencerState {
             current_steps: vec![0; track_count],
             selected: 0,
             last_notes: vec![None; track_count],
-            clipboard: None,
-            track_clipboard: None,
+            register: None,
+            visual_anchor: None,
         }
     }
 }
@@ -123,6 +123,12 @@ enum Command {
         step: usize,
         old_step: Step,
         new_step: Step,
+    },
+    EditSteps {
+        track: usize,
+        start: usize,
+        old: Vec<Step>,
+        new: Vec<Step>,
     },
     SetTrackParams {
         track: usize,
@@ -182,6 +188,406 @@ impl EuclidState {
     }
 }
 
+/// The unified vi register: holds either a step range ("charwise") or a
+/// whole track ("linewise"); paste does whatever fits the contents.
+#[derive(Debug, Clone, PartialEq)]
+enum Register {
+    Steps(Vec<Step>),
+    Track(Track),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Operator {
+    Yank,
+    Delete,
+    Change,
+}
+
+impl Operator {
+    fn from_char(c: char) -> Option<Self> {
+        match c {
+            'y' => Some(Operator::Yank),
+            'd' => Some(Operator::Delete),
+            'c' => Some(Operator::Change),
+            _ => None,
+        }
+    }
+}
+
+/// Step motions. A *word* is a maximal run of consecutive active steps.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Motion {
+    Left,
+    Right,
+    WordFwd,
+    WordBack,
+    WordEnd,
+    Home,
+    End,
+    /// up to but not including step n (`t#`)
+    Till(usize),
+    /// to step n inclusive (`f#`)
+    Find(usize),
+    /// a span of n steps starting at the cursor (visual selections, dot-repeat)
+    Span(usize),
+}
+
+fn is_word_start(steps: &[Step], len: usize, i: usize) -> bool {
+    steps[i].active && !steps[(i + len - 1) % len].active
+}
+
+fn is_word_end(steps: &[Step], len: usize, i: usize) -> bool {
+    steps[i].active && !steps[(i + 1) % len].active
+}
+
+/// Cursor target for bare-motion navigation (wraps around the pattern).
+/// Returns `from` unchanged when the pattern has no word boundary.
+fn nav_word(steps: &[Step], len: usize, from: usize, motion: Motion) -> usize {
+    for i in 1..=len {
+        let idx = match motion {
+            Motion::WordBack => (from + len - i) % len,
+            _ => (from + i) % len,
+        };
+        let hit = match motion {
+            Motion::WordFwd | Motion::WordBack => is_word_start(steps, len, idx),
+            Motion::WordEnd => is_word_end(steps, len, idx),
+            _ => return from,
+        };
+        if hit {
+            return idx;
+        }
+    }
+    from
+}
+
+/// Inclusive step range covered by `operator{motion}` from the cursor.
+/// Operator ranges never wrap (vi semantics); None = invalid/no-op motion.
+fn motion_range(track: &Track, cursor: usize, motion: Motion, count: usize) -> Option<(usize, usize)> {
+    let len = track.length;
+    let steps = &track.steps;
+    let cursor = cursor.min(len.saturating_sub(1));
+    match motion {
+        Motion::Right => Some((cursor, (cursor + count - 1).min(len - 1))),
+        Motion::Left => {
+            if cursor == 0 {
+                None
+            } else {
+                Some((cursor.saturating_sub(count), cursor - 1))
+            }
+        }
+        Motion::End => Some((cursor, len - 1)),
+        Motion::Home => {
+            if cursor == 0 {
+                None
+            } else {
+                Some((0, cursor - 1))
+            }
+        }
+        Motion::WordFwd => {
+            let mut found = 0;
+            for i in cursor + 1..len {
+                if is_word_start(steps, len, i) {
+                    found += 1;
+                    if found == count {
+                        return Some((cursor, i - 1));
+                    }
+                }
+            }
+            Some((cursor, len - 1)) // dw at the last word eats to the end
+        }
+        Motion::WordEnd => {
+            let mut found = 0;
+            for i in cursor + 1..len {
+                if is_word_end(steps, len, i) {
+                    found += 1;
+                    if found == count {
+                        return Some((cursor, i));
+                    }
+                }
+            }
+            None
+        }
+        Motion::WordBack => {
+            let mut found = 0;
+            for i in (0..cursor).rev() {
+                if is_word_start(steps, len, i) {
+                    found += 1;
+                    if found == count {
+                        return Some((i, cursor - 1));
+                    }
+                }
+            }
+            None
+        }
+        Motion::Till(n) => {
+            let n = n.min(len - 1);
+            match n.cmp(&cursor) {
+                std::cmp::Ordering::Greater => Some((cursor, n - 1)),
+                std::cmp::Ordering::Less => Some((n + 1, cursor)),
+                std::cmp::Ordering::Equal => None,
+            }
+        }
+        Motion::Find(n) => {
+            let n = n.min(len - 1);
+            Some((cursor.min(n), cursor.max(n)))
+        }
+        Motion::Span(n) => Some((cursor, (cursor + n.max(1) - 1).min(len - 1))),
+    }
+}
+
+/// Euclidean parameter edits (`#P`/`#L`/`#R`, bare `P`/`L`/`R`, `:set`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum EuclidOp {
+    Pulses(usize),
+    Length(usize),
+    Rotation(usize),
+    RotatePlus(usize),
+    Reapply,
+}
+
+/// Every user edit, cursor-relative — the single entry point used by the key
+/// handlers, visual mode, and dot-repeat (`.` re-applies the last change).
+#[derive(Debug, Clone, PartialEq)]
+enum Action {
+    ToggleStep,
+    /// toggle every step in a span (visual `~`)
+    ToggleSpan(usize),
+    CutStep,
+    YankStep,
+    Paste { before: bool, times: usize },
+    Transpose { note: i32, mod_value: f32 },
+    SetNote(u8),
+    Op { op: Operator, motion: Motion, count: usize },
+    OpTrack(Operator),
+    ToggleMute,
+    ToggleMode,
+    NewTrack { before: bool },
+    Rotate { steps: i32 },
+    Euclid(EuclidOp),
+}
+
+impl Action {
+    /// Changes are dot-repeatable; pure yanks are not (vi semantics).
+    fn is_change(&self) -> bool {
+        !matches!(
+            self,
+            Action::YankStep
+                | Action::Op { op: Operator::Yank, .. }
+                | Action::OpTrack(Operator::Yank)
+        )
+    }
+}
+
+/// Apply an action at the current cursor, recording undo history.
+/// Returns a status message when there is something worth saying.
+fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Option<String> {
+    let tidx = s.current_track;
+    match action {
+        Action::ToggleStep => {
+            let sel = s.selected;
+            let was_active = s.tracks[tidx].steps[sel].active;
+            s.tracks[tidx].steps[sel].active = !was_active;
+            h.push(Command::ToggleStep { track: tidx, step: sel, was_active });
+            None
+        }
+        Action::ToggleSpan(n) => {
+            let (a, b) = motion_range(&s.tracks[tidx], s.selected, Motion::Span(*n), 1)?;
+            let old: Vec<Step> = s.tracks[tidx].steps[a..=b].to_vec();
+            let mut new = old.clone();
+            for st in new.iter_mut() {
+                st.active = !st.active;
+            }
+            s.tracks[tidx].steps[a..=b].copy_from_slice(&new);
+            h.push(Command::EditSteps { track: tidx, start: a, old, new });
+            s.selected = a;
+            None
+        }
+        Action::CutStep => {
+            let sel = s.selected;
+            let old_step = s.tracks[tidx].steps[sel];
+            s.register = Some(Register::Steps(vec![old_step]));
+            s.tracks[tidx].steps[sel].active = false;
+            let new_step = s.tracks[tidx].steps[sel];
+            push_step_edit(h, tidx, sel, old_step, new_step);
+            None
+        }
+        Action::YankStep => {
+            let sel = s.selected;
+            s.register = Some(Register::Steps(vec![s.tracks[tidx].steps[sel]]));
+            Some(String::from("Yanked 1 step"))
+        }
+        Action::Paste { before, times } => match s.register.clone() {
+            None => Some(String::from("Nothing in register")),
+            Some(Register::Steps(slice)) => {
+                let len = s.tracks[tidx].length;
+                let total = (slice.len() * times.max(&1)).min(len);
+                let start = if *before {
+                    (s.selected + 1).saturating_sub(total)
+                } else {
+                    s.selected.min(len - 1)
+                };
+                let end = (start + total - 1).min(len - 1);
+                let old: Vec<Step> = s.tracks[tidx].steps[start..=end].to_vec();
+                let new: Vec<Step> = (0..=(end - start)).map(|i| slice[i % slice.len()]).collect();
+                if old == new {
+                    return None;
+                }
+                s.tracks[tidx].steps[start..=end].copy_from_slice(&new);
+                h.push(Command::EditSteps { track: tidx, start, old, new });
+                s.selected = start;
+                None
+            }
+            Some(Register::Track(trk)) => {
+                for i in 0..*times.max(&1) {
+                    let at = if *before { tidx } else { tidx + 1 + i };
+                    insert_track(s, at, trk.clone());
+                    h.push(Command::PasteTrack { at, track: trk.clone() });
+                }
+                None
+            }
+        },
+        Action::Transpose { note, mod_value } => {
+            let sel = s.selected;
+            let old_step = s.tracks[tidx].steps[sel];
+            if s.tracks[tidx].mode == TrackMode::Modulation {
+                let v = old_step.mod_value + mod_value;
+                s.tracks[tidx].steps[sel].mod_value = v.clamp(-1.0, 1.0);
+            } else {
+                let n = (old_step.note as i32 + note).clamp(0, 127);
+                s.tracks[tidx].steps[sel].note = n as u8;
+            }
+            let new_step = s.tracks[tidx].steps[sel];
+            push_step_edit(h, tidx, sel, old_step, new_step);
+            None
+        }
+        Action::SetNote(n) => {
+            let sel = s.selected;
+            let old_step = s.tracks[tidx].steps[sel];
+            s.tracks[tidx].steps[sel].note = (*n).min(127);
+            let new_step = s.tracks[tidx].steps[sel];
+            push_step_edit(h, tidx, sel, old_step, new_step);
+            None
+        }
+        Action::Op { op, motion, count } => {
+            let Some((a, b)) = motion_range(&s.tracks[tidx], s.selected, *motion, (*count).max(1)) else {
+                return Some(String::from("No motion"));
+            };
+            let slice: Vec<Step> = s.tracks[tidx].steps[a..=b].to_vec();
+            match op {
+                Operator::Yank => {
+                    let n = slice.len();
+                    s.register = Some(Register::Steps(slice));
+                    s.selected = a;
+                    Some(format!("Yanked {} step{}", n, if n == 1 { "" } else { "s" }))
+                }
+                Operator::Delete | Operator::Change => {
+                    let old = slice.clone();
+                    s.register = Some(Register::Steps(slice));
+                    let mut new = old.clone();
+                    for st in new.iter_mut() {
+                        st.active = false;
+                    }
+                    if old != new {
+                        s.tracks[tidx].steps[a..=b].copy_from_slice(&new);
+                        h.push(Command::EditSteps { track: tidx, start: a, old, new });
+                    }
+                    s.selected = a;
+                    None
+                }
+            }
+        }
+        Action::OpTrack(op) => match op {
+            Operator::Yank => {
+                s.register = Some(Register::Track(s.tracks[tidx].clone()));
+                Some(String::from("Yanked track"))
+            }
+            Operator::Delete => {
+                if s.tracks.len() <= 1 {
+                    return Some(String::from("Can't delete the last track"));
+                }
+                let track = s.tracks.remove(tidx);
+                s.current_steps.remove(tidx);
+                s.last_notes.remove(tidx);
+                s.register = Some(Register::Track(track.clone()));
+                h.push(Command::DeleteTrack { at: tidx, track });
+                s.focus(tidx, Some(0));
+                None
+            }
+            Operator::Change => {
+                let len = s.tracks[tidx].length;
+                let old: Vec<Step> = s.tracks[tidx].steps[..len].to_vec();
+                s.register = Some(Register::Steps(old.clone()));
+                let mut new = old.clone();
+                for st in new.iter_mut() {
+                    st.active = false;
+                }
+                s.tracks[tidx].steps[..len].copy_from_slice(&new);
+                h.push(Command::EditSteps { track: tidx, start: 0, old, new });
+                s.selected = 0;
+                None
+            }
+        },
+        Action::ToggleMute => {
+            let was_muted = s.tracks[tidx].muted;
+            s.tracks[tidx].muted = !was_muted;
+            h.push(Command::ToggleMute { track: tidx, was_muted });
+            None
+        }
+        Action::ToggleMode => {
+            let was_mode = s.tracks[tidx].mode;
+            s.tracks[tidx].mode = match was_mode {
+                TrackMode::Note => TrackMode::Modulation,
+                TrackMode::Modulation => TrackMode::Note,
+            };
+            h.push(Command::ToggleMode { track: tidx, was_mode });
+            None
+        }
+        Action::NewTrack { before } => {
+            let at = if *before { tidx } else { tidx + 1 };
+            insert_track(s, at, Track::new());
+            h.push(Command::NewTrack { at });
+            None
+        }
+        Action::Rotate { steps: n } => {
+            let len = s.tracks[tidx].length;
+            let old: Vec<Step> = s.tracks[tidx].steps[..len].to_vec();
+            let mut new = old.clone();
+            let shift = (n.rem_euclid(len as i32)) as usize;
+            new.rotate_right(shift);
+            if old == new {
+                return None;
+            }
+            s.tracks[tidx].steps[..len].copy_from_slice(&new);
+            h.push(Command::EditSteps { track: tidx, start: 0, old, new });
+            None
+        }
+        Action::Euclid(op) => {
+            let old = EuclidState::capture(&s.tracks[tidx]);
+            match op {
+                EuclidOp::Pulses(n) => s.tracks[tidx].pulses = (*n).min(16),
+                EuclidOp::Length(n) => {
+                    s.tracks[tidx].length = (*n).clamp(1, 16);
+                    let len = s.tracks[tidx].length;
+                    s.selected = s.selected.min(len - 1);
+                }
+                EuclidOp::Rotation(n) => s.tracks[tidx].rotation = (*n).min(255),
+                EuclidOp::RotatePlus(n) => {
+                    s.tracks[tidx].rotation =
+                        (s.tracks[tidx].rotation + n) % s.tracks[tidx].length;
+                }
+                EuclidOp::Reapply => {
+                    s.selected = s.selected.min(s.tracks[tidx].length - 1);
+                }
+            }
+            let (p, l, r) = (s.tracks[tidx].pulses, s.tracks[tidx].length, s.tracks[tidx].rotation);
+            euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
+            let new = EuclidState::capture(&s.tracks[tidx]);
+            push_track_params(h, tidx, old, new);
+            None
+        }
+    }
+}
+
 /// Insert a track at `at`, keeping the per-track bookkeeping vectors in sync.
 fn insert_track(state: &mut SequencerState, at: usize, track: Track) {
     let at = at.min(state.tracks.len());
@@ -207,6 +613,7 @@ impl Command {
         match self {
             Command::ToggleStep { .. } => "Toggle step",
             Command::EditStep { .. } => "Edit step",
+            Command::EditSteps { .. } => "Edit steps",
             Command::SetTrackParams { .. } => "Set track params",
             Command::ToggleMute { .. } => "Toggle mute",
             Command::ToggleMode { .. } => "Toggle mode",
@@ -229,6 +636,12 @@ impl Command {
                 if *track < state.tracks.len() && *step < state.tracks[*track].steps.len() {
                     state.tracks[*track].steps[*step] = *old_step;
                     state.focus(*track, Some(*step));
+                }
+            }
+            Command::EditSteps { track, start, old, .. } => {
+                if *track < state.tracks.len() && start + old.len() <= state.tracks[*track].steps.len() {
+                    state.tracks[*track].steps[*start..start + old.len()].copy_from_slice(old);
+                    state.focus(*track, Some(*start));
                 }
             }
             Command::SetTrackParams { track, old, .. } => {
@@ -272,6 +685,12 @@ impl Command {
                 if *track < state.tracks.len() && *step < state.tracks[*track].steps.len() {
                     state.tracks[*track].steps[*step] = *new_step;
                     state.focus(*track, Some(*step));
+                }
+            }
+            Command::EditSteps { track, start, new, .. } => {
+                if *track < state.tracks.len() && start + new.len() <= state.tracks[*track].steps.len() {
+                    state.tracks[*track].steps[*start..start + new.len()].copy_from_slice(new);
+                    state.focus(*track, Some(*start));
                 }
             }
             Command::SetTrackParams { track, new, .. } => {
@@ -567,6 +986,7 @@ fn draw_ui(
     gt_input: &str,
     show_help: bool,
     undo_msg: &Option<String>,
+    pending: Option<&str>,
 ) -> Result<()> {
     terminal.draw(|f| {
         let area = f.area();
@@ -616,12 +1036,19 @@ fn draw_ui(
             let x = (i * step_width) as u16;
             let rect = Rect::new(x, chunks[1].y, step_width as u16, 3);
 
+            let in_visual = (mode == "visual")
+                && state.visual_anchor.is_some_and(|a| {
+                    let (lo, hi) = (a.min(state.selected), a.max(state.selected));
+                    i >= lo && i <= hi
+                });
             let (bg, fg, marker) = if is_current && is_selected {
                 (Color::Yellow, Color::Black, "▶")
             } else if is_current {
                 (Color::Green, Color::Black, "▶")
             } else if is_selected {
                 (Color::Blue, Color::White, "*")
+            } else if in_visual {
+                (Color::Magenta, Color::White, " ")
             } else if step.active {
                 (Color::DarkGray, Color::White, " ")
             } else {
@@ -670,14 +1097,12 @@ fn draw_ui(
         f.render_widget(note_widget, chunks[2]);
 
         // Bottom status bar
-        let mode_label = if mode == "insert" {
-            if !submode.is_empty() {
-                format!(" INSERT[{}] ", submode)
-            } else {
-                " INSERT ".to_string()
-            }
-        } else {
-            " NORMAL ".to_string()
+        let mode_label = match mode {
+            "insert" if !submode.is_empty() => format!(" INSERT[{}] ", submode),
+            "insert" => String::from(" INSERT "),
+            "visual" => String::from(" VISUAL "),
+            "visual_line" => String::from(" V-LINE "),
+            _ => String::from(" NORMAL "),
         };
         let mode_str = match state.track().mode {
             state::TrackMode::Note => "NOTE",
@@ -694,6 +1119,9 @@ fn draw_ui(
         ];
         if let Some(ref count) = pending_count {
             status_parts.push(format!("Count:{}", count));
+        }
+        if let Some(p) = pending {
+            status_parts.push(p.to_string());
         }
         if !submode.is_empty() {
             status_parts.push(format!("{}:{}", submode.to_uppercase(), input_buffer));
@@ -717,43 +1145,39 @@ fn draw_ui(
             let help_text = vec![
                 Line::from("━━━ Sequencer Help ━━━"),
                 Line::from(""),
-                Line::from("Navigation (both modes):"),
-                Line::from("  h/l, ←/→  Move left/right"),
-                Line::from("  gg         First step"),
-                Line::from("  G          Last step"),
-                Line::from("  w          Next active step"),
-                Line::from("  b          Previous active step"),
-                Line::from("  [ / ]      Previous/next track"),
-                Line::from("  #j/#k      Jump # tracks down/up"),
-                Line::from("  1..9       Jump to track"),
+                Line::from("Motions (word = run of active steps):"),
+                Line::from("  h/l        Step left/right (counts: 5l)"),
+                Line::from("  w / b / e  Word fwd / back / end"),
+                Line::from("  0 / $      First / last step"),
+                Line::from("  f# / t#    To / till step #"),
+                Line::from("  j/k, [/]   Track down/up (counts)"),
+                Line::from("  gg / G     First / last track"),
+                Line::from("  gt#        Go to track #"),
+                Line::from(""),
+                Line::from("Operators (normal/visual): y d c"),
+                Line::from("  y{motion}  Yank steps (yw, ye, yt8, y$)"),
+                Line::from("  d{motion}  Delete steps  c = delete + insert"),
+                Line::from("  yy/dd/cc   Whole track (yank/delete/clear)"),
                 Line::from(""),
                 Line::from("Normal mode:"),
-                Line::from("  Enter/i    Enter insert mode"),
-                Line::from("  n          New track"),
-                Line::from("  dd         Delete track"),
-                Line::from("  yy         Yank track"),
-                Line::from("  P          Paste track after current"),
-                Line::from("  m          Toggle mute"),
-                Line::from("  gt#        Go to track #"),
-                Line::from("  space      Play/pause"),
-                Line::from("  s          Stop"),
-                Line::from("  u / #u     Undo (# times)"),
+                Line::from("  Enter/i    Insert mode   v/V visual/line"),
+                Line::from("  x          Cut step    ~ toggle step"),
+                Line::from("  p / P      Paste after / before (#p = N times)"),
+                Line::from("  .          Repeat last change"),
+                Line::from("  o/O (n)    New track after/before"),
+                Line::from("  >>/<<      Rotate pattern right/left"),
+                Line::from("  m / @      Mute / track mode"),
+                Line::from("  space / s  Play-pause / stop (global)"),
+                Line::from("  u, ^r      Undo, redo (counts)"),
                 Line::from("  :w/:e/:q   Patch save/load, quit (:x save+quit)"),
-                Line::from("  ^r / #^r   Redo (# times)"),
-                Line::from("  :set bpm N Set BPM (also pulses/length/rotation)"),
+                Line::from("  :set bpm N BPM (also pulses/length/rotation)"),
                 Line::from(""),
-                Line::from("Insert mode:"),
-                Line::from("  Esc        Return to normal"),
-                Line::from("  Enter/space Toggle step"),
-                Line::from("  x          Cut step"),
-                Line::from("  y          Yank step"),
-                Line::from("  p          Paste step"),
-                Line::from("  k/K        Raise note (st/oct)"),
-                Line::from("  j/J        Lower note (st/oct)"),
+                Line::from("Insert mode (Esc returns):"),
+                Line::from("  Enter/space Toggle step    x/y/p step edit"),
+                Line::from("  k/K j/J    Note +-semitone/octave (counts)"),
                 Line::from("  N<NUM>     Set note (e.g. N60)"),
-                Line::from("  gt#        Go to step #"),
-                Line::from("  <N>P/L/R   Euclidean pulses/length/rotation"),
-                Line::from("  R          Rotate by 1"),
+                Line::from("  #P/#L/#R   Euclid pulses/length/rotation"),
+                Line::from("  P/L/R      Re-apply / re-apply / rotate+1"),
                 Line::from(""),
                 Line::from("  ?          Toggle this help"),
                 Line::from("  Close pane: tmux prefix + x"),
@@ -898,9 +1322,15 @@ pub fn run(instance: usize) -> Result<()> {
     let mut input_buffer = String::new();
     let mut show_help = false;
     let mut pending_count: Option<String> = None;
-    let mut pending_d = false;
-    let mut pending_y = false;
     let mut pending_g = false;
+    // Operator awaiting its motion: (operator, count typed before it)
+    let mut pending_op: Option<(Operator, usize)> = None;
+    // f/t target being typed: (kind, operator context, count, digits, last key time)
+    let mut pending_find: Option<(char, Option<Operator>, usize, String, Instant)> = None;
+    // first half of a >> / << chord
+    let mut pending_angle: Option<char> = None;
+    // last change, for dot-repeat
+    let mut last_change: Option<Action> = None;
     let mut gt_target: Option<String> = None;
     let mut gt_input = String::new();
     let mut gt_last_key: Option<Instant> = None;
@@ -964,11 +1394,59 @@ pub fn run(instance: usize) -> Result<()> {
             }
         }
 
+        // Auto-execute f#/t# on timeout (only when digits were collected)
+        if let Some((kind, op, fcount, ref digits, t0)) = pending_find.clone() {
+            if t0.elapsed() > Duration::from_millis(300) && !digits.is_empty() {
+                pending_find = None;
+                if let Ok(n) = digits.parse::<usize>() {
+                    let motion = if kind == 'f' { Motion::Find(n) } else { Motion::Till(n) };
+                    match op {
+                        None => {
+                            let mut s = state.lock().unwrap();
+                            let len = s.track().length;
+                            let n = n.min(len - 1);
+                            s.selected = match (kind, n.cmp(&s.selected)) {
+                                ('t', std::cmp::Ordering::Greater) => n - 1,
+                                ('t', std::cmp::Ordering::Less) => n + 1,
+                                ('t', std::cmp::Ordering::Equal) => s.selected,
+                                _ => n,
+                            };
+                        }
+                        Some(op) => {
+                            let action = Action::Op { op, motion, count: fcount.max(1) };
+                            undo_msg = apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            undo_time = Some(Instant::now());
+                            if action.is_change() {
+                                last_change = Some(action);
+                            }
+                            if op == Operator::Change {
+                                mode = String::from("insert");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Clear undo message after 2 seconds
         if let Some(t) = undo_time { if t.elapsed() > Duration::from_secs(2) { undo_msg = None; undo_time = None; } }
         let current_state = state.lock().unwrap().clone();
         let status_msg = if ex.is_active() { Some(ex.display()) } else { undo_msg.clone() };
-        draw_ui(&mut terminal, &current_state, &mode, &submode, &input_buffer, &pending_count, &gt_target, &gt_input, show_help, &status_msg)?;
+        let pending_hint = if let Some((op, _)) = pending_op {
+            Some(match op {
+                Operator::Yank => "y…",
+                Operator::Delete => "d…",
+                Operator::Change => "c…",
+            })
+        } else if let Some((kind, _, _, ref d, _)) = pending_find {
+            let _ = (kind, d);
+            Some("f…")
+        } else if pending_angle.is_some() {
+            Some(">…")
+        } else {
+            None
+        };
+        draw_ui(&mut terminal, &current_state, &mode, &submode, &input_buffer, &pending_count, &gt_target, &gt_input, show_help, &status_msg, pending_hint)?;
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
@@ -1068,8 +1546,6 @@ pub fn run(instance: usize) -> Result<()> {
                 // ':' opens the ex command line (any mode, when no prompt is active)
                 if key.code == KeyCode::Char(':') && submode.is_empty() && gt_target.is_none() {
                     pending_count = None;
-                    pending_d = false;
-                    pending_y = false;
                     pending_g = false;
                     ex.open();
                     continue;
@@ -1085,8 +1561,6 @@ pub fn run(instance: usize) -> Result<()> {
                 // Ctrl-r: redo (count-prefixed: 3<C-r> redoes 3 times)
                 if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::CONTROL {
                     let count = pending_count.take().and_then(|c| c.parse().ok()).unwrap_or(1).max(1);
-                    pending_d = false;
-                    pending_y = false;
                     pending_g = false;
                     gt_target = None;
                     gt_input.clear();
@@ -1169,12 +1643,9 @@ pub fn run(instance: usize) -> Result<()> {
                             match submode.as_str() {
                                 "note" => {
                                     if let Ok(note) = input_buffer.parse::<u8>() {
-                                        let sel = s.selected;
-                                        let tidx = s.current_track;
-                                        let old_step = s.tracks[tidx].steps[sel];
-                                        s.tracks[tidx].steps[sel].note = note.clamp(0, 127);
-                                        let new_step = s.tracks[tidx].steps[sel];
-                                        push_step_edit(&mut history, tidx, sel, old_step, new_step);
+                                        let action = Action::SetNote(note);
+                                        apply_action(&mut s, &mut history, &action);
+                                        last_change = Some(action);
                                     }
                                 }
                                 "track" => {
@@ -1209,18 +1680,129 @@ pub fn run(instance: usize) -> Result<()> {
                 // Help toggle (mode-independent)
                 if key.code == KeyCode::Char('?') {
                     pending_count = None;
-                    pending_d = false;
-                    pending_y = false;
                     show_help = !show_help;
                     continue;
                 }
 
-                // Mode switch: Esc in insert → normal
-                if key.code == KeyCode::Esc && mode == "insert" {
-                    mode = String::from("normal");
+                // Esc: leave insert/visual mode, cancel all pending state
+                if key.code == KeyCode::Esc {
+                    if mode == "insert" || mode == "visual" || mode == "visual_line" {
+                        mode = String::from("normal");
+                    }
+                    state.lock().unwrap().visual_anchor = None;
                     submode.clear();
                     input_buffer.clear();
                     pending_count = None;
+                    pending_op = None;
+                    pending_find = None;
+                    pending_angle = None;
+                    pending_g = false;
+                    continue;
+                }
+
+                // f#/t# target collection (digits, executed on Enter,
+                // non-digit key, or the 300ms timeout in the outer loop)
+                if let Some((kind, op, fcount, ref mut digits, _)) = pending_find {
+                    match key.code {
+                        KeyCode::Char(c) if c.is_ascii_digit() => {
+                            digits.push(c);
+                            if let Some((_, _, _, _, ref mut t)) = pending_find {
+                                *t = Instant::now();
+                            }
+                            continue;
+                        }
+                        _ => {
+                            let digits = digits.clone();
+                            pending_find = None;
+                            if let Ok(n) = digits.parse::<usize>() {
+                                let motion = if kind == 'f' { Motion::Find(n) } else { Motion::Till(n) };
+                                match op {
+                                    None => {
+                                        let mut s = state.lock().unwrap();
+                                        let len = s.track().length;
+                                        let n = n.min(len - 1);
+                                        s.selected = match (kind, n.cmp(&s.selected)) {
+                                            ('t', std::cmp::Ordering::Greater) => n - 1,
+                                            ('t', std::cmp::Ordering::Less) => n + 1,
+                                            ('t', std::cmp::Ordering::Equal) => s.selected,
+                                            _ => n,
+                                        };
+                                    }
+                                    Some(op) => {
+                                        let action = Action::Op { op, motion, count: fcount.max(1) };
+                                        let mut s = state.lock().unwrap();
+                                        undo_msg = apply_action(&mut s, &mut history, &action);
+                                        undo_time = Some(Instant::now());
+                                        drop(s);
+                                        if action.is_change() {
+                                            last_change = Some(action);
+                                        }
+                                        if op == Operator::Change {
+                                            mode = String::from("insert");
+                                        }
+                                    }
+                                }
+                            }
+                            if key.code == KeyCode::Enter {
+                                continue;
+                            }
+                            // other keys execute the find, then fall through
+                        }
+                    }
+                }
+
+                // Operator-pending: the next key supplies the motion
+                if let Some((op, opcount)) = pending_op {
+                    if let KeyCode::Char(c) = key.code {
+                        if c.is_ascii_digit() && !(c == '0' && pending_count.is_none()) {
+                            pending_count.get_or_insert_with(String::new).push(c);
+                            continue;
+                        }
+                    }
+                    pending_op = None;
+                    let mcount: usize = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
+                    let count = (opcount * mcount).max(1);
+                    let motion = match key.code {
+                        KeyCode::Char('h') | KeyCode::Left => Some(Motion::Left),
+                        KeyCode::Char('l') | KeyCode::Right => Some(Motion::Right),
+                        KeyCode::Char('w') => Some(Motion::WordFwd),
+                        KeyCode::Char('b') => Some(Motion::WordBack),
+                        KeyCode::Char('e') => Some(Motion::WordEnd),
+                        KeyCode::Char('0') => Some(Motion::Home),
+                        KeyCode::Char('$') => Some(Motion::End),
+                        _ => None,
+                    };
+                    match key.code {
+                        // doubled operator = whole track (yy / dd / cc)
+                        KeyCode::Char(c2) if Operator::from_char(c2) == Some(op) => {
+                            let action = Action::OpTrack(op);
+                            undo_msg = apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            undo_time = Some(Instant::now());
+                            if action.is_change() {
+                                last_change = Some(action);
+                            }
+                            if op == Operator::Change {
+                                mode = String::from("insert");
+                            }
+                        }
+                        KeyCode::Char(c2 @ ('f' | 't')) => {
+                            pending_find = Some((c2, Some(op), count, String::new(), Instant::now()));
+                        }
+                        _ => {
+                            if let Some(m) = motion {
+                                let action = Action::Op { op, motion: m, count };
+                                undo_msg = apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                                undo_time = Some(Instant::now());
+                                if action.is_change() {
+                                    last_change = Some(action);
+                                }
+                                if op == Operator::Change {
+                                    mode = String::from("insert");
+                                }
+                            }
+                            // anything else cancels the operator
+                        }
+                    }
                     continue;
                 }
 
@@ -1233,179 +1815,135 @@ pub fn run(instance: usize) -> Result<()> {
                         } else {
                             pending_count.get_or_insert(String::new()).push(c);
                         }
-                        pending_d = false;
-                        pending_y = false;
                         continue;
                     }
                 }
 
-                // Mode-independent navigation
+                // Mode-independent navigation (cursor wraps around the pattern)
                 match key.code {
-                    KeyCode::Char('l') | KeyCode::Right if pending_count.is_some() => {
-                        let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
-                        let mut s = state.lock().unwrap();
-                        let len = s.track_mut().length;
-                        s.selected = (s.selected + count) % len;
-                        continue;
-                    }
-                    KeyCode::Char('h') | KeyCode::Left if pending_count.is_some() => {
-                        let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
-                        let mut s = state.lock().unwrap();
-                        let len = s.track_mut().length;
-                        s.selected = s.selected.saturating_sub(count).min(len - 1);
-                        continue;
-                    }
-                    KeyCode::Char('w') if pending_count.is_some() => {
-                        let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
-                        let mut s = state.lock().unwrap();
-                        let len = s.track_mut().length;
-                        for _ in 0..count {
-                            for i in 1..=len {
-                                let idx = (s.selected + i) % len;
-                                if s.track_mut().steps[idx].active {
-                                    s.selected = idx;
-                                    break;
-                                }
-                            }
-                        }
-                        continue;
-                    }
-                    KeyCode::Char('b') if pending_count.is_some() => {
-                        let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
-                        let mut s = state.lock().unwrap();
-                        let len = s.track_mut().length;
-                        for _ in 0..count {
-                            for i in 1..=len {
-                                let idx = (s.selected + len - i) % len;
-                                if s.track_mut().steps[idx].active {
-                                    s.selected = idx;
-                                    break;
-                                }
-                            }
-                        }
-                        continue;
-                    }
                     KeyCode::Char('l') | KeyCode::Right => {
-                        pending_count = None;
-                        pending_d = false;
-                        pending_y = false;
+                        let n = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
                         let mut s = state.lock().unwrap();
-                        let len = s.track_mut().length;
-                        s.selected = (s.selected + 1) % len;
+                        let len = s.track().length;
+                        s.selected = (s.selected + n) % len;
                         continue;
                     }
                     KeyCode::Char('h') | KeyCode::Left => {
-                        pending_count = None;
-                        pending_d = false;
-                        pending_y = false;
+                        let n: usize = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
                         let mut s = state.lock().unwrap();
-                        let len = s.track_mut().length;
-                        s.selected = s.selected.saturating_sub(1).min(len - 1);
+                        let len = s.track().length;
+                        s.selected = (s.selected + len - (n % len)) % len;
                         continue;
                     }
-                    KeyCode::Char('w') => {
-                        pending_count = None;
-                        pending_d = false;
-                        pending_y = false;
+                    KeyCode::Char('w') | KeyCode::Char('b') | KeyCode::Char('e') => {
+                        let m = match key.code {
+                            KeyCode::Char('w') => Motion::WordFwd,
+                            KeyCode::Char('b') => Motion::WordBack,
+                            _ => Motion::WordEnd,
+                        };
+                        let n = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
                         let mut s = state.lock().unwrap();
-                        let len = s.track_mut().length;
-                        for i in 1..=len {
-                            let idx = (s.selected + i) % len;
-                            if s.track_mut().steps[idx].active {
-                                s.selected = idx;
-                                break;
-                            }
+                        let len = s.track().length;
+                        for _ in 0..n {
+                            let cur = s.selected;
+                            let next = nav_word(&s.track().steps, len, cur, m);
+                            s.selected = next;
                         }
-                        continue;
-                    }
-                    KeyCode::Char('b') => {
-                        pending_count = None;
-                        pending_d = false;
-                        pending_y = false;
-                        let mut s = state.lock().unwrap();
-                        let len = s.track_mut().length;
-                        for i in 1..=len {
-                            let idx = (s.selected + len - i) % len;
-                            if s.track_mut().steps[idx].active {
-                                s.selected = idx;
-                                break;
-                            }
-                        }
-                        continue;
-                    }
-                    KeyCode::Char('0') => {
-                        pending_count = None;
-                        pending_d = false;
-                        pending_y = false;
-                        let mut s = state.lock().unwrap();
-                        s.selected = 0;
                         continue;
                     }
                     KeyCode::Char('$') => {
                         pending_count = None;
-                        pending_d = false;
-                        pending_y = false;
                         let mut s = state.lock().unwrap();
-                        s.selected = s.track_mut().length - 1;
+                        s.selected = s.track().length - 1;
+                        continue;
+                    }
+                    KeyCode::Char(c @ ('f' | 't')) if submode.is_empty() => {
+                        pending_count = None;
+                        pending_find = Some((c, None, 1, String::new(), Instant::now()));
                         continue;
                     }
                     _ => {}
                 }
 
-                // Count-prefixed P, L, R (both modes)
-                match key.code {
-                    KeyCode::Char('P') if pending_count.is_some() => {
-                        let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(0);
-                        let mut s = state.lock().unwrap();
-                        let tidx = s.current_track;
-                        let old = EuclidState::capture(&s.tracks[tidx]);
-                        if count > 0 { s.tracks[tidx].pulses = count.min(16); }
-                        let (p, l, r) = (s.tracks[tidx].pulses, s.tracks[tidx].length, s.tracks[tidx].rotation);
-                        euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
-                        let new = EuclidState::capture(&s.tracks[tidx]);
-                        push_track_params(&mut history, tidx, old, new);
-                        pending_d = false; pending_y = false;
+                // Count-prefixed Euclidean setters (both modes): #P #L #R
+                if pending_count.is_some() {
+                    let eop = match key.code {
+                        KeyCode::Char('P') => Some(EuclidOp::Pulses(0)),
+                        KeyCode::Char('L') => Some(EuclidOp::Length(0)),
+                        KeyCode::Char('R') => Some(EuclidOp::Rotation(0)),
+                        _ => None,
+                    };
+                    if let Some(eop) = eop {
+                        let n: usize = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let eop = match eop {
+                            EuclidOp::Pulses(_) => EuclidOp::Pulses(n),
+                            EuclidOp::Length(_) => EuclidOp::Length(n),
+                            _ => EuclidOp::Rotation(n),
+                        };
+                        let action = Action::Euclid(eop);
+                        apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                        last_change = Some(action);
                         continue;
                     }
-                    KeyCode::Char('L') if pending_count.is_some() => {
-                        let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(0);
-                        let mut s = state.lock().unwrap();
-                        let tidx = s.current_track;
-                        let old = EuclidState::capture(&s.tracks[tidx]);
-                        if count > 0 { s.tracks[tidx].length = count.clamp(1, 16); }
-                        s.selected = s.selected.min(s.tracks[tidx].length - 1);
-                        let (p, l, r) = (s.tracks[tidx].pulses, s.tracks[tidx].length, s.tracks[tidx].rotation);
-                        euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
-                        let new = EuclidState::capture(&s.tracks[tidx]);
-                        push_track_params(&mut history, tidx, old, new);
-                        pending_d = false; pending_y = false;
-                        continue;
-                    }
-                    KeyCode::Char('R') if pending_count.is_some() => {
-                        let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(0);
-                        let mut s = state.lock().unwrap();
-                        let tidx = s.current_track;
-                        let old = EuclidState::capture(&s.tracks[tidx]);
-                        if count > 0 {
-                            s.tracks[tidx].rotation = count.min(255);
-                        } else {
-                            s.tracks[tidx].rotation = (s.tracks[tidx].rotation + 1) % s.tracks[tidx].length;
+                }
+
+                // Visual mode: motions extend the selection; operators act on it
+                if mode == "visual" || mode == "visual_line" {
+                    let linewise = mode == "visual_line";
+                    match key.code {
+                        KeyCode::Char('v') | KeyCode::Char('V') => {
+                            mode = String::from("normal");
+                            state.lock().unwrap().visual_anchor = None;
                         }
-                        let (p, l, r) = (s.tracks[tidx].pulses, s.tracks[tidx].length, s.tracks[tidx].rotation);
-                        euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
-                        let new = EuclidState::capture(&s.tracks[tidx]);
-                        push_track_params(&mut history, tidx, old, new);
-                        pending_d = false; pending_y = false;
-                        continue;
+                        KeyCode::Char('o') => {
+                            let mut s = state.lock().unwrap();
+                            if let Some(a) = s.visual_anchor {
+                                s.visual_anchor = Some(s.selected);
+                                s.selected = a;
+                            }
+                        }
+                        KeyCode::Char(c @ ('y' | 'd' | 'c' | 'x' | '~')) => {
+                            let action = {
+                                let mut s = state.lock().unwrap();
+                                let anchor = s.visual_anchor.take().unwrap_or(s.selected);
+                                let (a, b) = (anchor.min(s.selected), anchor.max(s.selected));
+                                s.selected = a;
+                                let span = b - a + 1;
+                                if linewise {
+                                    match c {
+                                        'y' => Action::OpTrack(Operator::Yank),
+                                        'c' => Action::OpTrack(Operator::Change),
+                                        _ => Action::OpTrack(Operator::Delete),
+                                    }
+                                } else {
+                                    match c {
+                                        '~' => Action::ToggleSpan(span),
+                                        'y' => Action::Op { op: Operator::Yank, motion: Motion::Span(span), count: 1 },
+                                        'c' => Action::Op { op: Operator::Change, motion: Motion::Span(span), count: 1 },
+                                        _ => Action::Op { op: Operator::Delete, motion: Motion::Span(span), count: 1 },
+                                    }
+                                }
+                            };
+                            undo_msg = apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            undo_time = Some(Instant::now());
+                            let to_insert = matches!(
+                                action,
+                                Action::Op { op: Operator::Change, .. } | Action::OpTrack(Operator::Change)
+                            );
+                            if action.is_change() {
+                                last_change = Some(action);
+                            }
+                            mode = if to_insert {
+                                String::from("insert")
+                            } else {
+                                String::from("normal")
+                            };
+                        }
+                        _ => {
+                            pending_count = None;
+                        }
                     }
-                    _ => {}
-                }
-
-                // Count-prefixed track jump (both modes)
-                if let KeyCode::Char(c) = key.code {
-                    if c.is_ascii_digit() && pending_count.is_some() {
-                        // Already handled above
-                    }
+                    continue;
                 }
 
                 if mode == "normal" {
@@ -1413,143 +1951,139 @@ pub fn run(instance: usize) -> Result<()> {
                         // Enter insert mode
                         KeyCode::Enter | KeyCode::Char('i') => {
                             pending_count = None;
-                            pending_d = false;
-                            pending_y = false;
                             pending_g = false;
                             mode = String::from("insert");
                         }
-
-                        // Count-prefixed track jump
-                        KeyCode::Char(c) if c.is_ascii_digit() && pending_count.is_some() => {
-                            let count: usize = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
+                        KeyCode::Char('v') => {
+                            pending_count = None;
                             let mut s = state.lock().unwrap();
-                            let tidx = count.saturating_sub(1).min(s.tracks.len().saturating_sub(1));
-                            s.current_track = tidx;
-                            s.selected = 0;
+                            let sel = s.selected;
+                            s.visual_anchor = Some(sel);
+                            mode = String::from("visual");
+                        }
+                        KeyCode::Char('V') => {
+                            pending_count = None;
+                            mode = String::from("visual_line");
+                        }
+
+                        // Operators (await motion; doubled = whole track)
+                        KeyCode::Char(c @ ('y' | 'd' | 'c')) => {
+                            let opcount: usize =
+                                pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
+                            pending_op = Operator::from_char(c).map(|op| (op, opcount.max(1)));
                             pending_g = false;
+                        }
+
+                        // Step edits
+                        KeyCode::Char('x') => {
+                            pending_count = None;
+                            let action = Action::CutStep;
+                            apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            last_change = Some(action);
+                        }
+                        KeyCode::Char('~') => {
+                            pending_count = None;
+                            let action = Action::ToggleStep;
+                            apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            last_change = Some(action);
+                        }
+                        KeyCode::Char('p') => {
+                            let times: usize =
+                                pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
+                            let action = Action::Paste { before: false, times: times.max(1) };
+                            undo_msg = apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            undo_time = Some(Instant::now());
+                            last_change = Some(action);
+                        }
+                        KeyCode::Char('P') => {
+                            // bare P only — counted #P is the Euclidean pulses setter
+                            pending_count = None;
+                            let action = Action::Paste { before: true, times: 1 };
+                            undo_msg = apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            undo_time = Some(Instant::now());
+                            last_change = Some(action);
+                        }
+                        KeyCode::Char('.') => {
+                            pending_count = None;
+                            if let Some(action) = last_change.clone() {
+                                undo_msg = apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                                undo_time = Some(Instant::now());
+                                if matches!(
+                                    action,
+                                    Action::Op { op: Operator::Change, .. } | Action::OpTrack(Operator::Change)
+                                ) {
+                                    mode = String::from("insert");
+                                }
+                            } else {
+                                undo_msg = Some(String::from("Nothing to repeat"));
+                                undo_time = Some(Instant::now());
+                            }
                         }
 
                         // Track ops
-                        KeyCode::Char('n') => {
+                        KeyCode::Char('o') | KeyCode::Char('n') => {
                             pending_count = None;
-                            pending_d = false;
-                            pending_y = false;
                             pending_g = false;
-                            let mut s = state.lock().unwrap();
-                            s.tracks.push(Track::new());
-                            s.current_steps.push(0);
-                            s.last_notes.push(None);
-                            s.current_track = s.tracks.len() - 1;
-                            s.selected = 0;
-                            history.push(Command::NewTrack { at: s.current_track });
+                            let action = Action::NewTrack { before: false };
+                            apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            last_change = Some(action);
                         }
-                        KeyCode::Char('d') => {
+                        KeyCode::Char('O') => {
                             pending_count = None;
-                            pending_g = false;
-                            if pending_d {
-                                pending_d = false;
-                                let mut s = state.lock().unwrap();
-                                if s.tracks.len() > 1 {
-                                    let was = s.current_track;
-                                    let track = s.tracks.remove(was);
-                                    s.track_clipboard = Some(track.clone());
-                                    s.current_steps.remove(was);
-                                    s.last_notes.remove(was);
-                                    if s.current_track >= s.tracks.len() {
-                                        s.current_track = s.tracks.len() - 1;
-                                    }
-                                    s.selected = 0;
-                                    history.push(Command::DeleteTrack { at: was, track });
-                                }
-                            } else {
-                                pending_d = true;
-                                pending_y = false;
-                            }
-                        }
-                        KeyCode::Char('y') => {
-                            pending_count = None;
-                            pending_g = false;
-                            if pending_y {
-                                pending_y = false;
-                                let mut s = state.lock().unwrap();
-                                s.track_clipboard = Some(s.tracks[s.current_track].clone());
-                            } else {
-                                pending_y = true;
-                                pending_d = false;
-                            }
-                        }
-                        KeyCode::Char('P') => {
-                            pending_count = None;
-                            pending_d = false;
-                            pending_y = false;
-                            pending_g = false;
-                            let mut s = state.lock().unwrap();
-                            let clip = s.track_clipboard.clone();
-                            if let Some(track) = clip {
-                                let at = s.current_track + 1;
-                                s.tracks.insert(at, track.clone());
-                                s.current_steps.insert(at, 0);
-                                s.last_notes.insert(at, None);
-                                s.current_track = at;
-                                s.selected = 0;
-                                history.push(Command::PasteTrack { at, track });
-                            }
+                            let action = Action::NewTrack { before: true };
+                            apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            last_change = Some(action);
                         }
                         KeyCode::Char('m') => {
                             pending_count = None;
-                            pending_d = false;
-                            pending_y = false;
                             pending_g = false;
-                            let mut s = state.lock().unwrap();
-                            let tidx = s.current_track;
-                            let was_muted = s.tracks[tidx].muted;
-                            s.tracks[tidx].muted = !was_muted;
-                            history.push(Command::ToggleMute { track: tidx, was_muted });
+                            let action = Action::ToggleMute;
+                            apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            last_change = Some(action);
                         }
                         KeyCode::Char('@') => {
                             pending_count = None;
-                            pending_d = false;
-                            pending_y = false;
                             pending_g = false;
-                            let mut s = state.lock().unwrap();
-                            let tidx = s.current_track;
-                            let was_mode = s.tracks[tidx].mode;
-                            s.tracks[tidx].mode = match was_mode {
-                                state::TrackMode::Note => state::TrackMode::Modulation,
-                                state::TrackMode::Modulation => state::TrackMode::Note,
-                            };
-                            history.push(Command::ToggleMode { track: tidx, was_mode });
+                            let action = Action::ToggleMode;
+                            apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            last_change = Some(action);
                         }
-                        KeyCode::Char('k') | KeyCode::Up if pending_count.is_some() => {
-                            let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
-                            let mut s = state.lock().unwrap();
-                            for _ in 0..count {
-                                if s.current_track > 0 {
-                                    s.current_track -= 1;
+                        KeyCode::Char(c @ ('>' | '<')) => {
+                            let n: i32 = pending_count
+                                .take()
+                                .and_then(|s| s.parse().ok())
+                                .unwrap_or(1);
+                            if pending_angle == Some(c) {
+                                pending_angle = None;
+                                let action = Action::Rotate { steps: if c == '>' { n } else { -n } };
+                                apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                                last_change = Some(action);
+                            } else {
+                                pending_angle = Some(c);
+                                // keep the count for the second key
+                                if n > 1 {
+                                    pending_count = Some(n.to_string());
                                 }
                             }
-                            s.selected = 0;
-                            pending_d = false;
-                            pending_y = false;
-                            pending_g = false;
                         }
-                        KeyCode::Char('j') | KeyCode::Down if pending_count.is_some() => {
-                            let count = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
+
+                        // Track navigation
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            let n: usize = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
                             let mut s = state.lock().unwrap();
-                            for _ in 0..count {
-                                if s.current_track + 1 < s.tracks.len() {
-                                    s.current_track += 1;
-                                }
-                            }
+                            s.current_track = s.current_track.saturating_sub(n);
                             s.selected = 0;
-                            pending_d = false;
-                            pending_y = false;
                             pending_g = false;
                         }
-                        KeyCode::Char('[') | KeyCode::Char('k') | KeyCode::Up => {
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            let n: usize = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
+                            let mut s = state.lock().unwrap();
+                            s.current_track = (s.current_track + n).min(s.tracks.len() - 1);
+                            s.selected = 0;
+                            pending_g = false;
+                        }
+                        KeyCode::Char('[') => {
                             pending_count = None;
-                            pending_d = false;
-                            pending_y = false;
                             pending_g = false;
                             let mut s = state.lock().unwrap();
                             if s.current_track > 0 {
@@ -1557,10 +2091,8 @@ pub fn run(instance: usize) -> Result<()> {
                             }
                             s.selected = 0;
                         }
-                        KeyCode::Char(']') | KeyCode::Char('j') | KeyCode::Down => {
+                        KeyCode::Char(']') => {
                             pending_count = None;
-                            pending_d = false;
-                            pending_y = false;
                             pending_g = false;
                             let mut s = state.lock().unwrap();
                             if s.current_track + 1 < s.tracks.len() {
@@ -1571,27 +2103,16 @@ pub fn run(instance: usize) -> Result<()> {
                         KeyCode::Char('g') => {
                             pending_count = None;
                             if pending_g {
-                                // gg = go to first track
                                 pending_g = false;
                                 let mut s = state.lock().unwrap();
                                 s.current_track = 0;
                                 s.selected = 0;
                             } else {
                                 pending_g = true;
-                                pending_d = false;
-                                pending_y = false;
                             }
-                        }
-                        KeyCode::Char('t') if pending_g => {
-                            pending_g = false;
-                            gt_target = Some(String::from("track"));
-                            gt_input.clear();
-                            gt_last_key = Some(Instant::now());
                         }
                         KeyCode::Char('G') => {
                             pending_count = None;
-                            pending_d = false;
-                            pending_y = false;
                             pending_g = false;
                             let mut s = state.lock().unwrap();
                             s.current_track = s.tracks.len() - 1;
@@ -1602,8 +2123,6 @@ pub fn run(instance: usize) -> Result<()> {
                         // sequencer thread mirrors it back into s.playing)
                         KeyCode::Char(' ') => {
                             pending_count = None;
-                            pending_d = false;
-                            pending_y = false;
                             pending_g = false;
                             if transport_ui.is_none() {
                                 transport_ui = ShmTransport::open().ok();
@@ -1615,8 +2134,6 @@ pub fn run(instance: usize) -> Result<()> {
                         }
                         KeyCode::Char('s') => {
                             pending_count = None;
-                            pending_d = false;
-                            pending_y = false;
                             pending_g = false;
                             if transport_ui.is_none() {
                                 transport_ui = ShmTransport::open().ok();
@@ -1629,8 +2146,6 @@ pub fn run(instance: usize) -> Result<()> {
                         KeyCode::Char('u') => {
                             // Count-prefixed: 3u undoes 3 times
                             let count = pending_count.take().and_then(|c| c.parse().ok()).unwrap_or(1).max(1);
-                            pending_d = false;
-                            pending_y = false;
                             pending_g = false;
                             let mut s = state.lock().unwrap();
                             undo_msg = Some(history_status("Undo", count, || history.undo(&mut s)));
@@ -1639,112 +2154,63 @@ pub fn run(instance: usize) -> Result<()> {
 
                         _ => {
                             pending_count = None;
-                            pending_d = false;
-                            pending_y = false;
                             pending_g = false;
+                            pending_angle = None;
                         }
                     }
                 } else {
-                    // Insert mode
+                    // Insert mode: direct step entry & tuning
                     match key.code {
                         KeyCode::Enter | KeyCode::Char(' ') => {
                             pending_count = None;
-                            let mut s = state.lock().unwrap();
-                            let sel = s.selected;
-                            let tidx = s.current_track;
-                            let was_active = s.tracks[tidx].steps[sel].active;
-                            s.tracks[tidx].steps[sel].active = !was_active;
-                            history.push(Command::ToggleStep { track: tidx, step: sel, was_active });
+                            let action = Action::ToggleStep;
+                            apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            last_change = Some(action);
                         }
                         KeyCode::Char('x') => {
                             pending_count = None;
-                            let mut s = state.lock().unwrap();
-                            let sel = s.selected;
-                            let tidx = s.current_track;
-                            let old_step = s.tracks[tidx].steps[sel];
-                            s.clipboard = Some(old_step);
-                            s.tracks[tidx].steps[sel].active = false;
-                            let new_step = s.tracks[tidx].steps[sel];
-                            push_step_edit(&mut history, tidx, sel, old_step, new_step);
+                            let action = Action::CutStep;
+                            apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            last_change = Some(action);
                         }
                         KeyCode::Char('y') => {
                             pending_count = None;
-                            let mut s = state.lock().unwrap();
-                            let sel = s.selected;
-                            s.clipboard = Some(s.track_mut().steps[sel]);
+                            undo_msg = apply_action(&mut state.lock().unwrap(), &mut history, &Action::YankStep);
+                            undo_time = Some(Instant::now());
                         }
                         KeyCode::Char('p') => {
-                            pending_count = None;
-                            let mut s = state.lock().unwrap();
-                            let sel = s.selected;
-                            let tidx = s.current_track;
-                            let old_step = s.tracks[tidx].steps[sel];
-                            if let Some(ref clip) = s.clipboard {
-                                s.tracks[tidx].steps[sel] = *clip;
-                                s.tracks[tidx].steps[sel].active = true;
-                            }
-                            let new_step = s.tracks[tidx].steps[sel];
-                            push_step_edit(&mut history, tidx, sel, old_step, new_step);
+                            let times: usize =
+                                pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
+                            let action = Action::Paste { before: false, times: times.max(1) };
+                            undo_msg = apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            undo_time = Some(Instant::now());
+                            last_change = Some(action);
                         }
-                        KeyCode::Char('k') => {
+                        KeyCode::Char('v') => {
                             pending_count = None;
                             let mut s = state.lock().unwrap();
                             let sel = s.selected;
-                            let tidx = s.current_track;
-                            let old_step = s.tracks[tidx].steps[sel];
-                            if s.tracks[tidx].mode == state::TrackMode::Modulation {
-                                let v = s.tracks[tidx].steps[sel].mod_value + 0.01;
-                                s.tracks[tidx].steps[sel].mod_value = v.min(1.0);
-                            } else {
-                                s.tracks[tidx].steps[sel].note = (s.tracks[tidx].steps[sel].note + 1).min(127);
-                            }
-                            let new_step = s.tracks[tidx].steps[sel];
-                            push_step_edit(&mut history, tidx, sel, old_step, new_step);
+                            s.visual_anchor = Some(sel);
+                            mode = String::from("visual");
                         }
-                        KeyCode::Char('j') => {
+                        KeyCode::Char('.') => {
                             pending_count = None;
-                            let mut s = state.lock().unwrap();
-                            let sel = s.selected;
-                            let tidx = s.current_track;
-                            let old_step = s.tracks[tidx].steps[sel];
-                            if s.tracks[tidx].mode == state::TrackMode::Modulation {
-                                let v = s.tracks[tidx].steps[sel].mod_value - 0.01;
-                                s.tracks[tidx].steps[sel].mod_value = v.max(-1.0);
-                            } else {
-                                s.tracks[tidx].steps[sel].note = s.tracks[tidx].steps[sel].note.saturating_sub(1);
+                            if let Some(action) = last_change.clone() {
+                                undo_msg = apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                                undo_time = Some(Instant::now());
                             }
-                            let new_step = s.tracks[tidx].steps[sel];
-                            push_step_edit(&mut history, tidx, sel, old_step, new_step);
                         }
-                        KeyCode::Char('K') => {
-                            pending_count = None;
-                            let mut s = state.lock().unwrap();
-                            let sel = s.selected;
-                            let tidx = s.current_track;
-                            let old_step = s.tracks[tidx].steps[sel];
-                            if s.tracks[tidx].mode == state::TrackMode::Modulation {
-                                let v = s.tracks[tidx].steps[sel].mod_value + 0.1;
-                                s.tracks[tidx].steps[sel].mod_value = v.min(1.0);
-                            } else {
-                                s.tracks[tidx].steps[sel].note = (s.tracks[tidx].steps[sel].note + 12).min(127);
-                            }
-                            let new_step = s.tracks[tidx].steps[sel];
-                            push_step_edit(&mut history, tidx, sel, old_step, new_step);
-                        }
-                        KeyCode::Char('J') => {
-                            pending_count = None;
-                            let mut s = state.lock().unwrap();
-                            let sel = s.selected;
-                            let tidx = s.current_track;
-                            let old_step = s.tracks[tidx].steps[sel];
-                            if s.tracks[tidx].mode == state::TrackMode::Modulation {
-                                let v = s.tracks[tidx].steps[sel].mod_value - 0.1;
-                                s.tracks[tidx].steps[sel].mod_value = v.max(-1.0);
-                            } else {
-                                s.tracks[tidx].steps[sel].note = s.tracks[tidx].steps[sel].note.saturating_sub(12);
-                            }
-                            let new_step = s.tracks[tidx].steps[sel];
-                            push_step_edit(&mut history, tidx, sel, old_step, new_step);
+                        KeyCode::Char(c @ ('k' | 'j' | 'K' | 'J')) => {
+                            let n: i32 = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
+                            let (note, mod_value) = match c {
+                                'k' => (1, 0.01),
+                                'j' => (-1, -0.01),
+                                'K' => (12, 0.1),
+                                _ => (-12, -0.1),
+                            };
+                            let action = Action::Transpose { note: note * n, mod_value: mod_value * n as f32 };
+                            apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            last_change = Some(action);
                         }
                         KeyCode::Char('g') => {
                             pending_count = None;
@@ -1757,49 +2223,23 @@ pub fn run(instance: usize) -> Result<()> {
                                 pending_g = true;
                             }
                         }
-                        KeyCode::Char('t') if pending_g => {
-                            pending_g = false;
-                            gt_target = Some(String::from("step"));
-                            gt_input.clear();
-                            gt_last_key = Some(Instant::now());
-                        }
                         KeyCode::Char('N') => {
                             pending_count = None;
                             submode = String::from("note");
                             input_buffer.clear();
                         }
-                        // Euclidean (no count)
-                        KeyCode::Char('P') => {
+                        // Euclidean re-apply (no count)
+                        KeyCode::Char('P') | KeyCode::Char('L') => {
                             pending_count = None;
-                            let mut s = state.lock().unwrap();
-                            let tidx = s.current_track;
-                            let old = EuclidState::capture(&s.tracks[tidx]);
-                            let (p, l, r) = (s.tracks[tidx].pulses, s.tracks[tidx].length, s.tracks[tidx].rotation);
-                            euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
-                            let new = EuclidState::capture(&s.tracks[tidx]);
-                            push_track_params(&mut history, tidx, old, new);
-                        }
-                        KeyCode::Char('L') => {
-                            pending_count = None;
-                            let mut s = state.lock().unwrap();
-                            let tidx = s.current_track;
-                            s.selected = s.selected.min(s.tracks[tidx].length - 1);
-                            let old = EuclidState::capture(&s.tracks[tidx]);
-                            let (p, l, r) = (s.tracks[tidx].pulses, s.tracks[tidx].length, s.tracks[tidx].rotation);
-                            euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
-                            let new = EuclidState::capture(&s.tracks[tidx]);
-                            push_track_params(&mut history, tidx, old, new);
+                            let action = Action::Euclid(EuclidOp::Reapply);
+                            apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            last_change = Some(action);
                         }
                         KeyCode::Char('R') => {
                             pending_count = None;
-                            let mut s = state.lock().unwrap();
-                            let tidx = s.current_track;
-                            let old = EuclidState::capture(&s.tracks[tidx]);
-                            s.tracks[tidx].rotation = (s.tracks[tidx].rotation + 1) % s.tracks[tidx].length;
-                            let (p, l, r) = (s.tracks[tidx].pulses, s.tracks[tidx].length, s.tracks[tidx].rotation);
-                            euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
-                            let new = EuclidState::capture(&s.tracks[tidx]);
-                            push_track_params(&mut history, tidx, old, new);
+                            let action = Action::Euclid(EuclidOp::RotatePlus(1));
+                            apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            last_change = Some(action);
                         }
                         _ => {
                             pending_count = None;
@@ -1831,69 +2271,30 @@ mod tests {
         s
     }
 
-    /// Simulate the insert-mode Enter/Space handler.
+    /// All edit helpers go through apply_action — the same code path the
+    /// key handlers use.
     fn toggle_step(s: &mut SequencerState, h: &mut History) {
-        let (tidx, sel) = (s.current_track, s.selected);
-        let was_active = s.tracks[tidx].steps[sel].active;
-        s.tracks[tidx].steps[sel].active = !was_active;
-        h.push(Command::ToggleStep { track: tidx, step: sel, was_active });
+        apply_action(s, h, &Action::ToggleStep);
     }
 
-    /// Simulate the insert-mode `x` handler.
     fn cut_step(s: &mut SequencerState, h: &mut History) {
-        let (tidx, sel) = (s.current_track, s.selected);
-        let old_step = s.tracks[tidx].steps[sel];
-        s.clipboard = Some(old_step);
-        s.tracks[tidx].steps[sel].active = false;
-        let new_step = s.tracks[tidx].steps[sel];
-        push_step_edit(h, tidx, sel, old_step, new_step);
+        apply_action(s, h, &Action::CutStep);
     }
 
-    /// Simulate the insert-mode `p` handler.
     fn paste_step(s: &mut SequencerState, h: &mut History) {
-        let (tidx, sel) = (s.current_track, s.selected);
-        let old_step = s.tracks[tidx].steps[sel];
-        if let Some(clip) = s.clipboard {
-            s.tracks[tidx].steps[sel] = clip;
-            s.tracks[tidx].steps[sel].active = true;
-        }
-        let new_step = s.tracks[tidx].steps[sel];
-        push_step_edit(h, tidx, sel, old_step, new_step);
+        apply_action(s, h, &Action::Paste { before: false, times: 1 });
     }
 
-    /// Simulate the insert-mode `k` (transpose up a semitone) handler.
     fn transpose_up(s: &mut SequencerState, h: &mut History) {
-        let (tidx, sel) = (s.current_track, s.selected);
-        let old_step = s.tracks[tidx].steps[sel];
-        s.tracks[tidx].steps[sel].note = (old_step.note + 1).min(127);
-        let new_step = s.tracks[tidx].steps[sel];
-        push_step_edit(h, tidx, sel, old_step, new_step);
+        apply_action(s, h, &Action::Transpose { note: 1, mod_value: 0.01 });
     }
 
-    /// Simulate the normal-mode `n` (new track) handler.
     fn new_track(s: &mut SequencerState, h: &mut History) {
-        s.tracks.push(Track::new());
-        s.current_steps.push(0);
-        s.last_notes.push(None);
-        s.current_track = s.tracks.len() - 1;
-        s.selected = 0;
-        h.push(Command::NewTrack { at: s.current_track });
+        apply_action(s, h, &Action::NewTrack { before: false });
     }
 
-    /// Simulate the normal-mode `dd` (delete track) handler.
     fn delete_track(s: &mut SequencerState, h: &mut History) {
-        if s.tracks.len() > 1 {
-            let was = s.current_track;
-            let track = s.tracks.remove(was);
-            s.track_clipboard = Some(track.clone());
-            s.current_steps.remove(was);
-            s.last_notes.remove(was);
-            if s.current_track >= s.tracks.len() {
-                s.current_track = s.tracks.len() - 1;
-            }
-            s.selected = 0;
-            h.push(Command::DeleteTrack { at: was, track });
-        }
+        apply_action(s, h, &Action::OpTrack(Operator::Delete));
     }
 
     /// Simulate a count-prefixed `L` (set length) handler.
@@ -1936,7 +2337,7 @@ mod tests {
     fn paste_step_undo() {
         let mut s = state_with_tracks(1);
         let mut h = History::new();
-        s.clipboard = Some(Step { active: true, note: 72, velocity: 90, mod_value: 0.0 });
+        s.register = Some(Register::Steps(vec![Step { active: true, note: 72, velocity: 90, mod_value: 0.0 }]));
         s.selected = 1;
         let before = s.tracks[0].steps[1];
         paste_step(&mut s, &mut h);
@@ -2206,5 +2607,226 @@ mod tests {
         assert_eq!(history_status("Undo", 1, || h.undo(&mut s)), "Nothing to undo");
         assert_eq!(history_status("Redo", 5, || h.redo(&mut s)), "Redo: Toggle step");
         assert_eq!(history_status("Redo", 1, || h.redo(&mut s)), "Nothing to redo");
+    }
+
+    // ── grammar tests ───────────────────────────────────────────────────
+
+    /// Track with words at steps 2-3 and 8-10 (length 16).
+    fn track_with_words(s: &mut SequencerState) {
+        for st in s.tracks[0].steps.iter_mut() {
+            st.active = false;
+        }
+        for i in [2, 3, 8, 9, 10] {
+            s.tracks[0].steps[i].active = true;
+        }
+    }
+
+    #[test]
+    fn word_motions_navigate_runs() {
+        let mut s = state_with_tracks(1);
+        track_with_words(&mut s);
+        let steps = &s.tracks[0].steps;
+        assert_eq!(nav_word(steps, 16, 0, Motion::WordFwd), 2, "w to first word start");
+        assert_eq!(nav_word(steps, 16, 2, Motion::WordFwd), 8, "w skips within-word steps");
+        assert_eq!(nav_word(steps, 16, 8, Motion::WordFwd), 2, "w wraps");
+        assert_eq!(nav_word(steps, 16, 8, Motion::WordBack), 2, "b to previous word start");
+        assert_eq!(nav_word(steps, 16, 0, Motion::WordEnd), 3, "e to word end");
+        assert_eq!(nav_word(steps, 16, 3, Motion::WordEnd), 10, "e to next word end");
+    }
+
+    #[test]
+    fn motion_ranges_follow_vi_semantics() {
+        let mut s = state_with_tracks(1);
+        track_with_words(&mut s);
+        let t = &s.tracks[0];
+        assert_eq!(motion_range(t, 2, Motion::WordFwd, 1), Some((2, 7)), "dw eats up to next word");
+        assert_eq!(motion_range(t, 8, Motion::WordFwd, 1), Some((8, 15)), "dw at last word eats to end");
+        assert_eq!(motion_range(t, 2, Motion::WordEnd, 1), Some((2, 3)), "de is inclusive");
+        assert_eq!(motion_range(t, 8, Motion::WordBack, 1), Some((2, 7)), "db back to word start");
+        assert_eq!(motion_range(t, 5, Motion::End, 1), Some((5, 15)));
+        assert_eq!(motion_range(t, 5, Motion::Home, 1), Some((0, 4)));
+        assert_eq!(motion_range(t, 0, Motion::Home, 1), None, "d0 at 0 is a no-op");
+        assert_eq!(motion_range(t, 2, Motion::Till(8), 1), Some((2, 7)), "t is exclusive");
+        assert_eq!(motion_range(t, 2, Motion::Find(8), 1), Some((2, 8)), "f is inclusive");
+        assert_eq!(motion_range(t, 8, Motion::Till(2), 1), Some((3, 8)), "t works backward");
+        assert_eq!(motion_range(t, 4, Motion::Right, 3), Some((4, 6)), "3l range");
+        assert_eq!(motion_range(t, 4, Motion::Span(4), 1), Some((4, 7)));
+    }
+
+    #[test]
+    fn yank_word_and_paste() {
+        let mut s = state_with_tracks(1);
+        let mut h = History::new();
+        track_with_words(&mut s);
+        s.tracks[0].steps[8].note = 72;
+        s.selected = 8;
+        // yw at step 8: yanks 8..=15 (last word to end)
+        let msg = apply_action(&mut s, &mut h, &Action::Op { op: Operator::Yank, motion: Motion::WordEnd, count: 1 });
+        assert_eq!(msg.as_deref(), Some("Yanked 3 steps")); // ye: 8..=10
+        // paste at step 12 overwrites 12..=14
+        s.selected = 12;
+        apply_action(&mut s, &mut h, &Action::Paste { before: false, times: 1 });
+        assert!(s.tracks[0].steps[12].active);
+        assert_eq!(s.tracks[0].steps[12].note, 72);
+        assert!(s.tracks[0].steps[13].active && s.tracks[0].steps[14].active);
+        // undo restores
+        assert!(h.undo(&mut s).is_some());
+        assert!(!s.tracks[0].steps[12].active);
+    }
+
+    #[test]
+    fn delete_word_clears_and_yanks() {
+        let mut s = state_with_tracks(1);
+        let mut h = History::new();
+        track_with_words(&mut s);
+        s.selected = 8;
+        apply_action(&mut s, &mut h, &Action::Op { op: Operator::Delete, motion: Motion::WordEnd, count: 1 });
+        assert!(!s.tracks[0].steps[8].active && !s.tracks[0].steps[9].active && !s.tracks[0].steps[10].active);
+        match s.register {
+            Some(Register::Steps(ref v)) => {
+                assert_eq!(v.len(), 3);
+                assert!(v[0].active, "register holds the pre-delete steps");
+            }
+            _ => panic!("register should hold steps"),
+        }
+        assert!(h.undo(&mut s).is_some());
+        assert!(s.tracks[0].steps[8].active, "undo restores the word");
+    }
+
+    #[test]
+    fn paste_before_ends_at_cursor() {
+        let mut s = state_with_tracks(1);
+        let mut h = History::new();
+        s.register = Some(Register::Steps(vec![
+            Step { active: true, note: 60, velocity: 100, mod_value: 0.0 },
+            Step { active: true, note: 62, velocity: 100, mod_value: 0.0 },
+        ]));
+        s.selected = 5;
+        apply_action(&mut s, &mut h, &Action::Paste { before: true, times: 1 });
+        assert_eq!(s.tracks[0].steps[4].note, 60);
+        assert_eq!(s.tracks[0].steps[5].note, 62);
+        assert_eq!(s.selected, 4, "cursor moves to paste start");
+    }
+
+    #[test]
+    fn track_register_roundtrip() {
+        let mut s = state_with_tracks(2);
+        let mut h = History::new();
+        s.tracks[0].steps[7].note = 99;
+        apply_action(&mut s, &mut h, &Action::OpTrack(Operator::Yank));
+        s.current_track = 1;
+        apply_action(&mut s, &mut h, &Action::Paste { before: false, times: 1 });
+        assert_eq!(s.tracks.len(), 3);
+        assert_eq!(s.tracks[2].steps[7].note, 99, "track pasted after current");
+        assert!(h.undo(&mut s).is_some());
+        assert_eq!(s.tracks.len(), 2);
+    }
+
+    #[test]
+    fn delete_track_fills_register() {
+        let mut s = state_with_tracks(2);
+        let mut h = History::new();
+        apply_action(&mut s, &mut h, &Action::OpTrack(Operator::Delete));
+        assert_eq!(s.tracks.len(), 1);
+        assert!(matches!(s.register, Some(Register::Track(_))));
+        // last track refuses
+        let msg = apply_action(&mut s, &mut h, &Action::OpTrack(Operator::Delete));
+        assert_eq!(msg.as_deref(), Some("Can't delete the last track"));
+        assert_eq!(s.tracks.len(), 1);
+    }
+
+    #[test]
+    fn change_track_clears_steps_into_register() {
+        let mut s = state_with_tracks(1);
+        let mut h = History::new();
+        apply_action(&mut s, &mut h, &Action::OpTrack(Operator::Change));
+        assert!(s.tracks[0].steps.iter().all(|st| !st.active));
+        assert!(matches!(s.register, Some(Register::Steps(ref v)) if v.len() == 16));
+        assert!(h.undo(&mut s).is_some());
+        assert!(s.tracks[0].steps[0].active, "cc undo restores pattern");
+    }
+
+    #[test]
+    fn rotate_shifts_pattern() {
+        let mut s = state_with_tracks(1);
+        let mut h = History::new();
+        // default pattern: active at 0,4,8,12
+        apply_action(&mut s, &mut h, &Action::Rotate { steps: 1 });
+        assert!(!s.tracks[0].steps[0].active);
+        assert!(s.tracks[0].steps[1].active && s.tracks[0].steps[5].active);
+        apply_action(&mut s, &mut h, &Action::Rotate { steps: -1 });
+        assert!(s.tracks[0].steps[0].active, "<< rotates back");
+        assert!(h.undo(&mut s).is_some() && h.undo(&mut s).is_some());
+        assert!(s.tracks[0].steps[0].active);
+    }
+
+    #[test]
+    fn toggle_span_flips_range() {
+        let mut s = state_with_tracks(1);
+        let mut h = History::new();
+        s.selected = 0;
+        apply_action(&mut s, &mut h, &Action::ToggleSpan(5));
+        // steps 0..=4: 0 and 4 were active -> now inactive; 1,2,3 now active
+        assert!(!s.tracks[0].steps[0].active && !s.tracks[0].steps[4].active);
+        assert!(s.tracks[0].steps[1].active && s.tracks[0].steps[3].active);
+        assert!(h.undo(&mut s).is_some());
+        assert!(s.tracks[0].steps[0].active);
+    }
+
+    #[test]
+    fn dot_repeat_actions_are_changes_only() {
+        assert!(Action::ToggleStep.is_change());
+        assert!(Action::CutStep.is_change());
+        assert!(Action::Op { op: Operator::Delete, motion: Motion::WordFwd, count: 1 }.is_change());
+        assert!(!Action::YankStep.is_change());
+        assert!(!Action::Op { op: Operator::Yank, motion: Motion::WordFwd, count: 1 }.is_change());
+        assert!(!Action::OpTrack(Operator::Yank).is_change());
+        assert!(Action::OpTrack(Operator::Delete).is_change());
+    }
+
+    #[test]
+    fn dot_repeat_replays_at_new_cursor() {
+        let mut s = state_with_tracks(1);
+        let mut h = History::new();
+        s.selected = 1;
+        let action = Action::ToggleStep;
+        apply_action(&mut s, &mut h, &action);
+        assert!(s.tracks[0].steps[1].active);
+        // "." at a new cursor
+        s.selected = 2;
+        apply_action(&mut s, &mut h, &action);
+        assert!(s.tracks[0].steps[2].active);
+        assert_eq!(h.commands.len(), 2, "each repeat is its own undo entry");
+    }
+
+    #[test]
+    fn new_track_before_and_after() {
+        let mut s = state_with_tracks(2);
+        let mut h = History::new();
+        s.current_track = 0;
+        s.tracks[0].steps[0].note = 11;
+        apply_action(&mut s, &mut h, &Action::NewTrack { before: false });
+        assert_eq!(s.tracks.len(), 3);
+        assert_eq!(s.current_track, 1, "o lands on the new track");
+        apply_action(&mut s, &mut h, &Action::NewTrack { before: true });
+        assert_eq!(s.tracks.len(), 4);
+        assert_eq!(s.current_track, 1, "O inserts before, cursor on it");
+        assert!(h.undo(&mut s).is_some() && h.undo(&mut s).is_some());
+        assert_eq!(s.tracks.len(), 2);
+        assert_eq!(s.tracks[0].steps[0].note, 11);
+    }
+
+    #[test]
+    fn counted_paste_repeats_register() {
+        let mut s = state_with_tracks(1);
+        let mut h = History::new();
+        for st in s.tracks[0].steps.iter_mut() {
+            st.active = false;
+        }
+        s.register = Some(Register::Steps(vec![Step { active: true, note: 65, velocity: 100, mod_value: 0.0 }]));
+        s.selected = 3;
+        apply_action(&mut s, &mut h, &Action::Paste { before: false, times: 3 });
+        assert!(s.tracks[0].steps[3].active && s.tracks[0].steps[4].active && s.tracks[0].steps[5].active);
+        assert!(!s.tracks[0].steps[6].active);
     }
 }
