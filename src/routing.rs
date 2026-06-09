@@ -40,7 +40,9 @@ impl fmt::Display for SourceAddr {
 pub fn output_labels(module: &str) -> &'static [&'static str] {
     match module {
         "sequencer" => &["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"],
-        "envelope" => &["ch1", "ch2", "ch3", "ch4", "sum", "or", "and", "inv"],
+        "envelope" => &[
+            "ch1", "ch2", "ch3", "ch4", "ch5", "ch6", "sum", "or", "and", "inv", "eor", "eoc",
+        ],
         _ => &[],
     }
 }
@@ -151,7 +153,11 @@ mod tests {
         let t3 = SourceAddr::parse("sequencer/0/t3").unwrap();
         assert_eq!(resolve(&entries, &t3), Some(2));
         let sum = SourceAddr::parse("envelope/0/sum").unwrap();
-        assert_eq!(resolve(&entries, &sum), Some(12));
+        assert_eq!(resolve(&entries, &sum), Some(14), "sum at offset 6 of the claim");
+        let eor = SourceAddr::parse("envelope/0/eor").unwrap();
+        assert_eq!(resolve(&entries, &eor), None, "eor (offset 10) is beyond an 8-channel claim");
+        let full = vec![entry("envelope", 0, Some(8), 12)];
+        assert_eq!(resolve(&full, &eor), Some(18), "eor resolves under a full 12-output claim");
         let missing = SourceAddr::parse("envelope/1/ch1").unwrap();
         assert_eq!(resolve(&entries, &missing), None, "instance not running");
         let bad = SourceAddr::parse("voice/0/out").unwrap();
@@ -175,15 +181,16 @@ mod tests {
             entry("scope", 0, None, 0),
         ];
         let sources = live_sources(&entries);
-        assert_eq!(sources.len(), 16);
+        assert_eq!(sources.len(), 16, "claim count bounds the listed outputs");
         assert!(sources.iter().any(|a| a.to_string() == "sequencer/0/t8"));
-        assert!(sources.iter().any(|a| a.to_string() == "envelope/0/inv"));
+        assert!(sources.iter().any(|a| a.to_string() == "envelope/0/ch5"));
     }
 
     #[test]
     fn label_for_channel_reverse_lookup() {
-        let entries = vec![entry("envelope", 0, Some(8), 8)];
-        assert_eq!(label_for_channel(&entries, 12).unwrap().to_string(), "envelope/0/sum");
+        let entries = vec![entry("envelope", 0, Some(8), 12)];
+        assert_eq!(label_for_channel(&entries, 14).unwrap().to_string(), "envelope/0/sum");
+        assert_eq!(label_for_channel(&entries, 19).unwrap().to_string(), "envelope/0/eoc");
         assert!(label_for_channel(&entries, 3).is_none());
     }
 

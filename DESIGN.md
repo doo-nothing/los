@@ -347,7 +347,7 @@ Total size: 64 bytes
 > (`module/instance/output`, see `src/routing.rs`) and resolve to live
 > channels through the manifest — a restarted module claims a fresh range and
 > bindings re-resolve. Output labels per module: sequencer `t1`–`t8`,
-> envelope `ch1`–`ch4`,`sum`,`or`,`and`,`inv`.
+> envelope `ch1`–`ch6`,`sum`,`or`,`and`,`inv`,`eor`,`eoc` (12 claimed).
 
 32 atomic f32 channels. Multiple writers (sequencer, envelope), many readers
 (voices, scope).

@@ -1,5 +1,11 @@
 # Maths — Make Noise–grade Function Generator
 
+**Status: ✅ M1+M2+M3 implemented** (one pass, per interview). Decisions:
+superset (all channels full generators + offsets, up to 6, `a`/`x`
+add/remove), Maths-style panel UI, audio output included. Also fixed: the
+engine ran 33% fast (1ms sleep vs the 1.333ms block duration) — now
+deadline-paced.
+
 Goal: evolve `los envelope` (alias `maths`) into a faithful clone of the Make
 Noise Maths (2013 panel) — expressive range and *sound* included.
 Reference: https://www.makenoisemusic.com/wp-content/uploads/2024/03/MATHSmanual2013.pdf

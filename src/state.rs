@@ -262,7 +262,11 @@ pub struct EnvelopeChannelParams {
     pub shape: f32,
     pub loop_mode: bool,
     pub attenuverter: f32,
+    #[serde(default)]
+    pub offset: f32,
     // Source-address bindings (state format v2)
+    #[serde(default)]
+    pub signal_src: Option<String>,
     #[serde(default)]
     pub trigger_src: Option<String>,
     #[serde(default)]
@@ -283,6 +287,8 @@ impl Default for EnvelopeChannelParams {
             shape: 0.5,
             loop_mode: false,
             attenuverter: 1.0,
+            offset: 0.0,
+            signal_src: None,
             trigger_src: None,
             rise_src: None,
             fall_src: None,
