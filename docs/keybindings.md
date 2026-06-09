@@ -144,10 +144,16 @@ Requires a per-module dirty flag (changed since last save) for `:q` vs `:q!`.
 notes to play; unbound = all) and `amp` (amplitude source, default
 `envelope/0/ch1`; unbound = 1.0) · `:` · undo (all ✅)
 
-### Envelope
-`j/k` select · `h/l` adjust · `H/L` coarse · `[`/`]` channel (counts) ·
-`gg/G` first/last channel · `t` trigger · `c` cycle · `o` gate (moved off `g`
-to free the gg chord) · `@` source picker per param + trigger · `:` · undo (all ✅)
+### Envelope / Maths
+Maths-style panel: one column per channel + a logic column (SUM/OR/AND/INV,
+EOR/EOC, live meters). Rows: Rise, Fall (0.5ms–25min), Shape (log↔lin↔exp),
+Atten, Offset, Sig (slew input), Trig.
+`j/k` select row · `h/l` adjust · `H/L` coarse · `[`/`]` channel (counts) ·
+`gg/G` first/last channel · `a`/`x` add/remove channel (up to 6) ·
+`t` manual trigger · `c` cycle · `o` gate · `@` bind row (Trig row offers
+— any note — / — off — / sources; a non-note source = rising-edge trigger,
+e.g. `envelope/0/eoc` for self-patching) · `:set rise 100ms|2s|1.5m|0.42`
+(also fall/shape/atten/offset) · `:` · undo (all ✅)
 
 ### Mixer
 `h/l` select channel (counts) · `j/k` level down/up · `J/K` coarse ·
