@@ -260,8 +260,11 @@ fn install_shell_theme() {
     t(&["set-option", "-t", "los", "status-right", "#[fg=#c45dd4]♪ #{session_name} "]);
     t(&["set-option", "-t", "los", "window-status-current-style", "fg=#e8dcc8,bold"]);
     t(&["set-option", "-t", "los", "window-status-style", "fg=#7d7363"]);
-    t(&["set-window-option", "-t", "los:modules", "window-style", "bg=#0d0b08"]);
-    t(&["set-window-option", "-t", "los:modules", "window-active-style", "bg=#0d0b08"]);
+    // Active-pane clarity: inactive panes sit on a darker, cooler ground
+    // with dimmed ink; the active pane is warmer and brighter — plus the
+    // amber border. You can feel the focus before you read it.
+    t(&["set-window-option", "-t", "los:modules", "window-style", "fg=#a89a82,bg=#060504"]);
+    t(&["set-window-option", "-t", "los:modules", "window-active-style", "fg=#e8dcc8,bg=#110e0a"]);
 }
 
 pub fn create_session() -> Result<()> {
@@ -285,12 +288,19 @@ pub fn create_session() -> Result<()> {
         ("mixer 0", "MIX"),
         ("scope 0", "SCOPE"),
         ("envelope 0", "MATHs"),
-        ("badge 0", "los"),
     ];
     spawn_session_panes(&modules)?;
 
-    // Apply default tiled layout
+    // Apply default tiled layout, then carve a short badge slice off the
+    // last pane only (tiling is zero-sum: this border move affects just
+    // that one neighbor, nobody else)
     tmux_cmd(&["select-layout", "-t", "los:modules", "tiled"])?;
+    if let Ok(pane_id) = tmux_cmd(&[
+        "split-window", "-t", "los:modules", "-l", "7", "-P", "-F", "#{pane_id}",
+        &format!("{} badge 0", exe),
+    ]) {
+        tmux_cmd_ok(&["select-pane", "-t", pane_id.trim(), "-T", "los"]);
+    }
 
     install_transport_keys(&exe);
     install_shell_theme();

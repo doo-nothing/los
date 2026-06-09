@@ -24,8 +24,7 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Style},
+    style::Style,
     text::Line,
     widgets::{Block, Borders, Paragraph},
     Terminal,
@@ -801,11 +800,13 @@ fn env_thread(
 // ── UI ──────────────────────────────────────────────────────────────────────
 
 fn meter(v: f32) -> String {
-    let blocks = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    let idx = ((v.abs().clamp(0.0, 1.0)) * 7.0).round() as usize;
-    let c = blocks[idx.min(7)];
     let sign = if v < -0.005 { '-' } else { ' ' };
-    format!("{}{}", sign, c)
+    format!("{}{}", sign, crate::theme::meter_char(v.abs()))
+}
+
+/// Bipolar value (−1..1) → unipolar gauge position.
+fn bi(v: f32) -> f32 {
+    (v.clamp(-1.0, 1.0) + 1.0) / 2.0
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -816,202 +817,162 @@ fn draw_ui(
     show_help: bool,
     overlay: Option<&str>,
     picker: Option<(Vec<String>, usize)>,
+    ghosts: &[Option<f32>; 4],
+    bpm: f32,
+    playing: bool,
 ) -> Result<()> {
+    use crate::theme;
+    use ratatui::text::Span;
+
     terminal.draw(|f| {
         let area = f.area();
+        let w = area.width as usize;
         let n = state.params.len();
+        let cur = state.current_channel.min(n - 1);
+        let p = &state.params[cur];
 
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(1)])
-            .split(area);
+        let mut lines: Vec<Line> = Vec::new();
+        let ctx = format!("ch{}/{}", cur + 1, n);
+        lines.push(theme::header("MATHs", &ctx, &theme::transport_echo(bpm, playing, None), w));
 
-        // Maths panel: one column per channel + a logic column
-        let col_constraints: Vec<Constraint> =
-            (0..=n).map(|_| Constraint::Ratio(1, (n + 1) as u32)).collect();
-        let cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints(col_constraints)
-            .split(chunks[0]);
-
-        let row_names = ["Rise", "Fall", "Shap", "Attn", "Offs", "Plck", "Sig ", "Trig"];
+        // ── overview: every channel at a glance + the buses ─────────────
+        let mut ov: Vec<Span> = Vec::new();
         for i in 0..n {
-            let p = &state.params[i];
             let ch = &state.channels[i];
-            let is_cur = i == state.current_channel;
-
-            let bound = |a: &Option<SourceAddr>| if a.is_some() { "@" } else { " " };
-            let trig_short = format!(
-                "{}·{}",
-                match &p.trigger {
-                    Trigger::Any => String::from("any"),
-                    Trigger::Off => String::from("off"),
-                    Trigger::Source(a) => a.output.clone(),
-                },
-                if p.gate_mode { "gt" } else { "tr" }
-            );
-            let values = [
-                format!("{}{}", format_time(param_to_time(p.rise_param)), bound(&p.rise_src)),
-                format!("{}{}", format_time(param_to_time(p.fall_param)), bound(&p.fall_src)),
-                format!("{:.2}{}", p.shape_param, bound(&p.shape_src)),
-                format!("{:+.2}{}", p.attenuverter, bound(&p.atten_src)),
-                format!("{:+.2}", p.offset),
-                format!("{:.2}", p.pluck),
-                p.signal_src.as_ref().map(|a| a.output.clone()).unwrap_or_else(|| "—".into()),
-                trig_short,
-            ];
-
-            let mut lines: Vec<Line> = Vec::with_capacity(NUM_ROWS + 2);
-            let flags = format!(
-                "{}{}",
-                if p.loop_mode { " CYC" } else { "" },
-                match ch.stage {
-                    Stage::Rise => " ↗",
-                    Stage::Fall => " ↘",
-                    Stage::Sustain => " ―",
-                    Stage::Off => "",
-                }
-            );
-            lines.push(Line::from(format!("Ch{}{}", i + 1, flags)));
-            for (row, (name, val)) in row_names.iter().zip(values.iter()).enumerate() {
-                let text = format!("{} {}", name, val);
-                let style = if is_cur && row == selected {
-                    Style::default().fg(Color::Black).bg(Color::Yellow)
-                } else if is_cur {
-                    Style::default().fg(Color::White)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
-                lines.push(Line::styled(text, style));
-            }
-            lines.push(Line::from(format!("out {} {:+.2}", meter(ch.output), ch.output)));
-
-            let border_style = if is_cur {
-                Style::default().fg(Color::Yellow)
-            } else {
-                Style::default().fg(Color::DarkGray)
+            let cp = &state.params[i];
+            let arrow = match ch.stage {
+                Stage::Rise => theme::RISE_ARROW,
+                Stage::Fall => theme::FALL_ARROW,
+                Stage::Sustain => theme::SUSTAIN_BAR,
+                Stage::Off => ' ',
             };
-            let block = Block::default().borders(Borders::ALL).border_style(border_style);
-            f.render_widget(Paragraph::new(lines).block(block), cols[i]);
+            let style = if i == cur { theme::chrome_hi() } else { theme::chrome() };
+            ov.push(Span::styled(format!(" C{}", i + 1), style));
+            ov.push(Span::styled(
+                theme::meter_char(ch.output.abs()).to_string(),
+                theme::signal(theme::cv()),
+            ));
+            ov.push(Span::styled(
+                format!("{}{}", arrow, if cp.loop_mode { "∞" } else { " " }),
+                theme::signal(theme::clock()),
+            ));
         }
+        let outs: Vec<f32> = state
+            .channels
+            .iter()
+            .zip(state.params.iter())
+            .take(n)
+            .map(|(c, q)| (c.output * q.attenuverter + q.offset).clamp(-1.0, 1.0))
+            .collect();
+        let sum: f32 = outs.iter().sum::<f32>().clamp(-1.0, 1.0);
+        let or_v = outs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let eor = matches!(state.channels[0].stage, Stage::Sustain | Stage::Fall);
+        let eoc = state.channels[n - 1].stage == Stage::Off;
+        ov.push(Span::styled("  ∑", theme::chrome()));
+        ov.push(Span::styled(meter(sum), theme::signal(theme::cv())));
+        ov.push(Span::styled(" ∨", theme::chrome()));
+        ov.push(Span::styled(meter(or_v), theme::signal(theme::cv())));
+        ov.push(Span::styled(
+            format!(" {}{}", if eor { theme::GATE_HI } else { theme::GATE_LO }, if eoc { theme::GATE_HI } else { theme::GATE_LO }),
+            theme::signal(theme::cv()),
+        ));
+        lines.push(Line::from(ov));
+        lines.push(theme::rule(w));
 
-        // Logic column
-        {
-            let outs: Vec<f32> = state
-                .channels
-                .iter()
-                .zip(state.params.iter())
-                .map(|(c, p)| (c.output * p.attenuverter + p.offset).clamp(-1.0, 1.0))
-                .collect();
-            let sum = outs.iter().sum::<f32>().clamp(-1.0, 1.0);
-            let or_v = outs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let and_v = outs.iter().copied().fold(f32::INFINITY, f32::min);
-            let eor = matches!(state.channels[0].stage, Stage::Sustain | Stage::Fall);
-            let eoc = state.channels[n - 1].stage == Stage::Off;
-            let lines = vec![
-                Line::from("Logic"),
-                Line::from(format!("SUM {} {:+.2}", meter(sum), sum)),
-                Line::from(format!("OR  {} {:+.2}", meter(or_v), or_v)),
-                Line::from(format!("AND {} {:+.2}", meter(and_v), and_v)),
-                Line::from(format!("INV {} {:+.2}", meter(-outs[0]), -outs[0])),
-                Line::from(format!("EOR {}", if eor { "●" } else { "○" })),
-                Line::from(format!("EOC {}", if eoc { "●" } else { "○" })),
-                Line::from(format!("gate {}", if state.gate { "●" } else { "○" })),
-            ];
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan));
-            f.render_widget(Paragraph::new(lines).block(block), cols[n]);
+        // ── detail: the current channel with real sliders ───────────────
+        let gauge_w = (w.saturating_sub(26)).clamp(8, 24);
+        let trig_text = match &p.trigger {
+            Trigger::Any => String::from("any note"),
+            Trigger::Off => String::from("off"),
+            Trigger::Source(a) => a.to_string(),
+        };
+        let row_label = |row: usize, name: &str| -> Span<'static> {
+            if row == selected {
+                Span::styled(format!(" {:<5}", name), theme::selected())
+            } else {
+                Span::styled(format!(" {:<5}", name), theme::chrome())
+            }
+        };
+
+        // trigger row (selectable, binding-only)
+        lines.push(Line::from(vec![
+            row_label(ROW_TRIGGER, "trig"),
+            Span::styled(trig_text, theme::signal(theme::cv())),
+            Span::styled(
+                format!("·{}", if p.gate_mode { "gate" } else { "trig" }),
+                theme::value(),
+            ),
+            Span::styled(
+                if p.loop_mode { "  CYC∞" } else { "" }.to_string(),
+                theme::signal(theme::clock()),
+            ),
+        ]));
+
+        // value rows: (row, label, set 0..1 for gauge, display, ghost, hue tag)
+        type ValueRow<'a> = (usize, &'a str, f32, String, Option<f32>, Option<&'a Option<SourceAddr>>);
+        let rows: [ValueRow; 6] = [
+            (0, "rise", p.rise_param, format_time(param_to_time(p.rise_param)), ghosts[0], Some(&p.rise_src)),
+            (1, "fall", p.fall_param, format_time(param_to_time(p.fall_param)), ghosts[1], Some(&p.fall_src)),
+            (2, "shap", p.shape_param, format!("{:.2}", p.shape_param), ghosts[2], Some(&p.shape_src)),
+            (3, "attn", bi(p.attenuverter), format!("{:+.2}", p.attenuverter), ghosts[3].map(bi), Some(&p.atten_src)),
+            (4, "offs", bi(p.offset), format!("{:+.2}", p.offset), None, None),
+            (ROW_PLUCK, "plck", p.pluck, format!("{:.2}", p.pluck), None, None),
+        ];
+        for (row, name, set, disp, ghost, src) in rows {
+            let mut spans = vec![row_label(row, name)];
+            spans.push(Span::styled(theme::gauge(set, ghost, gauge_w), theme::value()));
+            spans.push(Span::styled(format!(" {:>7}", disp), theme::value()));
+            if let Some(Some(a)) = src {
+                spans.push(Span::styled(
+                    format!(" {}{}", theme::BIND, a.output),
+                    theme::signal(theme::cv()),
+                ));
+            }
+            lines.push(Line::from(spans));
         }
+        // signal row
+        lines.push(Line::from(vec![
+            row_label(ROW_SIGNAL, "sig"),
+            match &p.signal_src {
+                Some(a) => Span::styled(
+                    format!("{}{} (slew)", theme::BIND, a),
+                    theme::signal(theme::cv()),
+                ),
+                None => Span::styled("—".to_string(), theme::dim()),
+            },
+        ]));
 
-        // Status line: full binding detail for the selected row
-        let p = &state.params[state.current_channel.min(n - 1)];
-        let detail = match selected {
-            0 => p.rise_src.as_ref().map(|a| format!("rise @{}", a)),
-            1 => p.fall_src.as_ref().map(|a| format!("fall @{}", a)),
-            2 => p.shape_src.as_ref().map(|a| format!("shape @{}", a)),
-            3 => p.atten_src.as_ref().map(|a| format!("atten @{}", a)),
-            ROW_SIGNAL => p.signal_src.as_ref().map(|a| format!("signal @{} (slew mode)", a)),
-            ROW_TRIGGER => Some(format!(
-                "{} — {} (m toggles)",
-                match &p.trigger {
-                    Trigger::Any => String::from("trigger: any note"),
-                    Trigger::Off => String::from("trigger: off (manual t / cycle only)"),
-                    Trigger::Source(a) => format!("trigger @{}", a),
-                },
-                if p.gate_mode { "gate: sustains until note off" } else { "trig: full rise→fall per note" }
-            )),
-            _ => None,
-        };
-        let status = match overlay {
-            Some(text) => text.to_string(),
-            None => detail.unwrap_or_else(|| {
-                format!(
-                    "Ch{}/{} | a/x add/remove ch | c cycle | t trig | o gate | @ bind | ? help",
-                    state.current_channel + 1,
-                    n
-                )
-            }),
-        };
-        let style = if overlay.is_some() {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default().fg(Color::Cyan)
-        };
-        f.render_widget(Paragraph::new(status).style(style), chunks[1]);
+        lines.push(theme::rule(w));
 
-        // Help overlay
+        // ── status ──────────────────────────────────────────────────────
+        let msg = overlay.map(|o| o.to_string()).unwrap_or_else(|| {
+            format!(
+                "a/x ±ch · c cyc · m {} · t fire · @ bind",
+                if p.gate_mode { "→trig" } else { "→gate" }
+            )
+        });
+        lines.push(theme::status("NORMAL", &msg, "", w));
+
+        f.render_widget(Paragraph::new(lines), area);
+
         if show_help {
-            let help_text = vec![
-                Line::from("━━━ Maths (envelope) Help ━━━"),
-                Line::from(""),
-                Line::from("Navigation:"),
-                Line::from("  [ / ]      Prev/next channel (counts)"),
-                Line::from("  gg / G     First / last channel"),
-                Line::from("  j/k        Select row   h/l adjust (H/L coarse)"),
-                Line::from(""),
-                Line::from("Rows: Rise, Fall (0=instant…25min), Shape"),
-                Line::from("  (log↔lin↔exp), Atten, Offset, Plck"),
-                Line::from("  (vactrol tail), Sig, Trig"),
-                Line::from(""),
-                Line::from("Actions:"),
-                Line::from("  a / x      Add / remove channel"),
-                Line::from("  c          Toggle cycle (loop) mode"),
-                Line::from("  m          Trig/gate per channel (trig ="),
-                Line::from("             full AD per note; gate sustains)"),
-                Line::from("  t          Trigger channel manually"),
-                Line::from("  o          Toggle gate on/off (sustain)"),
-                Line::from("  @          Bind row to a source (picker)"),
-                Line::from("             Sig row = slew input; Trig row"),
-                Line::from("             offers any-note / off / sources"),
-                Line::from("             (non-note source = edge trigger)"),
-                Line::from("  u / ^r     Undo / redo (counts)"),
-                Line::from("  :set rise 0|100ms|2s|1.5m  (also pluck)"),
-                Line::from("  :w/:e/:q   Patch save/load, quit"),
-                Line::from(""),
-                Line::from("Outputs: ch1..ch6, sum, or, and, inv,"),
-                Line::from("  eor (ch1), eoc (last ch) + audio out"),
-                Line::from(""),
-                Line::from("  space      Play/pause (global)"),
-                Line::from("  ?          Toggle this help"),
-            ];
+            let help_text = maths_help();
             let help = Paragraph::new(help_text)
-                .style(Style::default().fg(Color::White).bg(Color::Black))
+                .style(Style::default().fg(theme::ink()).bg(theme::bg()))
                 .block(Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Cyan))
-                    .title("Help"));
+                    .border_style(theme::chrome())
+                    .title(Span::styled(" MATHs ", theme::chrome_hi())));
             f.render_widget(help, area);
         }
 
-        // Source picker overlay (@)
         if let Some((rows, sel)) = picker {
             let h = (rows.len() as u16 + 2).min(area.height);
-            let w = rows.iter().map(|r| r.len()).max().unwrap_or(10).max(20) as u16 + 4;
+            let pw = rows.iter().map(|r| r.len()).max().unwrap_or(10).max(20) as u16 + 4;
             let r = ratatui::layout::Rect::new(
-                (area.width.saturating_sub(w)) / 2,
+                (area.width.saturating_sub(pw)) / 2,
                 (area.height.saturating_sub(h)) / 2,
-                w.min(area.width),
+                pw.min(area.width),
                 h,
             );
             f.render_widget(ratatui::widgets::Clear, r);
@@ -1019,25 +980,44 @@ fn draw_ui(
                 .iter()
                 .enumerate()
                 .map(|(i, row)| {
-                    let style = if i == sel {
-                        Style::default().fg(Color::Black).bg(Color::Yellow)
-                    } else {
-                        Style::default().fg(Color::White)
-                    };
+                    let style = if i == sel { theme::selected() } else { theme::value() };
                     ratatui::widgets::ListItem::new(row.clone()).style(style)
                 })
                 .collect();
             let list = ratatui::widgets::List::new(items).block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Yellow))
-                    .title("Bind source (Enter binds, x unbinds, Esc cancels)"),
+                    .border_style(theme::chrome())
+                    .title(Span::styled(" bind source ", theme::chrome_hi())),
             );
             f.render_widget(list, r);
         }
     })?;
 
     Ok(())
+}
+
+fn maths_help() -> Vec<Line<'static>> {
+    vec![
+        Line::from("━━━ MATHs ━━━"),
+        Line::from(""),
+        Line::from("  [/]  gg/G   Channel nav (counts)"),
+        Line::from("  j/k  h/l    Row select / adjust (H/L ×10)"),
+        Line::from("  a / x       Add / remove channel (≤6)"),
+        Line::from("  c           Cycle (loop) — CYC∞"),
+        Line::from("  m           Trig/gate per channel"),
+        Line::from("  t / o       Manual trigger / gate"),
+        Line::from("  @           Bind row (sig = slew input;"),
+        Line::from("              trig: any/off/track/edge)"),
+        Line::from("  u/^r        Undo/redo (counts)"),
+        Line::from("  :set rise 0|100ms|2s|1.5m · pluck · mode"),
+        Line::from("  :w/:e/:q    Patches / quit"),
+        Line::from(""),
+        Line::from("Rows: rise·fall 0→25min, shap log↔exp,"),
+        Line::from("  attn, offs, plck (vactrol), sig, trig"),
+        Line::from(""),
+        Line::from("  ? closes help"),
+    ]
 }
 
 // ── main loop ───────────────────────────────────────────────────────────────
@@ -1097,6 +1077,10 @@ pub fn run(instance: usize) -> Result<()> {
     let mut should_quit = false;
     // Global transport handle for Space = play/pause (lazily reopened)
     let mut transport_ui: Option<ShmTransport> = ShmTransport::open().ok();
+    // Live modbus reads for ghost markers on the current channel's gauges
+    let mut ui_modbus = ModulationBus::open().ok();
+    let mut ui_entries: Vec<crate::shm::ManifestEntry> = Vec::new();
+    let mut ui_refresh = 0u32;
 
     loop {
         if state::check_save_signal() {
@@ -1110,13 +1094,39 @@ pub fn run(instance: usize) -> Result<()> {
         }
 
         let current_state = state.lock().unwrap().clone();
+        // ghosts: live values of the current channel's mod bindings (§5)
+        if ui_refresh == 0 {
+            ui_refresh = 40;
+            ui_entries = Manifest::open().map(|m| m.entries()).unwrap_or_default();
+            if ui_modbus.is_none() {
+                ui_modbus = ModulationBus::open().ok();
+            }
+        }
+        ui_refresh -= 1;
+        let cur = current_state.current_channel.min(current_state.params.len() - 1);
+        let cp = &current_state.params[cur];
+        let live = |src: &Option<SourceAddr>| -> Option<f32> {
+            src.as_ref()
+                .and_then(|a| routing::resolve(&ui_entries, a))
+                .and_then(|ch| ui_modbus.as_ref().map(|m| m.get(ch)))
+        };
+        let ghosts = [
+            live(&cp.rise_src),
+            live(&cp.fall_src),
+            live(&cp.shape_src),
+            live(&cp.atten_src),
+        ];
+        let (bpm, playing) = transport_ui
+            .as_ref()
+            .map(|t| (t.bpm(), t.playing()))
+            .unwrap_or((120.0, false));
         let overlay = if ex.is_active() {
             Some(ex.display())
         } else {
             ex_msg.clone()
         };
         let picker_rows = if picker.is_active() { Some(picker.rows()) } else { None };
-        draw_ui(&mut terminal, &current_state, selected, show_help, overlay.as_deref(), picker_rows)?;
+        draw_ui(&mut terminal, &current_state, selected, show_help, overlay.as_deref(), picker_rows, &ghosts, bpm, playing)?;
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {

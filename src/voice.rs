@@ -10,10 +10,9 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Style},
+    style::Style,
     text::Line,
-    widgets::{Block, Borders, Gauge, Paragraph},
+    widgets::{Block, Borders, Paragraph},
     Terminal,
 };
 
@@ -263,6 +262,7 @@ fn voice_thread(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_ui(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &VoiceState,
@@ -270,162 +270,150 @@ fn draw_ui(
     show_help: bool,
     overlay: Option<&str>,
     picker: Option<(Vec<String>, usize)>,
+    ghosts: &[Option<f32>; 3],
+    instance: usize,
+    bpm: f32,
+    playing: bool,
 ) -> Result<()> {
+    use crate::theme;
+    use ratatui::text::Span;
+
     terminal.draw(|f| {
         let area = f.area();
-        
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),  // Shape
-                Constraint::Length(1),  // Sub
-                Constraint::Length(1),  // FM
-                Constraint::Length(1),  // Output
-                Constraint::Length(1),  // Amp binding
-                Constraint::Length(1),  // Notes binding
-                Constraint::Length(1),  // LPG amount
-                Constraint::Length(1),  // Level meter
-                Constraint::Min(0),
-                Constraint::Length(1),  // Status
-            ])
-            .split(area);
+        let w = area.width as usize;
+        let mut lines: Vec<Line> = Vec::new();
 
-        // Status
-        let gate_str = if state.gate { "●" } else { "○" };
-        let status = format!(
-            "{} {:.1} Hz | Output: {} | Env: {:.0}% | Vel: {:.0}% | Level: {:.0}%",
-            gate_str,
-            state.freq,
-            match state.output { 0 => "Main", 1 => "Main+Sub", _ => "Mix" },
-            state.level / state.velocity.max(0.001) * 100.0, // env = level / velocity
-            state.velocity * 100.0,
-            state.level * 100.0
-        );
-        let status_widget = Paragraph::new(status).style(Style::default().fg(Color::Cyan));
-        f.render_widget(status_widget, chunks[9]);
+        lines.push(theme::header(
+            "VOICE",
+            &instance.to_string(),
+            &theme::transport_echo(bpm, playing, None),
+            w,
+        ));
 
-        // Parameters (gauges show the @source when bound)
-        let src_label = |a: &Option<SourceAddr>| -> String {
-            a.as_ref().map(|a| format!(" @{}", a)).unwrap_or_default()
-        };
-        let param_srcs = [&state.shape_src, &state.sub_src, &state.fm_src];
-        let params = [
-            ("Shape", state.shape, selected == 0),
-            ("Sub", state.sub, selected == 1),
-            ("FM", state.fm, selected == 2),
-        ];
-
-        for (i, (name, value, is_selected)) in params.iter().enumerate() {
-            let style = if *is_selected {
-                Style::default().fg(Color::Yellow)
+        let gauge_w = (w.saturating_sub(22)).clamp(8, 24);
+        let label = |row: usize, name: &str| -> Span<'static> {
+            if row == selected {
+                Span::styled(format!(" {:<6}", name), theme::selected())
             } else {
-                Style::default().fg(Color::White)
-            };
+                Span::styled(format!(" {:<6}", name), theme::chrome())
+            }
+        };
 
-            let gauge = Gauge::default()
-                .gauge_style(style)
-                .ratio(*value as f64)
-                .label(format!("{}: {:.2}{}", name, value, src_label(param_srcs[i])));
-            f.render_widget(gauge, chunks[i]);
+        // value gauges with mod ghosts (§5)
+        let value_rows = [
+            (0usize, "shape", state.shape, &state.shape_src, ghosts[0]),
+            (1, "sub", state.sub, &state.sub_src, ghosts[1]),
+            (2, "fm", state.fm, &state.fm_src, ghosts[2]),
+        ];
+        for (row, name, set, src, ghost) in value_rows {
+            let mut spans = vec![label(row, name)];
+            spans.push(Span::styled(theme::gauge(set, ghost, gauge_w), theme::value()));
+            spans.push(Span::styled(format!(" {:.2}", set), theme::value()));
+            if let Some(a) = src {
+                spans.push(Span::styled(
+                    format!(" {}{}", theme::BIND, a.output),
+                    theme::signal(theme::cv()),
+                ));
+            }
+            lines.push(Line::from(spans));
         }
 
-        // Binding-only rows: amp (amplitude source) and notes (track filter)
-        let amp_text = format!(
-            "Amp:   {}",
-            state.amp_src.as_ref().map(|a| a.to_string()).unwrap_or_else(|| String::from("(unbound = 1.0)"))
-        );
-        let amp_style = if selected == 4 { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::White) };
-        f.render_widget(Paragraph::new(amp_text).style(amp_style), chunks[4]);
+        // output mode
+        lines.push(Line::from(vec![
+            label(3, "out"),
+            Span::styled(
+                match state.output {
+                    0 => "main",
+                    1 => "main+sub",
+                    _ => "mix",
+                }
+                .to_string(),
+                theme::value(),
+            ),
+        ]));
 
-        let notes_text = format!(
-            "Notes: {}",
-            state.notes_src.as_ref().map(|a| a.to_string()).unwrap_or_else(|| String::from("all tracks"))
-        );
-        let notes_style = if selected == 5 { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::White) };
-        f.render_widget(Paragraph::new(notes_text).style(notes_style), chunks[5]);
+        // binding rows (CV hue — these ARE the patch cables)
+        lines.push(Line::from(vec![
+            label(4, "amp"),
+            match &state.amp_src {
+                Some(a) => Span::styled(format!("{}{}", theme::BIND, a), theme::signal(theme::cv())),
+                None => Span::styled("unbound = 1.0".to_string(), theme::dim()),
+            },
+        ]));
+        lines.push(Line::from(vec![
+            label(5, "notes"),
+            match &state.notes_src {
+                Some(a) => Span::styled(format!("{}{}", theme::BIND, a), theme::signal(theme::note())),
+                None => Span::styled("all tracks".to_string(), theme::dim()),
+            },
+        ]));
 
-        // LPG amount (0 = plain VCA, 1 = vactrol-style low-pass gate)
-        let lpg_style = if selected == 6 { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::White) };
-        let lpg_gauge = Gauge::default()
-            .gauge_style(lpg_style)
-            .ratio(state.lpg as f64)
-            .label(format!("LPG: {:.2}{}", state.lpg, if state.lpg > 0.0 { " (vactrol)" } else { "" }));
-        f.render_widget(lpg_gauge, chunks[6]);
+        // LPG
+        lines.push(Line::from(vec![
+            label(6, "lpg"),
+            Span::styled(theme::gauge(state.lpg, None, gauge_w), theme::value()),
+            Span::styled(format!(" {:.2}", state.lpg), theme::value()),
+            Span::styled(
+                if state.lpg > 0.0 { " vactrol" } else { "" }.to_string(),
+                theme::signal(theme::audio()),
+            ),
+        ]));
 
-        // Output mode
-        let output_style = if selected == 3 {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default().fg(Color::White)
-        };
-        let output_text = format!(
-            "Output: [{}] Main  [{}] Main+Sub  [{}] Mix",
-            if state.output == 0 { "●" } else { "○" },
-            if state.output == 1 { "●" } else { "○" },
-            if state.output == 2 { "●" } else { "○" },
-        );
-        let output_widget = Paragraph::new(output_text).style(output_style);
-        f.render_widget(output_widget, chunks[3]);
+        lines.push(theme::rule(w));
 
-        // Level meter
-        let level_gauge = Gauge::default()
-            .gauge_style(Style::default().fg(Color::Green))
-            .ratio(state.level as f64)
-            .label(format!("Level: {:.0}%", state.level * 100.0));
-        f.render_widget(level_gauge, chunks[7]);
+        // live output line (AUDIO hue)
+        let gate = if state.gate { theme::GATE_HI } else { theme::GATE_LO };
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {} ", theme::AUDIO_GLYPH), theme::signal(theme::audio())),
+            Span::styled(
+                (0..8)
+                    .map(|i| theme::meter_char((state.level - i as f32 * 0.06).clamp(0.0, 1.0)))
+                    .collect::<String>(),
+                theme::signal(theme::audio()),
+            ),
+            Span::styled(
+                format!("  {:.0}Hz {} vel {:.0}%", state.freq, gate, state.velocity * 100.0),
+                theme::dim(),
+            ),
+        ]));
 
-        // Help overlay
+        lines.push(theme::rule(w));
+        lines.push(theme::status("NORMAL", overlay.unwrap_or(""), "", w));
+
+        f.render_widget(Paragraph::new(lines), area);
+
         if show_help {
             let help_text = vec![
-                Line::from("━━━ Voice Help ━━━"),
+                Line::from("━━━ VOICE ━━━"),
                 Line::from(""),
-                Line::from("Parameters:"),
-                Line::from("  j/k, ↑/↓  Select parameter"),
-                Line::from("  h/l, ←/→  Adjust value"),
-                Line::from("  H/L        Coarse adjust (10x)"),
-                Line::from("  #j/#l ...  Count prefix repeats"),
-                Line::from("  gg / G     First / last param"),
-                Line::from(""),
-                Line::from("Output row: Main / Main+Sub / Mix"),
-                Line::from("LPG row:    0=VCA, 1=vactrol low-pass gate"),
-                Line::from("            (amp env closes the filter too)"),
-                Line::from(""),
-                Line::from("Routing:"),
-                Line::from("  @          Bind selected param to a source (picker)"),
-                Line::from("  Amp row    Amplitude source (default env ch1)"),
-                Line::from("  Notes row  Which seq track's notes to play"),
-                Line::from(""),
-                Line::from("  u / ^r     Undo / redo (counts; sweeps coalesce)"),
-                Line::from("  :w/:e/:q   Patch save/load, quit (:x save+quit)"),
+                Line::from("  j/k h/l    Row / adjust (H/L ×10, counts)"),
+                Line::from("  gg / G     First / last row"),
+                Line::from("  @          Bind row to a source"),
+                Line::from("  amp row    Amplitude source (env ch1)"),
+                Line::from("  notes row  Which seq track to play"),
+                Line::from("  lpg row    0=VCA … 1=vactrol low-pass gate"),
+                Line::from("  u/^r       Undo / redo (counts)"),
+                Line::from("  :w/:e/:q   Patches / quit"),
                 Line::from("  space      Play/pause (global)"),
-                Line::from("  ?          Toggle this help"),
-                Line::from("  Close pane: tmux prefix + x"),
+                Line::from(""),
+                Line::from("  ? closes help"),
             ];
             let help = Paragraph::new(help_text)
-                .style(Style::default().fg(Color::White).bg(Color::Black))
+                .style(Style::default().fg(theme::ink()).bg(theme::bg()))
                 .block(Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Cyan))
-                    .title("Help"));
+                    .border_style(theme::chrome())
+                    .title(Span::styled(" VOICE ", theme::chrome_hi())));
             f.render_widget(help, area);
         }
 
-        if let Some(text) = overlay {
-            let r = ratatui::layout::Rect::new(0, area.height.saturating_sub(1), area.width, 1);
-            f.render_widget(
-                Paragraph::new(text.to_string()).style(Style::default().fg(Color::Yellow)),
-                r,
-            );
-        }
-
-        // Source picker overlay (@): list of live modulation sources
         if let Some((rows, sel)) = picker {
             let h = (rows.len() as u16 + 2).min(area.height);
-            let w = rows.iter().map(|r| r.len()).max().unwrap_or(10).max(20) as u16 + 4;
+            let pw = rows.iter().map(|r| r.len()).max().unwrap_or(10).max(20) as u16 + 4;
             let r = ratatui::layout::Rect::new(
-                (area.width.saturating_sub(w)) / 2,
+                (area.width.saturating_sub(pw)) / 2,
                 (area.height.saturating_sub(h)) / 2,
-                w.min(area.width),
+                pw.min(area.width),
                 h,
             );
             f.render_widget(ratatui::widgets::Clear, r);
@@ -433,19 +421,15 @@ fn draw_ui(
                 .iter()
                 .enumerate()
                 .map(|(i, row)| {
-                    let style = if i == sel {
-                        Style::default().fg(Color::Black).bg(Color::Yellow)
-                    } else {
-                        Style::default().fg(Color::White)
-                    };
+                    let style = if i == sel { theme::selected() } else { theme::value() };
                     ratatui::widgets::ListItem::new(row.clone()).style(style)
                 })
                 .collect();
             let list = ratatui::widgets::List::new(items).block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Yellow))
-                    .title("Bind source (Enter binds, x unbinds, Esc cancels)"),
+                    .border_style(theme::chrome())
+                    .title(Span::styled(" bind source ", theme::chrome_hi())),
             );
             f.render_widget(list, r);
         }
@@ -629,6 +613,10 @@ pub fn run(instance: usize) -> Result<()> {
     let mut patch_name: Option<String> = None;
     let mut baseline = state::to_toml_string(&snapshot_params(&state.lock().unwrap())).unwrap_or_default();
     let mut should_quit = false;
+    // Live modbus reads for gauge ghosts (§5)
+    let mut ui_modbus = ModulationBus::open().ok();
+    let mut ui_entries: Vec<crate::shm::ManifestEntry> = Vec::new();
+    let mut ui_refresh = 0u32;
 
     loop {
         // Check for save-on-signal
@@ -645,13 +633,35 @@ pub fn run(instance: usize) -> Result<()> {
         }
         
         let current_state = state.lock().unwrap().clone();
+        if ui_refresh == 0 {
+            ui_refresh = 40;
+            ui_entries = Manifest::open().map(|m| m.entries()).unwrap_or_default();
+            if ui_modbus.is_none() {
+                ui_modbus = ModulationBus::open().ok();
+            }
+        }
+        ui_refresh -= 1;
+        let live = |src: &Option<SourceAddr>| -> Option<f32> {
+            src.as_ref()
+                .and_then(|a| crate::routing::resolve(&ui_entries, a))
+                .and_then(|ch| ui_modbus.as_ref().map(|m| m.get(ch)))
+        };
+        let ghosts = [
+            live(&current_state.shape_src),
+            live(&current_state.sub_src),
+            live(&current_state.fm_src),
+        ];
+        let (bpm, playing) = transport_ui
+            .as_ref()
+            .map(|t| (t.bpm(), t.playing()))
+            .unwrap_or((120.0, false));
         let overlay = if ex.is_active() {
             Some(ex.display())
         } else {
             ex_msg.clone()
         };
         let picker_rows = if picker.is_active() { Some(picker.rows()) } else { None };
-        draw_ui(&mut terminal, &current_state, selected, show_help, overlay.as_deref(), picker_rows)?;
+        draw_ui(&mut terminal, &current_state, selected, show_help, overlay.as_deref(), picker_rows, &ghosts, instance, bpm, playing)?;
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {

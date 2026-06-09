@@ -84,6 +84,29 @@ fn breathe_row(row: &str, phase: f32, energy: f32, row_idx: usize, mood: Mood) -
     }
 }
 
+/// Deterministic sparse artifact field: tiny dim specks drifting slowly up
+/// and to the right behind the mark — dust in the phosphor. Density scales
+/// with energy so a stopped session's background goes still and empty.
+fn artifact_at(x: u16, y: u16, frame: u32, energy: f32) -> Option<char> {
+    // drift: the field scrolls as frame advances
+    let fx = x as u32 + frame / 6;
+    let fy = y as u32 + frame / 24;
+    // cheap integer hash
+    let mut h = fx.wrapping_mul(374_761_393) ^ fy.wrapping_mul(668_265_263);
+    h = (h ^ (h >> 13)).wrapping_mul(1_274_126_177);
+    let v = (h >> 17) % 1000;
+    let density = (8.0 + 22.0 * energy) as u32; // ~0.8%..3% of cells
+    if v < density {
+        Some(match v % 3 {
+            0 => '·',
+            1 => '░',
+            _ => '∙',
+        })
+    } else {
+        None
+    }
+}
+
 /// Most recent save-state name, for the readout line.
 fn session_name() -> String {
     std::fs::read_dir(state::states_dir())
@@ -129,6 +152,7 @@ pub fn run(instance: usize) -> Result<()> {
 
     let mut transport: Option<ShmTransport> = ShmTransport::open().ok();
     let mut mood = Mood::Breathe;
+    let mut frame: u32 = 0;
     // energy eases toward 1 when playing, 0 when stopped (the sleep rule)
     let mut energy = 0.0f32;
     let mut name = session_name();
@@ -160,6 +184,7 @@ pub fn run(instance: usize) -> Result<()> {
             0.0
         };
 
+        frame = frame.wrapping_add(1);
         terminal.draw(|f| {
             let area = f.area();
             let logo_style = if energy > 0.05 {
@@ -167,13 +192,21 @@ pub fn run(instance: usize) -> Result<()> {
             } else {
                 theme::dim()
             };
-            let mut lines: Vec<Line> = Vec::with_capacity(LOGO.len() + 2);
-            // vertical centering
-            let pad_top = area.height.saturating_sub(LOGO.len() as u16 + 2) / 2;
-            for _ in 0..pad_top {
-                lines.push(Line::from(""));
+
+            // background: drifting phosphor dust (dim, behind everything)
+            let mut dust: Vec<Line> = Vec::with_capacity(area.height as usize);
+            for y in 0..area.height {
+                let row: String = (0..area.width)
+                    .map(|x| artifact_at(x, y, frame, energy).unwrap_or(' '))
+                    .collect();
+                dust.push(Line::from(Span::styled(row, theme::dim())));
             }
-            let pad_left = " ".repeat((area.width.saturating_sub(14) / 2) as usize);
+            f.render_widget(Paragraph::new(dust), area);
+
+            // the mark + readout, centered, over the dust
+            let pad_top = area.height.saturating_sub(LOGO.len() as u16 + 2) / 2;
+            let pad_left = " ".repeat((area.width.saturating_sub(17) / 2) as usize);
+            let mut lines: Vec<Line> = Vec::with_capacity(LOGO.len() + 2);
             for (i, row) in LOGO.iter().enumerate() {
                 let textured = breathe_row(row, phase, energy, i, mood);
                 lines.push(Line::from(vec![
@@ -181,9 +214,15 @@ pub fn run(instance: usize) -> Result<()> {
                     Span::styled(textured, logo_style),
                 ]));
             }
+            // downbeat accent: the underline flares on the first 10% of the beat
+            let downbeat = playing && phase < 0.10;
             lines.push(Line::from(Span::styled(
-                format!("{}─────────────", pad_left),
-                Style::default().fg(theme::amber()),
+                format!("{}{}", pad_left, "─".repeat(17)),
+                if downbeat {
+                    Style::default().fg(theme::amber_hi())
+                } else {
+                    Style::default().fg(theme::amber())
+                },
             )));
             lines.push(Line::from(vec![
                 Span::raw(pad_left.clone()),
@@ -194,7 +233,13 @@ pub fn run(instance: usize) -> Result<()> {
                     theme::signal(theme::clock()),
                 ),
             ]));
-            f.render_widget(Paragraph::new(lines), area);
+            let logo_area = ratatui::layout::Rect::new(
+                area.x,
+                area.y + pad_top,
+                area.width,
+                (LOGO.len() as u16 + 2).min(area.height.saturating_sub(pad_top)),
+            );
+            f.render_widget(Paragraph::new(lines), logo_area);
         })?;
 
         if event::poll(Duration::from_millis(80))? {

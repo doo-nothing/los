@@ -255,22 +255,24 @@ fn draw_ui(
             ])
             .split(area);
 
-        // Param list rendered as one status line; the selected row is
-        // bracketed (j/k select, h/l adjust, H/L coarse)
-        let status = (0..NUM_ROWS)
-            .map(|row| {
-                let text = row_display(state, row);
-                if row == state.selected {
-                    format!("[{}]", text)
-                } else {
-                    format!(" {} ", text)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("|");
+        // Param list as one status line, theme anatomy: selected row inverse
+        use ratatui::text::Span;
         let status_widget = match overlay {
-            Some(text) => Paragraph::new(text.to_string()).style(Style::default().fg(Color::Yellow)),
-            None => Paragraph::new(status).style(Style::default().fg(Color::Cyan)),
+            Some(text) => Paragraph::new(Span::styled(text.to_string(), crate::theme::value())),
+            None => {
+                let mut spans: Vec<Span> = vec![Span::styled("SCOPE ", crate::theme::chrome_hi())];
+                for row in 0..NUM_ROWS {
+                    let text = row_display(state, row);
+                    let style = if row == state.selected {
+                        crate::theme::selected()
+                    } else {
+                        crate::theme::chrome()
+                    };
+                    spans.push(Span::styled(text, style));
+                    spans.push(Span::raw(" "));
+                }
+                Paragraph::new(ratatui::text::Line::from(spans))
+            }
         };
         f.render_widget(status_widget, chunks[1]);
 
@@ -300,7 +302,7 @@ fn draw_ui(
         let datasets = vec![Dataset::default()
             .marker(marker)
             .graph_type(GraphType::Line)
-            .style(Style::default().fg(Color::Green))
+            .style(crate::theme::signal(crate::theme::audio()))
             .data(&data)];
 
         let chart = Chart::new(datasets)
