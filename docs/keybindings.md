@@ -39,24 +39,25 @@ Status markers: **✅ today** · **🔜 v1** (see `docs/plans/v1-polish.md`) ·
 ## Sequencer
 
 Modes: **normal** (operators, track ops, transport), **insert** (direct step
-entry/tuning), **visual** 🔜, **operator-pending** 🔜, **ex** 🔜.
+entry/tuning), **visual** / **visual-line** (`v`/`V`; visual-line covers the
+current track only in v1), **operator-pending**, **ex**. All ✅.
 
 ### Motions (normal, insert, visual, after operators)
 
 | Key | Motion | Status |
 |-----|--------|--------|
 | `h` / `l` | step left / right (counts) | ✅ |
-| `w` | start of next word | ✅ (today: next active step — refined to true word-start 🔜) |
-| `b` | start of current/previous word | ✅ (same refinement 🔜) |
-| `e` | end of current/next word | 🔜 |
+| `w` | start of next word | ✅ |
+| `b` | start of current/previous word | ✅ |
+| `e` | end of current/next word | ✅ |
 | `0` / `$` | first / last step | ✅ |
-| `f#` | to step # (inclusive under an operator) | 🔜 (replaces insert-mode `gt#`) |
-| `t#` | till step # (exclusive under an operator) | 🔜 (needs BPM moved to `:set bpm`) |
+| `f#` | to step # (inclusive under an operator) | ✅ |
+| `t#` | till step # (exclusive under an operator) | ✅ |
 | `j` / `k` | next / previous track (normal mode; counts) | ✅ |
 | `gg` / `G` | first / last track (normal); first step (insert) | ✅ |
-| `gt#` | go to track # | ✅ |
+| `gt#` | go to track # (both modes) | ✅ |
 
-### Operators (normal & visual modes) 🔜
+### Operators (normal & visual modes) ✅
 
 | Form | Action |
 |------|--------|
@@ -69,11 +70,11 @@ entry/tuning), **visual** 🔜, **operator-pending** 🔜, **ex** 🔜.
 
 | Key | Action | Status |
 |-----|--------|--------|
-| `x` | cut current step into register (normal + insert) | ✅ insert · 🔜 normal |
+| `x` | cut current step into register (normal + insert) | ✅ |
 | `y` | yank current step (insert mode; in normal mode `y` is the operator) | ✅ |
-| `p` | paste register at cursor — steps **overwrite** from cursor (fixed 16-slot grid, no shifting); a track **inserts after** current | ✅ insert (step) · 🔜 unified |
-| `P` | paste before — track inserts before current; step range overwrites ending at cursor | 🔜 |
-| `#p` | paste # times (vi idiom) | 🔜 |
+| `p` | paste register at cursor — steps **overwrite** from cursor (fixed 16-slot grid, no shifting); a track **inserts after** current | ✅ |
+| `P` | paste before — track inserts before current; step range overwrites ending at cursor | ✅ |
+| `#p` | paste # times (vi idiom) | ✅ |
 
 > **The `#P` quirk:** counted `#P` / `#L` / `#R` set Euclidean
 > pulses/length/rotation (los idiom) and do **not** mean "paste # times
@@ -85,7 +86,7 @@ entry/tuning), **visual** 🔜, **operator-pending** 🔜, **ex** 🔜.
 | Key | Action | Status |
 |-----|--------|--------|
 | `Enter` / `Space` | toggle step | ✅ |
-| `~` | toggle step (normal mode, vi case-toggle analog) | 🔜 |
+| `~` | toggle step (normal mode; flips each step of a visual selection) | ✅ |
 | `k` / `j` | note +1 / −1 semitone (or mod value ±0.01) | ✅ |
 | `K` / `J` | note +1 / −1 octave (or mod value ±0.1) | ✅ |
 | `N<num>` | set MIDI note directly | ✅ |
@@ -94,15 +95,15 @@ entry/tuning), **visual** 🔜, **operator-pending** 🔜, **ex** 🔜.
 
 | Key | Action | Status |
 |-----|--------|--------|
-| `o` / `O` | new track after / before current | 🔜 (`n` appends-at-end today; dies or aliases `o`) |
+| `o` / `O` | new track after / before current (`n` = alias of `o`) | ✅ |
 | `dd` / `yy` / `P`/`p` | delete / yank / paste track | ✅ (register-unified 🔜) |
 | `m` | toggle mute | ✅ |
 | `@` | track mode / routing (becomes source picker) | ✅ → 🔜 |
-| `>>` / `<<` | rotate pattern right / left by 1 (counts: `3>>`) | 🔜 |
+| `>>` / `<<` | rotate the actual step pattern right / left (counts: `3>>`); preserves hand-edits, unlike Euclid `R` | ✅ |
 | `#P` / `#L` / `#R` | Euclidean pulses / length / rotation | ✅ |
 | `P`/`L`/`R` (insert, bare) | re-apply / clamp / rotate+1 | ✅ |
 
-### Editing power 🔜
+### Editing power ✅
 
 | Key | Action |
 |-----|--------|
