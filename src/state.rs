@@ -243,6 +243,12 @@ pub struct ScopeParams {
     pub channel: Option<usize>,
     pub zoom: Option<f32>,
     pub gain: Option<f32>,
+    #[serde(default)]
+    pub source: Option<usize>,
+    #[serde(default)]
+    pub modbus_channel: Option<usize>,
+    #[serde(default)]
+    pub trigger_level: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -556,6 +562,7 @@ mod patch_tests {
             channel: Some(1),
             zoom: Some(3.5),
             gain: Some(0.7),
+            ..Default::default()
         };
         save_patch(name, &params).expect("save patch");
         let loaded: ScopeParams = load_patch(name).expect("load patch");
