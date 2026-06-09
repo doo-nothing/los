@@ -200,6 +200,31 @@ fn capitalize(s: &str) -> String {
     }
 }
 
+/// Adjust the level of the selected strip (track or master, doctrine steps).
+fn adjust_level(s: &mut MixerInner, steps: i32, coarse: bool) {
+    use crate::keys::step_f32;
+    let sel = s.selected;
+    if sel < s.tracks.len() {
+        s.tracks[sel].level = step_f32(s.tracks[sel].level, steps, 0.05, coarse, 0.0, 1.0);
+    } else {
+        s.master = step_f32(s.master, steps, 0.05, coarse, 0.0, 1.0);
+    }
+}
+
+/// Pan the selected track (no-op on the master strip).
+fn adjust_pan(s: &mut MixerInner, steps: i32) {
+    let sel = s.selected;
+    if sel < s.tracks.len() {
+        s.tracks[sel].pan = crate::keys::step_f32(s.tracks[sel].pan, steps, 0.1, false, -1.0, 1.0);
+    }
+}
+
+/// Move the strip selection (wraps; the slot after the last track is master).
+fn select_strip(s: &mut MixerInner, delta: i32) {
+    let n = s.tracks.len() + 1;
+    s.selected = crate::keys::cycle(s.selected, delta, n);
+}
+
 fn draw_ui(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     tracks: &[TrackState],
@@ -273,9 +298,11 @@ fn draw_ui(
             let help_text = vec![
                 Line::from("Mixer Help"),
                 Line::from(""),
-                Line::from("  h/l, /  Select track/master"),
-                Line::from("  j/k, /   Level up/down"),
-                Line::from("  +/-       Pan left/right"),
+                Line::from("  h/l       Select track/master (counts)"),
+                Line::from("  j/k       Level down/up"),
+                Line::from("  J/K       Coarse level (10x)"),
+                Line::from("  < / >     Pan left/right"),
+                Line::from("  gg / G    First track / master"),
                 Line::from("  m         Toggle mute"),
                 Line::from("  s         Toggle solo"),
                 Line::from("  space      Play/pause (global)"),
@@ -343,6 +370,8 @@ pub fn run() -> Result<()> {
     });
 
     let mut show_help = false;
+    let mut count = crate::keys::Count::default();
+    let mut pending_g = false;
     // Global transport handle for Space = play/pause (lazily reopened)
     let mut transport_ui: Option<ShmTransport> = ShmTransport::open().ok();
 
@@ -391,6 +420,9 @@ pub fn run() -> Result<()> {
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
+                if !matches!(key.code, KeyCode::Char('g')) {
+                    pending_g = false;
+                }
                 if key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL {
                     let s = inner.lock().unwrap();
                     let params = state::MixerParams {
@@ -407,49 +439,47 @@ pub fn run() -> Result<()> {
                     continue;
                 }
                 match key.code {
+                    KeyCode::Char(c) if c.is_ascii_digit() && count.push(c) => {}
                     KeyCode::Char('h') | KeyCode::Left => {
-                        let mut s = inner.lock().unwrap();
-                        let max = s.tracks.len();
-                        s.selected = if s.selected == 0 { max } else { s.selected.saturating_sub(1) };
+                        select_strip(&mut inner.lock().unwrap(), -(count.take() as i32));
                     }
                     KeyCode::Char('l') | KeyCode::Right => {
-                        let mut s = inner.lock().unwrap();
-                        let max = s.tracks.len();
-                        s.selected = if s.selected >= max { 0 } else { s.selected + 1 };
+                        select_strip(&mut inner.lock().unwrap(), count.take() as i32);
                     }
                     KeyCode::Char('j') | KeyCode::Down => {
-                        let mut s = inner.lock().unwrap();
-                        let sel = s.selected;
-                        if sel < s.tracks.len() {
-                            s.tracks[sel].level = (s.tracks[sel].level - 0.05).max(0.0);
-                        } else {
-                            s.master = (s.master - 0.05).max(0.0);
-                        }
+                        adjust_level(&mut inner.lock().unwrap(), -(count.take() as i32), false);
                     }
                     KeyCode::Char('k') | KeyCode::Up => {
-                        let mut s = inner.lock().unwrap();
-                        let sel = s.selected;
-                        if sel < s.tracks.len() {
-                            s.tracks[sel].level = (s.tracks[sel].level + 0.05).min(1.0);
+                        adjust_level(&mut inner.lock().unwrap(), count.take() as i32, false);
+                    }
+                    KeyCode::Char('J') => {
+                        adjust_level(&mut inner.lock().unwrap(), -(count.take() as i32), true);
+                    }
+                    KeyCode::Char('K') => {
+                        adjust_level(&mut inner.lock().unwrap(), count.take() as i32, true);
+                    }
+                    KeyCode::Char('<') | KeyCode::Char(',') => {
+                        adjust_pan(&mut inner.lock().unwrap(), -(count.take() as i32));
+                    }
+                    KeyCode::Char('>') | KeyCode::Char('.') => {
+                        adjust_pan(&mut inner.lock().unwrap(), count.take() as i32);
+                    }
+                    KeyCode::Char('g') => {
+                        count.clear();
+                        if pending_g {
+                            pending_g = false;
+                            inner.lock().unwrap().selected = 0;
                         } else {
-                            s.master = (s.master + 0.05).min(1.0);
+                            pending_g = true;
                         }
                     }
-                    KeyCode::Char('+') | KeyCode::Char('=') => {
+                    KeyCode::Char('G') => {
+                        count.clear();
                         let mut s = inner.lock().unwrap();
-                        let sel = s.selected;
-                        if sel < s.tracks.len() {
-                            s.tracks[sel].pan = (s.tracks[sel].pan + 0.1).min(1.0);
-                        }
-                    }
-                    KeyCode::Char('-') => {
-                        let mut s = inner.lock().unwrap();
-                        let sel = s.selected;
-                        if sel < s.tracks.len() {
-                            s.tracks[sel].pan = (s.tracks[sel].pan - 0.1).max(-1.0);
-                        }
+                        s.selected = s.tracks.len(); // master strip
                     }
                     KeyCode::Char('m') => {
+                        count.clear();
                         let mut s = inner.lock().unwrap();
                         let sel = s.selected;
                         if sel < s.tracks.len() {
@@ -457,6 +487,7 @@ pub fn run() -> Result<()> {
                         }
                     }
                     KeyCode::Char('s') => {
+                        count.clear();
                         let mut s = inner.lock().unwrap();
                         let sel = s.selected;
                         if sel < s.tracks.len() {
@@ -472,11 +503,73 @@ pub fn run() -> Result<()> {
                         }
                     }
                     KeyCode::Char('?') => {
+                        count.clear();
                         show_help = !show_help;
                     }
-                    _ => {}
+                    _ => {
+                        count.clear();
+                    }
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mixer_with_tracks(n: usize) -> MixerInner {
+        MixerInner {
+            tracks: (0..n)
+                .map(|i| TrackState {
+                    name: format!("T{}", i),
+                    level: 0.8,
+                    pan: 0.0,
+                    mute: false,
+                    solo: false,
+                    meter: 0.0,
+                })
+                .collect(),
+            audio_sources: vec![],
+            master: 0.8,
+            master_meter: 0.0,
+            selected: 0,
+            scope_rb: None,
+        }
+    }
+
+    #[test]
+    fn select_wraps_through_master() {
+        let mut s = mixer_with_tracks(2);
+        select_strip(&mut s, 1);
+        assert_eq!(s.selected, 1);
+        select_strip(&mut s, 1);
+        assert_eq!(s.selected, 2, "slot after last track is master");
+        select_strip(&mut s, 1);
+        assert_eq!(s.selected, 0, "wraps to first track");
+        select_strip(&mut s, -1);
+        assert_eq!(s.selected, 2, "wraps backward to master");
+    }
+
+    #[test]
+    fn level_adjust_targets_selected_or_master() {
+        let mut s = mixer_with_tracks(2);
+        adjust_level(&mut s, -2, false);
+        assert!((s.tracks[0].level - 0.7).abs() < 1e-6);
+        s.selected = 2; // master
+        adjust_level(&mut s, 1, true);
+        assert_eq!(s.master, 1.0, "coarse step clamps at 1.0");
+        assert!((s.tracks[1].level - 0.8).abs() < 1e-6, "tracks untouched");
+    }
+
+    #[test]
+    fn pan_clamps_and_skips_master() {
+        let mut s = mixer_with_tracks(1);
+        adjust_pan(&mut s, -100);
+        assert_eq!(s.tracks[0].pan, -1.0);
+        s.selected = 1; // master has no pan
+        adjust_pan(&mut s, 5);
+        assert_eq!(s.tracks[0].pan, -1.0, "master pan is a no-op");
     }
 }
