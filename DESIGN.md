@@ -314,6 +314,10 @@ Total size: 64 bytes
 **Protocol rules:**
 - Mixer advances `clock` by `frames per callback` each audio cycle.
 - `playing` flag: bit 0 set = transport is running. Other bits reserved (must be 0).
+- The play flag is global state: any module (Space key), the sequencer
+  (Space/s), or `los ctl` may write it. The sequencer treats it as the source
+  of truth and mirrors it into its UI state; it gates step events, not the
+  audio clock.
 - Readers poll `clock` and `playing` with acquire fence on the `clock` read.
 - Voices compare their generated-frame count against `clock` to pace adaptive sleep.
 

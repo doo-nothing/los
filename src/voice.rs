@@ -323,6 +323,7 @@ fn draw_ui(
                 Line::from("Track assignment:"),
                 Line::from("  @#         Assign selected param to track # (1-8, 0=off)"),
                 Line::from(""),
+                Line::from("  space      Play/pause (global)"),
                 Line::from("  ?          Toggle this help"),
                 Line::from("  Close pane: tmux prefix + x"),
             ];
@@ -391,6 +392,8 @@ pub fn run(instance: usize) -> Result<()> {
 
     let mut selected = 0usize;
     let mut show_help = false;
+    // Global transport handle for Space = play/pause (lazily reopened)
+    let mut transport_ui: Option<ShmTransport> = ShmTransport::open().ok();
     let mut at_pending = false;
 
     loop {
@@ -516,6 +519,14 @@ pub fn run(instance: usize) -> Result<()> {
                     KeyCode::Char('3') => {
                         let mut s = state.lock().unwrap();
                         s.output = 2;
+                    }
+                    KeyCode::Char(' ') => {
+                        if transport_ui.is_none() {
+                            transport_ui = ShmTransport::open().ok();
+                        }
+                        if let Some(ref mut t) = transport_ui {
+                            t.toggle_playing();
+                        }
                     }
                     KeyCode::Char('?') => {
                         show_help = !show_help;

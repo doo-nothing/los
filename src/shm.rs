@@ -458,6 +458,25 @@ impl ShmTransport {
         flags & 1 != 0
     }
 
+    /// Set the global play flag (bit 0 of flags; other bits preserved).
+    pub fn set_playing(&mut self, playing: bool) {
+        let mut flags: u32 = unsafe { ptr::read_unaligned(self.ptr.add(12) as *const u32) };
+        if playing {
+            flags |= 1;
+        } else {
+            flags &= !1;
+        }
+        compiler_fence(Ordering::Release);
+        unsafe { ptr::write_unaligned(self.ptr.add(12) as *mut u32, flags) };
+    }
+
+    /// Flip the global play flag, returning the new state.
+    pub fn toggle_playing(&mut self) -> bool {
+        let new = !self.playing();
+        self.set_playing(new);
+        new
+    }
+
     pub fn add_clock_frames(&mut self, frames: u64) {
         let cur = self.clock();
         self.set_clock(cur + frames);
@@ -1252,6 +1271,23 @@ mod shm_tests {
                 "{name} would clobber a live session's SHM"
             );
         }
+    }
+
+    #[test]
+    fn transport_play_flag_shared_across_handles() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ = unsafe { libc::shm_unlink(CString::new(SHM_TRANSPORT_NAME).unwrap().as_ptr()) };
+
+        let owner = ShmTransport::create(48000).expect("create transport");
+        assert!(owner.playing(), "transport should default to playing");
+
+        // A second handle (another process in real life) toggles the flag
+        let mut other = ShmTransport::open().expect("open transport");
+        assert!(!other.toggle_playing(), "toggle from playing should return stopped");
+        assert!(!owner.playing(), "owner must see the stop");
+
+        other.set_playing(true);
+        assert!(owner.playing(), "owner must see play again");
     }
 
     #[test]

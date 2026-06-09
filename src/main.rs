@@ -1,5 +1,23 @@
 use anyhow::Result;
-use los::{conductor, voice, sequencer, mixer, scope, envelope, tone, state};
+use los::{conductor, voice, sequencer, mixer, scope, envelope, tone, shm, state};
+
+/// `los ctl <action>` — control the global transport from any shell
+/// (used by the tmux prefix bindings; also handy for scripting).
+fn ctl(action: &str) -> Result<()> {
+    let mut t = shm::ShmTransport::open()
+        .map_err(|_| anyhow::anyhow!("no los transport found — is a session running?"))?;
+    match action {
+        "play" => t.set_playing(true),
+        "stop" => t.set_playing(false),
+        "toggle" => {
+            t.toggle_playing();
+        }
+        "status" => {}
+        _ => anyhow::bail!("Usage: los ctl [play|stop|toggle|status]"),
+    }
+    println!("{}", if t.playing() { "playing" } else { "stopped" });
+    Ok(())
+}
 
 fn most_recent_save() -> Option<std::path::PathBuf> {
     let states_dir = state::states_dir();
@@ -30,6 +48,7 @@ fn usage() {
     eprintln!("  los <module> [instance]       Run a module directly (independent pane)");
     eprintln!("  los load <state-file.toml>    Load a saved session state");
     eprintln!("  los <state-file.toml>         Same as 'load'");
+    eprintln!("  los ctl [play|stop|toggle|status]  Control the global transport");
     eprintln!("  los --help                    Show this help");
     eprintln!();
     eprintln!("Modules:");
@@ -84,6 +103,7 @@ fn main() -> Result<()> {
                 }
                 conductor::load_session(&path)
             }
+            "ctl" => ctl(args.get(2).map(|s| s.as_str()).unwrap_or("toggle")),
             _ if args[1].ends_with(".toml") => {
                 conductor::load_session(&args[1])
             }

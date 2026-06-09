@@ -21,13 +21,17 @@ los
 Creates a `tmux` session with all modules in tiled panes, attaches you to it.
 Use `Ctrl-b` arrows to navigate panes.
 
-### Global commands (via `Ctrl-b` prefix)
+### Global transport
 
 | Key | Action |
 |-----|--------|
-| `Ctrl-b p` | Play |
+| `Space` | Play/pause (in any module pane; sequencer insert mode keeps Space = toggle step) |
+| `Ctrl-b p` | Play/pause (tmux prefix, works from any pane) |
 | `Ctrl-b s` | Stop |
-| `Ctrl-b q` | Quit |
+| `los ctl play\|stop\|toggle\|status` | Control transport from any shell |
+
+The prefix bindings only take effect inside the `los` session — in other tmux
+sessions `Ctrl-b p`/`Ctrl-b s` keep their stock behavior.
 
 ### Module commands
 
