@@ -185,6 +185,8 @@ pub struct VoiceParams {
     pub amp_src: Option<String>,
     #[serde(default)]
     pub notes_src: Option<String>,
+    #[serde(default)]
+    pub lpg: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -270,6 +272,8 @@ pub struct EnvelopeChannelParams {
     pub attenuverter: f32,
     #[serde(default)]
     pub offset: f32,
+    #[serde(default)]
+    pub pluck: f32,
     // Source-address bindings (state format v2)
     #[serde(default)]
     pub signal_src: Option<String>,
@@ -294,6 +298,7 @@ impl Default for EnvelopeChannelParams {
             loop_mode: false,
             attenuverter: 1.0,
             offset: 0.0,
+            pluck: 0.0,
             signal_src: None,
             trigger_src: None,
             rise_src: None,

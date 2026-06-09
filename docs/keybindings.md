@@ -138,6 +138,9 @@ Requires a per-module dirty flag (changed since last save) for `:q` vs `:q!`.
 ## Other modules (current → v1)
 
 ### Voice
+Rows: Shape, Sub, FM, Output, Amp, Notes, LPG (0 = plain VCA, 1 = vactrol
+low-pass gate: the amp envelope closes a tracking filter as it closes the
+gate — amplitude and brightness fall together).
 `j/k` select param · `h/l` adjust · `H/L` coarse · counts · `gg/G` (✅) ·
 `1/2/3` output shortcuts removed — digits are counts ·
 `@` source picker on bindable rows · new rows: `notes` (which seq track's
@@ -146,14 +149,14 @@ notes to play; unbound = all) and `amp` (amplitude source, default
 
 ### Envelope / Maths
 Maths-style panel: one column per channel + a logic column (SUM/OR/AND/INV,
-EOR/EOC, live meters). Rows: Rise, Fall (0.5ms–25min), Shape (log↔lin↔exp),
-Atten, Offset, Sig (slew input), Trig.
+EOR/EOC, live meters). Rows: Rise, Fall (0 = instant … 25min), Shape (log↔lin↔exp, τ±9),
+Atten, Offset, Plck (vactrol snap+ring decay), Sig (slew input), Trig.
 `j/k` select row · `h/l` adjust · `H/L` coarse · `[`/`]` channel (counts) ·
 `gg/G` first/last channel · `a`/`x` add/remove channel (up to 6) ·
 `t` manual trigger · `c` cycle · `o` gate · `@` bind row (Trig row offers
 — any note — / — off — / sources; a non-note source = rising-edge trigger,
-e.g. `envelope/0/eoc` for self-patching) · `:set rise 100ms|2s|1.5m|0.42`
-(also fall/shape/atten/offset) · `:` · undo (all ✅)
+e.g. `envelope/0/eoc` for self-patching) · `:set rise 0|100ms|2s|1.5m|0.42`
+(also fall/shape/atten/offset/pluck) · `:` · undo (all ✅)
 
 ### Mixer
 `h/l` select channel (counts) · `j/k` level down/up · `J/K` coarse ·
