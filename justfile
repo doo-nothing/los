@@ -42,12 +42,12 @@ demo: build
     fi
     # mux the tape: first pluck in the wav aligns to video t=3.0
     onset=$(ffmpeg -i /tmp/los_tape.wav -af silencedetect=noise=-45dB:d=0.2 -f null - 2>&1 \
-        | grep -m1 silence_end | sed 's/.*silence_end: \([0-9.]*\).*/\1/'); \
-    onset=$${onset:-6.5}; \
-    start=$(echo "$$onset - 3.0" | bc); \
-    echo "audio onset $${onset}s -> trim $${start}s"; \
+        | awk '/silence_end/ && $8 >= 2.0 {print $5; exit}'); \
+    onset=${onset:-6.5}; \
+    start=$(echo "$onset - 3.0" | bc); \
+    echo "audio onset ${onset}s -> trim ${start}s"; \
     ffmpeg -y -loglevel error -ss 2.4 -i docs/demo-raw.mp4 \
-        -ss "$$(echo "$$start + 2.4" | bc)" -i /tmp/los_tape.wav \
+        -ss "$(echo "$start + 2.4" | bc)" -i /tmp/los_tape.wav \
         -map 0:v -map 1:a -c:v libx264 -crf 24 -pix_fmt yuv420p \
         -c:a aac -b:a 160k -movflags +faststart -shortest docs/demo.mp4
     rm -f docs/demo-raw.mp4
