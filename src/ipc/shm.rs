@@ -551,6 +551,14 @@ impl AudioEvent {
 
     pub fn note_on_source(note: u8, velocity: u8, source: u8, step: u32) -> Self {
         let freq = 440.0 * 2.0f32.powf((note as f32 - 69.0) / 12.0);
+        Self::note_on_hz(freq, velocity, source, step)
+    }
+
+    /// Note-on with an explicit frequency — the microtonal path (scaled
+    /// sequencer tracks compute Hz through the cents engine). Same wire
+    /// layout as [`AudioEvent::note_on_source`]; note-offs match by
+    /// source, so no note id is needed here.
+    pub fn note_on_hz(freq: f32, velocity: u8, source: u8, step: u32) -> Self {
         Self {
             event_type: EVENT_NOTE_ON,
             source,

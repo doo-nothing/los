@@ -30,17 +30,51 @@ const NUM_STEPS: usize = 128;
 /// follows (the geometry tests pin the relationship).
 pub const CONTENT_LINES: usize = crate::NUM_TRACKS + 7;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Per-step mod-in binding: `source`'s live modbus value offsets `target`
+/// at trigger time, scaled by `amount` (docs/plans/sequencer-v2.md §5).
+#[derive(Debug, Clone, PartialEq)]
+struct StepBind {
+    target: state::BindTarget,
+    source: String,
+    amount: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 struct Step {
     active: bool,
+    /// MIDI note on unscaled tracks; scale degree biased at 60 when the
+    /// track has a scale (60 = root, 61 = one degree up, …).
     note: u8,
     velocity: u8,
     mod_value: f32,
+    /// Trigger probability 0–100.
+    prob: u8,
+    bind: Option<StepBind>,
 }
 
 impl Default for Step {
     fn default() -> Self {
-        Self { active: false, note: 60, velocity: 100, mod_value: 0.0 }
+        Self { active: false, note: 60, velocity: 100, mod_value: 0.0, prob: 100, bind: None }
+    }
+}
+
+/// Number of pattern slots per track (`a`–`h`).
+const NUM_SLOTS: usize = 8;
+
+/// One pattern: what `"a`–`"h` switch between. The active slot's data
+/// lives inline in [`Track`]; inactive slots are parked here.
+#[derive(Debug, Clone, PartialEq)]
+struct PatternData {
+    steps: Vec<Step>,
+    length: usize,
+    pulses: usize,
+    rotation: usize,
+}
+
+impl PatternData {
+    /// A silent 16-step pattern — what an untouched slot holds.
+    fn empty() -> Self {
+        Self { steps: vec![Step::default(); NUM_STEPS], length: 16, pulses: 0, rotation: 0 }
     }
 }
 
@@ -52,15 +86,26 @@ struct Track {
     rotation: usize,
     muted: bool,
     mode: state::TrackMode,
+    cycle: state::CycleMode,
+    /// Cents-based scale; `None` = chromatic 12-TET MIDI (the default).
+    scale: Option<crate::theory::scales::Scale>,
+    /// MIDI root note the scale hangs from.
+    root: u8,
+    /// Active pattern slot index 0–7 (`a`–`h`).
+    active_slot: usize,
+    /// Parked pattern slots; `slots[active_slot]` is `None` (its data is
+    /// inline above). Untouched slots are `None` and read as empty.
+    slots: [Option<PatternData>; NUM_SLOTS],
 }
 
 impl Track {
     fn new() -> Self {
-        let mut steps = vec![Step::default(); NUM_STEPS];
+        let mut t = Track::empty();
         for i in (0..16).step_by(4) {
-            steps[i].active = true;
+            t.steps[i].active = true;
         }
-        Self { steps, length: 16, pulses: 5, rotation: 0, muted: false, mode: state::TrackMode::Note }
+        t.pulses = 5;
+        t
     }
 
     /// A silent 16-step track (no pulses) — the blank-slate default.
@@ -72,6 +117,11 @@ impl Track {
             rotation: 0,
             muted: false,
             mode: state::TrackMode::Note,
+            cycle: state::CycleMode::Forward,
+            scale: None,
+            root: 60,
+            active_slot: 0,
+            slots: Default::default(),
         }
     }
 
@@ -131,6 +181,13 @@ struct SequencerState {
     visual_anchor: Option<usize>,
     /// Modbus base channel claimed at registration (track outputs write here).
     mod_base: Option<usize>,
+    /// Persistent per-track marks (`X` toggles, `gX` clears) — the
+    /// non-consecutive multi-select. Kept in sync with `tracks`.
+    marks: Vec<bool>,
+    /// Track row the V-line selection anchors on (`V` + j/k extends).
+    visual_track_anchor: Option<usize>,
+    /// Active value layer: what the grid shows and what k/j/N edit.
+    layer: state::BindTarget,
 }
 
 impl Default for SequencerState {
@@ -148,6 +205,9 @@ impl Default for SequencerState {
             register: None,
             visual_anchor: None,
             mod_base: None,
+            marks: vec![false; track_count],
+            visual_track_anchor: None,
+            layer: state::BindTarget::Note,
         }
     }
 }
@@ -259,7 +319,7 @@ impl EuclidState {
 #[derive(Debug, Clone, PartialEq)]
 enum Register {
     Steps(Vec<Step>),
-    Track(Track),
+    Track(Box<Track>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -463,23 +523,23 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
             for st in new.iter_mut() {
                 st.active = !st.active;
             }
-            s.tracks[tidx].steps[a..=b].copy_from_slice(&new);
+            s.tracks[tidx].steps[a..=b].clone_from_slice(&new);
             h.push(Command::EditSteps { track: tidx, start: a, old, new });
             s.selected = a;
             None
         }
         Action::CutStep => {
             let sel = s.selected;
-            let old_step = s.tracks[tidx].steps[sel];
-            s.register = Some(Register::Steps(vec![old_step]));
+            let old_step = s.tracks[tidx].steps[sel].clone();
+            s.register = Some(Register::Steps(vec![old_step.clone()]));
             s.tracks[tidx].steps[sel].active = false;
-            let new_step = s.tracks[tidx].steps[sel];
+            let new_step = s.tracks[tidx].steps[sel].clone();
             push_step_edit(h, tidx, sel, old_step, new_step);
             None
         }
         Action::YankStep => {
             let sel = s.selected;
-            s.register = Some(Register::Steps(vec![s.tracks[tidx].steps[sel]]));
+            s.register = Some(Register::Steps(vec![s.tracks[tidx].steps[sel].clone()]));
             Some(String::from("Yanked 1 step"))
         }
         Action::Paste { before, times } => match s.register.clone() {
@@ -494,11 +554,11 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
                 };
                 let end = (start + total - 1).min(len - 1);
                 let old: Vec<Step> = s.tracks[tidx].steps[start..=end].to_vec();
-                let new: Vec<Step> = (0..=(end - start)).map(|i| slice[i % slice.len()]).collect();
+                let new: Vec<Step> = (0..=(end - start)).map(|i| slice[i % slice.len()].clone()).collect();
                 if old == new {
                     return None;
                 }
-                s.tracks[tidx].steps[start..=end].copy_from_slice(&new);
+                s.tracks[tidx].steps[start..=end].clone_from_slice(&new);
                 h.push(Command::EditSteps { track: tidx, start, old, new });
                 s.selected = start;
                 None
@@ -506,15 +566,15 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
             Some(Register::Track(trk)) => {
                 for i in 0..*times.max(&1) {
                     let at = if *before { tidx } else { tidx + 1 + i };
-                    insert_track(s, at, trk.clone());
-                    h.push(Command::PasteTrack { at, track: trk.clone() });
+                    insert_track(s, at, (*trk).clone());
+                    h.push(Command::PasteTrack { at, track: (*trk).clone() });
                 }
                 None
             }
         },
         Action::Transpose { note, mod_value } => {
             let sel = s.selected;
-            let old_step = s.tracks[tidx].steps[sel];
+            let old_step = s.tracks[tidx].steps[sel].clone();
             if s.tracks[tidx].mode == TrackMode::Modulation {
                 let v = old_step.mod_value + mod_value;
                 s.tracks[tidx].steps[sel].mod_value = v.clamp(-1.0, 1.0);
@@ -522,15 +582,15 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
                 let n = (old_step.note as i32 + note).clamp(0, 127);
                 s.tracks[tidx].steps[sel].note = n as u8;
             }
-            let new_step = s.tracks[tidx].steps[sel];
+            let new_step = s.tracks[tidx].steps[sel].clone();
             push_step_edit(h, tidx, sel, old_step, new_step);
             None
         }
         Action::SetNote(n) => {
             let sel = s.selected;
-            let old_step = s.tracks[tidx].steps[sel];
+            let old_step = s.tracks[tidx].steps[sel].clone();
             s.tracks[tidx].steps[sel].note = (*n).min(127);
-            let new_step = s.tracks[tidx].steps[sel];
+            let new_step = s.tracks[tidx].steps[sel].clone();
             push_step_edit(h, tidx, sel, old_step, new_step);
             None
         }
@@ -554,7 +614,7 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
                         st.active = false;
                     }
                     if old != new {
-                        s.tracks[tidx].steps[a..=b].copy_from_slice(&new);
+                        s.tracks[tidx].steps[a..=b].clone_from_slice(&new);
                         h.push(Command::EditSteps { track: tidx, start: a, old, new });
                     }
                     s.selected = a;
@@ -564,7 +624,7 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
         }
         Action::OpTrack(op) => match op {
             Operator::Yank => {
-                s.register = Some(Register::Track(s.tracks[tidx].clone()));
+                s.register = Some(Register::Track(Box::new(s.tracks[tidx].clone())));
                 Some(String::from("Yanked track"))
             }
             Operator::Delete => {
@@ -574,7 +634,7 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
                 let track = s.tracks.remove(tidx);
                 s.current_steps.remove(tidx);
                 s.last_notes.remove(tidx);
-                s.register = Some(Register::Track(track.clone()));
+                s.register = Some(Register::Track(Box::new(track.clone())));
                 h.push(Command::DeleteTrack { at: tidx, track });
                 s.focus(tidx, Some(0));
                 None
@@ -587,7 +647,7 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
                 for st in new.iter_mut() {
                     st.active = false;
                 }
-                s.tracks[tidx].steps[..len].copy_from_slice(&new);
+                s.tracks[tidx].steps[..len].clone_from_slice(&new);
                 h.push(Command::EditSteps { track: tidx, start: 0, old, new });
                 s.selected = 0;
                 None
@@ -623,7 +683,7 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
             if old == new {
                 return None;
             }
-            s.tracks[tidx].steps[..len].copy_from_slice(&new);
+            s.tracks[tidx].steps[..len].clone_from_slice(&new);
             h.push(Command::EditSteps { track: tidx, start: 0, old, new });
             None
         }
@@ -660,6 +720,7 @@ fn insert_track(state: &mut SequencerState, at: usize, track: Track) {
     state.tracks.insert(at, track);
     state.current_steps.insert(at, 0);
     state.last_notes.insert(at, None);
+    state.marks.insert(at, false);
     state.focus(at, Some(0));
 }
 
@@ -670,6 +731,7 @@ fn remove_track(state: &mut SequencerState, at: usize) {
         state.tracks.remove(at);
         state.current_steps.remove(at);
         state.last_notes.remove(at);
+        state.marks.remove(at);
         state.focus(state.current_track, Some(0));
     }
 }
@@ -700,13 +762,13 @@ impl Command {
             }
             Command::EditStep { track, step, old_step, .. } => {
                 if *track < state.tracks.len() && *step < state.tracks[*track].steps.len() {
-                    state.tracks[*track].steps[*step] = *old_step;
+                    state.tracks[*track].steps[*step] = old_step.clone();
                     state.focus(*track, Some(*step));
                 }
             }
             Command::EditSteps { track, start, old, .. } => {
                 if *track < state.tracks.len() && start + old.len() <= state.tracks[*track].steps.len() {
-                    state.tracks[*track].steps[*start..start + old.len()].copy_from_slice(old);
+                    state.tracks[*track].steps[*start..start + old.len()].clone_from_slice(old);
                     state.focus(*track, Some(*start));
                 }
             }
@@ -749,13 +811,13 @@ impl Command {
             }
             Command::EditStep { track, step, new_step, .. } => {
                 if *track < state.tracks.len() && *step < state.tracks[*track].steps.len() {
-                    state.tracks[*track].steps[*step] = *new_step;
+                    state.tracks[*track].steps[*step] = new_step.clone();
                     state.focus(*track, Some(*step));
                 }
             }
             Command::EditSteps { track, start, new, .. } => {
                 if *track < state.tracks.len() && start + new.len() <= state.tracks[*track].steps.len() {
-                    state.tracks[*track].steps[*start..start + new.len()].copy_from_slice(new);
+                    state.tracks[*track].steps[*start..start + new.len()].clone_from_slice(new);
                     state.focus(*track, Some(*start));
                 }
             }
@@ -812,7 +874,7 @@ impl History {
             {
                 if let Command::EditStep { track: t2, step: s2, new_step: n2, .. } = &cmd {
                     if t2 == track && s2 == step && at.elapsed() < crate::undo::COALESCE_WINDOW {
-                        *new_step = *n2;
+                        *new_step = n2.clone();
                         *at = Instant::now();
                         if old_step == new_step {
                             // sweep returned to where it started — drop it
@@ -945,6 +1007,9 @@ fn sequencer_thread(
             }
             while s.last_notes.len() < s.tracks.len() {
                 s.last_notes.push(None);
+            }
+            while s.marks.len() < s.tracks.len() {
+                s.marks.push(false);
             }
 
             // Release any held note that a step advance can no longer end:
@@ -1269,13 +1334,18 @@ fn draw_ui(
         lines.push(theme::rule(w));
 
         // ── status ──────────────────────────────────────────────────────
-        let mode_label = match mode {
+        let mut mode_label = match mode {
             "insert" if !submode.is_empty() => format!("INSERT[{}:{}]", submode, input_buffer),
             "insert" => String::from("INSERT"),
             "visual" => String::from("VISUAL"),
             "visual_line" => String::from("V-LINE"),
             _ => String::from("NORMAL"),
         };
+        // the active value layer rides the mode label (note layer is silent)
+        if let Some(tag) = layer_tag(state.layer) {
+            mode_label.push(' ');
+            mode_label.push_str(tag);
+        }
         let mut msg_parts: Vec<String> = Vec::new();
         if let Some(c) = pending_count {
             msg_parts.push(format!("{}…", c));
@@ -1340,6 +1410,17 @@ fn sequencer_help() -> Vec<Line<'static>> {
     ]
 }
 
+/// Modeline tag for the active value layer; the note layer (the default
+/// view) stays untagged.
+fn layer_tag(layer: state::BindTarget) -> Option<&'static str> {
+    match layer {
+        state::BindTarget::Note => None,
+        state::BindTarget::Velocity => Some("'v"),
+        state::BindTarget::Prob => Some("'p"),
+        state::BindTarget::Mod => Some("'m"),
+    }
+}
+
 /// Track-row geometry shared by the renderer and the mouse hit-test:
 /// window start for a track row given its length, the anchor to keep in
 /// view, and how many steps fit.
@@ -1382,6 +1463,46 @@ fn wake_offset(i: usize, head: usize, len: usize) -> Option<usize> {
     }
 }
 
+fn step_to_param(step: &Step) -> state::StepParam {
+    state::StepParam {
+        active: step.active,
+        note: step.note,
+        velocity: step.velocity,
+        mod_value: step.mod_value,
+        prob: step.prob,
+        bind: step.bind.as_ref().map(|b| state::StepBindParam {
+            target: b.target,
+            source: b.source.clone(),
+            amount: b.amount,
+        }),
+    }
+}
+
+fn step_from_param(p: &state::StepParam) -> Step {
+    Step {
+        active: p.active,
+        note: p.note,
+        velocity: p.velocity,
+        mod_value: p.mod_value,
+        prob: p.prob.min(100),
+        bind: p.bind.as_ref().map(|b| StepBind {
+            target: b.target,
+            source: b.source.clone(),
+            amount: b.amount,
+        }),
+    }
+}
+
+/// Steps worth saving: everything up to the last one that differs from the
+/// default (so untouched 128-step tails don't bloat the file).
+fn trimmed_steps(steps: &[Step]) -> Vec<state::StepParam> {
+    let keep = steps
+        .iter()
+        .rposition(|st| *st != Step::default())
+        .map_or(0, |i| i + 1);
+    steps[..keep].iter().map(step_to_param).collect()
+}
+
 fn snapshot_params(s: &SequencerState) -> state::SequencerParams {
     state::SequencerParams {
         bpm: Some(s.bpm),
@@ -1391,18 +1512,36 @@ fn snapshot_params(s: &SequencerState) -> state::SequencerParams {
         euclidean_rotation: None,
         steps: vec![],
         tracks: s.tracks.iter().map(|trk| state::TrackParam {
-            steps: trk.steps.iter().map(|step| state::StepParam {
-                active: step.active,
-                note: step.note,
-                velocity: step.velocity,
-                mod_value: step.mod_value,
-            }).collect(),
+            steps: trk.steps.iter().map(step_to_param).collect(),
             length: Some(trk.length),
             pulses: Some(trk.pulses),
             rotation: Some(trk.rotation),
             muted: trk.muted,
             mode: trk.mode,
+            cycle: trk.cycle,
+            scale: trk.scale.as_ref().map(|sc| sc.name.clone()),
+            scale_cents: trk.scale.as_ref().map(|sc| sc.degrees.clone()).unwrap_or_default(),
+            scale_period: trk.scale.as_ref().map(|sc| sc.period),
+            root: Some(trk.root),
+            active_slot: trk.active_slot,
+            slots: trk
+                .slots
+                .iter()
+                .enumerate()
+                .filter_map(|(i, slot)| slot.as_ref().map(|p| (i, p)))
+                .filter(|(_, p)| **p != PatternData::empty())
+                .map(|(i, p)| state::SlotParam {
+                    slot: i,
+                    steps: trimmed_steps(&p.steps),
+                    length: Some(p.length),
+                    pulses: Some(p.pulses),
+                    rotation: Some(p.rotation),
+                })
+                .collect(),
         }).collect(),
+        macros: vec![],
+        lane: vec![],
+        lane_len: None,
     }
 }
 
@@ -1414,6 +1553,27 @@ fn patch_params(s: &SequencerState) -> state::SequencerParams {
     p
 }
 
+/// Resolve a saved scale: stored cents are authoritative (covers `.scl`
+/// imports), a bare name re-resolves against the library.
+fn scale_from_params(tp: &state::TrackParam) -> Option<crate::theory::scales::Scale> {
+    if !tp.scale_cents.is_empty() {
+        return Some(crate::theory::scales::Scale {
+            name: tp.scale.clone().unwrap_or_else(|| String::from("imported")),
+            degrees: tp.scale_cents.clone(),
+            period: tp.scale_period.unwrap_or(1200.0),
+        });
+    }
+    tp.scale.as_deref().and_then(crate::theory::scales::lookup)
+}
+
+fn steps_from_params(saved: &[state::StepParam]) -> Vec<Step> {
+    let mut steps = vec![Step::default(); NUM_STEPS];
+    for (i, step) in saved.iter().enumerate().take(steps.len()) {
+        steps[i] = step_from_param(step);
+    }
+    steps
+}
+
 /// Rebuild tracks (and bookkeeping vectors) from saved params.
 fn apply_tracks(s: &mut SequencerState, params: &state::SequencerParams) {
     if params.tracks.is_empty() {
@@ -1422,21 +1582,37 @@ fn apply_tracks(s: &mut SequencerState, params: &state::SequencerParams) {
     s.tracks.clear();
     s.current_steps.clear();
     s.last_notes.clear();
+    s.marks.clear();
     for tp in &params.tracks {
-        let mut steps = vec![Step::default(); NUM_STEPS];
-        for (i, step) in tp.steps.iter().enumerate().take(steps.len()) {
-            steps[i] = Step { active: step.active, note: step.note, velocity: step.velocity, mod_value: step.mod_value };
+        let mut slots: [Option<PatternData>; NUM_SLOTS] = Default::default();
+        for sp in &tp.slots {
+            if sp.slot < NUM_SLOTS {
+                slots[sp.slot] = Some(PatternData {
+                    steps: steps_from_params(&sp.steps),
+                    length: sp.length.unwrap_or(16).clamp(1, NUM_STEPS),
+                    pulses: sp.pulses.unwrap_or(0),
+                    rotation: sp.rotation.unwrap_or(0),
+                });
+            }
         }
+        let active_slot = tp.active_slot.min(NUM_SLOTS - 1);
+        slots[active_slot] = None; // the active slot's data lives inline
         s.tracks.push(Track {
-            steps,
-            length: tp.length.unwrap_or(16),
+            steps: steps_from_params(&tp.steps),
+            length: tp.length.unwrap_or(16).clamp(1, NUM_STEPS),
             pulses: tp.pulses.unwrap_or(5),
             rotation: tp.rotation.unwrap_or(0),
             muted: tp.muted,
             mode: tp.mode,
+            cycle: tp.cycle,
+            scale: scale_from_params(tp),
+            root: tp.root.unwrap_or(60).min(127),
+            active_slot,
+            slots,
         });
         s.current_steps.push(0);
         s.last_notes.push(None);
+        s.marks.push(false);
     }
     s.current_track = s.current_track.min(s.tracks.len().saturating_sub(1));
     let len = s.tracks[s.current_track].length;
@@ -1487,7 +1663,7 @@ pub fn run(instance: usize) -> Result<()> {
             if let Some(l) = params.euclidean_length { trk.length = l; }
             if let Some(r) = params.euclidean_rotation { trk.rotation = r; }
             for (i, step) in params.steps.iter().enumerate().take(trk.steps.len()) {
-                trk.steps[i] = Step { active: step.active, note: step.note, velocity: step.velocity, mod_value: step.mod_value };
+                trk.steps[i] = step_from_param(step);
             }
         }
     }
@@ -1916,7 +2092,11 @@ pub fn run(instance: usize) -> Result<()> {
                     if mode == "insert" || mode == "visual" || mode == "visual_line" {
                         mode = String::from("normal");
                     }
-                    state.lock().unwrap().visual_anchor = None;
+                    {
+                        let mut s = state.lock().unwrap();
+                        s.visual_anchor = None;
+                        s.visual_track_anchor = None;
+                    }
                     submode.clear();
                     input_buffer.clear();
                     pending_count = None;
@@ -2557,7 +2737,7 @@ mod tests {
         let mut s = state_with_tracks(1);
         let mut h = History::new();
         s.selected = 4; // active by default
-        let before = s.tracks[0].steps[4];
+        let before = s.tracks[0].steps[4].clone();
         cut_step(&mut s, &mut h);
         assert!(!s.tracks[0].steps[4].active);
         assert!(h.undo(&mut s).is_some());
@@ -2568,9 +2748,9 @@ mod tests {
     fn paste_step_undo() {
         let mut s = state_with_tracks(1);
         let mut h = History::new();
-        s.register = Some(Register::Steps(vec![Step { active: true, note: 72, velocity: 90, mod_value: 0.0 }]));
+        s.register = Some(Register::Steps(vec![Step { active: true, note: 72, velocity: 90, ..Step::default() }]));
         s.selected = 1;
-        let before = s.tracks[0].steps[1];
+        let before = s.tracks[0].steps[1].clone();
         paste_step(&mut s, &mut h);
         assert_eq!(s.tracks[0].steps[1].note, 72);
         assert!(h.undo(&mut s).is_some());
@@ -2929,8 +3109,8 @@ mod tests {
         let mut s = state_with_tracks(1);
         let mut h = History::new();
         s.register = Some(Register::Steps(vec![
-            Step { active: true, note: 60, velocity: 100, mod_value: 0.0 },
-            Step { active: true, note: 62, velocity: 100, mod_value: 0.0 },
+            Step { active: true, note: 60, ..Step::default() },
+            Step { active: true, note: 62, ..Step::default() },
         ]));
         s.selected = 5;
         apply_action(&mut s, &mut h, &Action::Paste { before: true, times: 1 });
@@ -3054,7 +3234,7 @@ mod tests {
         for st in s.tracks[0].steps.iter_mut() {
             st.active = false;
         }
-        s.register = Some(Register::Steps(vec![Step { active: true, note: 65, velocity: 100, mod_value: 0.0 }]));
+        s.register = Some(Register::Steps(vec![Step { active: true, note: 65, ..Step::default() }]));
         s.selected = 3;
         apply_action(&mut s, &mut h, &Action::Paste { before: false, times: 3 });
         assert!(s.tracks[0].steps[3].active && s.tracks[0].steps[4].active && s.tracks[0].steps[5].active);
