@@ -325,7 +325,6 @@ fn draw_ui(
         let _ = (bpm, playing);
         lines.push(theme::header("MIX", &format!("{}ch", tracks.len()), "", w));
 
-        let gauge_w = (w.saturating_sub(30)).clamp(8, 20);
         // channel strips as dense rows: name · meter · level gauge · pan · M/S
         for (i, t) in tracks.iter().enumerate() {
             let sel = i == selected;
@@ -338,9 +337,9 @@ fn draw_ui(
                 theme::signal(theme::audio()),
             ));
             if t.mute {
-                spans.push(Span::styled(theme::fader_str(t.level, None, gauge_w), theme::dim()));
+                spans.push(Span::styled(theme::param_dots_str(t.level, None), theme::dim()));
             } else {
-                spans.extend(theme::fader(t.level, None, gauge_w));
+                spans.extend(theme::param_dots(t.level, None));
             }
             spans.push(Span::styled(format!(" {:>3.0}%", t.level * 100.0), theme::value()));
             let pan = if t.pan.abs() < 0.05 {
@@ -372,7 +371,7 @@ fn draw_ui(
                 theme::signal(if master_meter > 0.95 { theme::alert() } else { theme::audio() }),
             ),
         ];
-        mspans.extend(theme::fader(master, None, gauge_w));
+        mspans.extend(theme::param_dots(master, None));
         mspans.extend(vec![
             Span::styled(format!(" {:>3.0}%", master * 100.0), theme::value()),
             Span::styled(

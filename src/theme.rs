@@ -105,31 +105,23 @@ pub fn meter_char(level: f32) -> char {
     METER[idx.min(7)]
 }
 
-/// A fader `width` cells wide drawn in braille: a smooth fine-grained fill
-/// (2 sub-steps per cell) over a faint dot rail, with the teal ghost `▴`
-/// riding the live (modulated) position — the §5 mod-feedback rule.
-pub fn fader(set: f32, live: Option<f32>, width: usize) -> Vec<Span<'static>> {
-    let width = width.max(3);
-    let sub = (set.clamp(0.0, 1.0) * (width * 2) as f32).round() as usize;
-    let ghost = live.map(|v| ((v.clamp(0.0, 1.0)) * (width - 1) as f32).round() as usize);
-    (0..width)
-        .map(|i| {
-            if ghost == Some(i) {
-                return Span::styled(GHOST.to_string(), signal(cv()));
-            }
-            let lit = sub.saturating_sub(i * 2).min(2);
-            match lit {
-                2 => Span::styled("⣿".to_string(), value()),
-                1 => Span::styled("⡇".to_string(), value()),
-                _ => Span::styled("⠄".to_string(), dim()),
-            }
-        })
-        .collect()
+/// Compact param indicator (sliders, take five — the keeper): one bone
+/// meter glyph for the set position and, when modulated, a live teal glyph
+/// beside it that bounces with the signal. The number next door carries the
+/// precision; these carry the gestalt. Same vocabulary as the MATHs
+/// overview meters.
+pub fn param_dots(set: f32, live: Option<f32>) -> Vec<Span<'static>> {
+    let mut v = vec![Span::styled(meter_char(set).to_string(), value())];
+    match live {
+        Some(l) => v.push(Span::styled(meter_char(l).to_string(), signal(cv()))),
+        None => v.push(Span::raw(" ".to_string())),
+    }
+    v
 }
 
-/// Plain-string form of [`fader`] for tests and width math.
-pub fn fader_str(set: f32, live: Option<f32>, width: usize) -> String {
-    fader(set, live, width).iter().map(|s| s.content.clone()).collect()
+/// Plain-string form of [`param_dots`] for tests.
+pub fn param_dots_str(set: f32, live: Option<f32>) -> String {
+    param_dots(set, live).iter().map(|s| s.content.clone()).collect()
 }
 
 // ── pane anatomy ────────────────────────────────────────────────────────────
@@ -189,18 +181,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fader_fills_smoothly_with_ghost() {
-        assert_eq!(fader_str(0.5, None, 8), "⣿⣿⣿⣿⠄⠄⠄⠄");
-        assert_eq!(fader_str(0.0, None, 4), "⠄⠄⠄⠄", "empty rail stays faint");
-        assert_eq!(fader_str(1.0, None, 4), "⣿⣿⣿⣿");
-        assert_eq!(
-            fader_str(0.31, None, 8).chars().nth(2),
-            Some('⡇'),
-            "half-cell resolution: 0.31*16 ≈ 5 sub-steps"
-        );
-        let g = fader_str(0.25, Some(1.0), 8);
-        assert_eq!(g.chars().last(), Some(GHOST), "ghost rides the live position");
-        assert_eq!(g.chars().count(), 8);
+    fn param_dots_show_set_and_live() {
+        assert_eq!(param_dots_str(0.0, None), "▁ ");
+        assert_eq!(param_dots_str(1.0, None), "█ ");
+        assert_eq!(param_dots_str(1.0, Some(0.2)), "█▂", "live glyph beside the set one");
+        assert_eq!(param_dots_str(0.5, Some(0.5)).chars().count(), 2);
     }
 
     #[test]

@@ -881,7 +881,6 @@ fn draw_ui(
         lines.push(theme::rule(w));
 
         // ── detail: the current channel with real sliders ───────────────
-        let gauge_w = (w.saturating_sub(26)).clamp(8, 24);
         let trig_text = match &p.trigger {
             Trigger::Any => String::from("any note"),
             Trigger::Off => String::from("off"),
@@ -921,7 +920,7 @@ fn draw_ui(
         ];
         for (row, name, set, disp, ghost, src) in rows {
             let mut spans = vec![row_label(row, name)];
-            spans.extend(theme::fader(set, ghost, gauge_w));
+            spans.extend(theme::param_dots(set, ghost));
             spans.push(Span::styled(format!(" {:>7}", disp), theme::value()));
             if let Some(Some(a)) = src {
                 spans.push(Span::styled(
