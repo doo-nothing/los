@@ -214,10 +214,11 @@ struct SequencerState {
     layer: state::BindTarget,
     /// The 26 macro registers a–z.
     macros: Vec<Option<Macro>>,
-    /// `q{a-z}` in progress: (macro index, commands recorded so far).
-    recording: Option<(usize, Vec<state::MacroCmd>)>,
     /// Last fired macro (`@@` refires it).
     last_macro: Option<usize>,
+    /// One-shot status from thread-side macro firings ("@a" / "@a: no
+    /// change"), drained into the modeline by the UI loop.
+    macro_flash: Option<String>,
     /// The macro lane: one slot per bar, each optionally firing a macro.
     lane: Vec<Option<usize>>,
     /// Lane playhead (bar index, wrapped), kept by the playback thread.
@@ -264,8 +265,8 @@ impl Default for SequencerState {
             visual_track_anchor: None,
             layer: state::BindTarget::Note,
             macros: vec![None; 26],
-            recording: None,
             last_macro: None,
+            macro_flash: None,
             lane: vec![None; DEFAULT_LANE_LEN],
             lane_pos: 0,
             lane_selected: 0,
@@ -884,7 +885,6 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
             let was_muted = s.tracks[tidx].muted;
             s.tracks[tidx].muted = !was_muted;
             h.push(Command::ToggleMute { track: tidx, was_muted });
-            record_macro(s, state::MacroCmd::SetMute { track: tidx, muted: !was_muted });
             None
         }
         Action::ToggleMode => {
@@ -916,7 +916,6 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
             }
             s.tracks[tidx].steps[..len].clone_from_slice(&new);
             h.push(Command::EditSteps { track: tidx, start: 0, old, new });
-            record_macro(s, state::MacroCmd::RotateTrack { track: tidx, by: *n });
             None
         }
         Action::Euclid(op) => {
@@ -950,7 +949,6 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
             }
             s.tracks[tidx].cycle = *mode;
             h.push(Command::SetCycle { track: tidx, old, new: *mode });
-            record_macro(s, state::MacroCmd::SetCycle { track: tidx, mode: *mode });
             Some(format!("cycle = {}", mode.name()))
         }
         Action::SwitchSlot(slot) => {
@@ -962,7 +960,6 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
             switch_slot(&mut s.tracks[tidx], to);
             s.selected = s.selected.min(s.tracks[tidx].length - 1);
             h.push(Command::SwitchSlot { track: tidx, from, to });
-            record_macro(s, state::MacroCmd::SwitchPattern { track: tidx, slot: to });
             Some(format!("Pattern {}", slot_letter(to)))
         }
         Action::SaveSlot(slot) => {
@@ -1076,7 +1073,6 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
             }
             s.tracks[tidx].steps[..len].clone_from_slice(&new);
             h.push(Command::EditSteps { track: tidx, start: 0, old, new });
-            record_macro(s, state::MacroCmd::Fill { track: tidx, kind: *kind, arg: *arg });
             Some(format!("fill {}", kind.name()))
         }
     }
@@ -1110,6 +1106,23 @@ fn fmt_macro_cmd(cmd: &state::MacroCmd) -> String {
             format!("fill {} {} {}", track + 1, kind.name(), arg)
         }
         state::MacroCmd::SetBpm { bpm } => format!("bpm {}", bpm),
+        state::MacroCmd::SetSteps { track, start, steps } => {
+            format!("edit {} @{} ×{}", track + 1, start + 1, steps.len())
+        }
+        state::MacroCmd::SetActive { track, step, active } => {
+            format!("step {} {} {}", track + 1, step + 1, if *active { "on" } else { "off" })
+        }
+        state::MacroCmd::SetEuclid { track, pulses, length, rotation } => {
+            format!("euclid {} {} {} {}", track + 1, pulses, length, rotation)
+        }
+        state::MacroCmd::SetMode { track, mode } => format!(
+            "mode {} {}",
+            track + 1,
+            match mode {
+                TrackMode::Note => "note",
+                TrackMode::Modulation => "mod",
+            }
+        ),
     }
 }
 
@@ -1177,6 +1190,40 @@ fn parse_macro_dsl(input: &str) -> Result<(Vec<state::MacroCmd>, Option<state::Q
             ["bpm", n] => {
                 let bpm: f64 = n.parse().map_err(|_| format!("bad bpm: {n}"))?;
                 cmds.push(state::MacroCmd::SetBpm { bpm });
+            }
+            ["step", t, n, onoff @ ("on" | "off")] => {
+                let step: usize = n
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|v| v.checked_sub(1))
+                    .ok_or_else(|| format!("bad step: {n}"))?;
+                cmds.push(state::MacroCmd::SetActive {
+                    track: parse_track(t)?,
+                    step,
+                    active: *onoff == "on",
+                });
+            }
+            ["euclid", t, p, l, r] => {
+                let parse_n = |w: &str| -> Result<usize, String> {
+                    w.parse().map_err(|_| format!("bad number: {w}"))
+                };
+                cmds.push(state::MacroCmd::SetEuclid {
+                    track: parse_track(t)?,
+                    pulses: parse_n(p)?,
+                    length: parse_n(l)?,
+                    rotation: parse_n(r)?,
+                });
+            }
+            ["mode", t, m @ ("note" | "mod")] => {
+                cmds.push(state::MacroCmd::SetMode {
+                    track: parse_track(t)?,
+                    mode: if *m == "note" { TrackMode::Note } else { TrackMode::Modulation },
+                });
+            }
+            ["edit", ..] => {
+                return Err(String::from(
+                    "step edits are recorded with q, not written by hand",
+                ))
             }
             ["quant", q] => {
                 quant =
@@ -1454,11 +1501,57 @@ struct History {
     /// While `Some`, pushes collect here instead of the history — closed
     /// by `end_group` into one undoable [`Command::Group`].
     group: Option<Vec<Command>>,
+    /// `q{a-z}` recording: every pushed command also lands here in its
+    /// macro form. The History is the single choke point all edits pass
+    /// through, so recording can't miss anything undoable.
+    rec: Option<(usize, Vec<state::MacroCmd>)>,
 }
 
 impl History {
     fn new() -> Self {
-        Self { commands: vec![], index: 0, group: None }
+        Self { commands: vec![], index: 0, group: None, rec: None }
+    }
+
+    /// Start recording macro `idx` (a–z).
+    fn rec_start(&mut self, idx: usize) {
+        self.rec = Some((idx, Vec::new()));
+    }
+
+    /// Stop recording, returning (macro index, captured commands).
+    fn rec_stop(&mut self) -> Option<(usize, Vec<state::MacroCmd>)> {
+        self.rec.take()
+    }
+
+    /// (macro index, commands captured so far) — the modeline ticker.
+    fn rec_status(&self) -> Option<(usize, usize)> {
+        self.rec.as_ref().map(|(i, c)| (*i, c.len()))
+    }
+
+    /// Record into the live macro, merging consecutive rewrites of the
+    /// same range (a held `k` sweep records once, not per repeat).
+    fn rec_tap(&mut self, cmd: &Command) {
+        let Some((_, cmds)) = self.rec.as_mut() else {
+            return;
+        };
+        for mc in macro_cmds_of(cmd) {
+            match (cmds.last_mut(), &mc) {
+                (
+                    Some(state::MacroCmd::SetSteps { track: t0, start: s0, steps: old }),
+                    state::MacroCmd::SetSteps { track, start, steps },
+                ) if t0 == track && s0 == start && old.len() == steps.len() => {
+                    *old = steps.clone();
+                }
+                _ => cmds.push(mc),
+            }
+        }
+    }
+
+    /// Push without recording — thread-fired macros drain through here so
+    /// firing @b while recording @a doesn't capture @b's effects.
+    fn push_raw(&mut self, cmd: Command) {
+        let rec = self.rec.take();
+        self.push(cmd);
+        self.rec = rec;
     }
 
     /// Start collecting commands for a single undo entry (multi-track edits).
@@ -1485,11 +1578,13 @@ impl History {
 
     fn push(&mut self, cmd: Command) {
         // Group collection bypasses coalescing — a multi-track sweep is
-        // already one entry.
+        // already one entry. Members record when the closed Group lands
+        // (flattened), so nothing taps twice.
         if let Some(group) = self.group.as_mut() {
             group.push(cmd);
             return;
         }
+        self.rec_tap(&cmd);
         // Sweep rule (docs/keybindings.md): consecutive edits of the same
         // step within the coalescing window merge into one undo entry, so a
         // held transpose key reverts with a single u.
@@ -1673,12 +1768,60 @@ fn apply_selected(
     msg
 }
 
-/// Append a command to the macro being recorded, if any. Called from the
-/// action arms whose semantics are macro-recordable (performance gestures,
-/// not step edits — those have dot-repeat).
-fn record_macro(s: &mut SequencerState, cmd: state::MacroCmd) {
-    if let Some((_, cmds)) = s.recording.as_mut() {
-        cmds.push(cmd);
+/// Map an undoable command to its macro form — what `q` recording
+/// captures. Everything you can undo records, as ABSOLUTE state so
+/// replays are exact; track lifecycle (new/delete/paste), lane edits,
+/// and slot save-as stay out of macros on purpose.
+fn macro_cmds_of(cmd: &Command) -> Vec<state::MacroCmd> {
+    match cmd {
+        Command::ToggleStep { track, step, was_active } => vec![state::MacroCmd::SetActive {
+            track: *track,
+            step: *step,
+            active: !*was_active,
+        }],
+        Command::EditStep { track, step, new_step, .. } => vec![state::MacroCmd::SetSteps {
+            track: *track,
+            start: *step,
+            steps: vec![step_to_param(new_step)],
+        }],
+        Command::EditSteps { track, start, new, .. } => vec![state::MacroCmd::SetSteps {
+            track: *track,
+            start: *start,
+            steps: new.iter().map(step_to_param).collect(),
+        }],
+        Command::SetTrackParams { track, new, .. } => vec![state::MacroCmd::SetEuclid {
+            track: *track,
+            pulses: new.pulses,
+            length: new.length,
+            rotation: new.rotation,
+        }],
+        Command::ToggleMute { track, was_muted } => {
+            vec![state::MacroCmd::SetMute { track: *track, muted: !*was_muted }]
+        }
+        Command::ToggleMode { track, was_mode } => vec![state::MacroCmd::SetMode {
+            track: *track,
+            mode: match was_mode {
+                TrackMode::Note => TrackMode::Modulation,
+                TrackMode::Modulation => TrackMode::Note,
+            },
+        }],
+        Command::SetBpm { new_bpm, .. } => vec![state::MacroCmd::SetBpm { bpm: *new_bpm }],
+        Command::SetCycle { track, new, .. } => {
+            vec![state::MacroCmd::SetCycle { track: *track, mode: *new }]
+        }
+        Command::SwitchSlot { track, to, .. } => {
+            vec![state::MacroCmd::SwitchPattern { track: *track, slot: *to }]
+        }
+        Command::SetScale { track, new, .. } => vec![state::MacroCmd::SetScale {
+            track: *track,
+            scale: new.scale.as_ref().map(|sc| sc.name.clone()).unwrap_or_default(),
+        }],
+        Command::Group { cmds, .. } => cmds.iter().flat_map(macro_cmds_of).collect(),
+        Command::NewTrack { .. }
+        | Command::DeleteTrack { .. }
+        | Command::PasteTrack { .. }
+        | Command::SaveSlot { .. }
+        | Command::SetLane { .. } => Vec::new(),
     }
 }
 
@@ -1778,15 +1921,13 @@ fn apply_macro_cmd(s: &mut SequencerState, cmd: &state::MacroCmd, seed: u64) -> 
             if t >= s.tracks.len() {
                 return None;
             }
-            // route through apply_action's Fill arm on a scratch history;
-            // a lane-fired fill must NOT leak into a user's q-recording
+            // route through apply_action's Fill arm on a scratch history
+            // (scratch = never recorded into a user's q-recording)
             let cur = s.current_track;
-            let recording = s.recording.take();
             s.current_track = t;
             let mut scratch = History::new();
             apply_action(s, &mut scratch, &Action::Fill { kind: *kind, arg: *arg, seed });
             s.current_track = cur.min(s.tracks.len().saturating_sub(1));
-            s.recording = recording;
             scratch.commands.pop().map(|(cmd, _)| cmd)
         }
         state::MacroCmd::SetBpm { bpm } => {
@@ -1797,6 +1938,56 @@ fn apply_macro_cmd(s: &mut SequencerState, cmd: &state::MacroCmd, seed: u64) -> 
             }
             s.bpm = new_bpm;
             Some(Command::SetBpm { old_bpm, new_bpm })
+        }
+        state::MacroCmd::SetSteps { track, start, steps } => {
+            let t = *track;
+            if t >= s.tracks.len() || steps.is_empty() {
+                return None;
+            }
+            let start = (*start).min(NUM_STEPS - 1);
+            let end = (start + steps.len() - 1).min(NUM_STEPS - 1);
+            let old: Vec<Step> = s.tracks[t].steps[start..=end].to_vec();
+            let new: Vec<Step> =
+                steps[..=(end - start)].iter().map(step_from_param).collect();
+            if old == new {
+                return None;
+            }
+            s.tracks[t].steps[start..=end].clone_from_slice(&new);
+            Some(Command::EditSteps { track: t, start, old, new })
+        }
+        state::MacroCmd::SetActive { track, step, active } => {
+            let (t, i) = (*track, (*step).min(NUM_STEPS - 1));
+            if t >= s.tracks.len() || s.tracks[t].steps[i].active == *active {
+                return None;
+            }
+            s.tracks[t].steps[i].active = *active;
+            Some(Command::ToggleStep { track: t, step: i, was_active: !*active })
+        }
+        state::MacroCmd::SetEuclid { track, pulses, length, rotation } => {
+            let t = *track;
+            if t >= s.tracks.len() {
+                return None;
+            }
+            let old = EuclidState::capture(&s.tracks[t]);
+            s.tracks[t].pulses = (*pulses).min(NUM_STEPS);
+            s.tracks[t].length = (*length).clamp(1, NUM_STEPS);
+            s.tracks[t].rotation = (*rotation).min(255);
+            let (p, l, r) = (s.tracks[t].pulses, s.tracks[t].length, s.tracks[t].rotation);
+            euclidean_apply(&mut s.tracks[t].steps, p, l, r);
+            if s.current_track == t {
+                s.selected = s.selected.min(s.tracks[t].length - 1);
+            }
+            let new = EuclidState::capture(&s.tracks[t]);
+            (old != new).then_some(Command::SetTrackParams { track: t, old, new })
+        }
+        state::MacroCmd::SetMode { track, mode } => {
+            let t = *track;
+            if t >= s.tracks.len() || s.tracks[t].mode == *mode {
+                return None;
+            }
+            let was_mode = s.tracks[t].mode;
+            s.tracks[t].mode = *mode;
+            Some(Command::ToggleMode { track: t, was_mode })
         }
     }
 }
@@ -1814,6 +2005,13 @@ fn fire_macro_now(s: &mut SequencerState, idx: usize, seed: u64) {
         }
     }
     s.last_macro = Some(idx);
+    let letter = (b'a' + (idx as u8).min(25)) as char;
+    s.macro_flash = Some(if undo.is_empty() {
+        // the recorded state already holds (or the commands cancel out)
+        format!("@{}: no change", letter)
+    } else {
+        format!("@{}", letter)
+    });
     match undo.len() {
         0 => {}
         1 => {
@@ -1850,7 +2048,11 @@ fn macro_first_track(m: &Macro) -> Option<usize> {
         | state::MacroCmd::TransposeTrack { track, .. }
         | state::MacroCmd::RotateTrack { track, .. }
         | state::MacroCmd::SetScale { track, .. }
-        | state::MacroCmd::Fill { track, .. } => *track,
+        | state::MacroCmd::Fill { track, .. }
+        | state::MacroCmd::SetSteps { track, .. }
+        | state::MacroCmd::SetActive { track, .. }
+        | state::MacroCmd::SetEuclid { track, .. }
+        | state::MacroCmd::SetMode { track, .. } => *track,
         state::MacroCmd::SetBpm { .. } => 0,
     })
 }
@@ -1927,10 +2129,8 @@ fn set_scale(
         if new == old {
             continue;
         }
-        let name = new.scale.as_ref().map(|sc| sc.name.clone()).unwrap_or_default();
         s.tracks[t] = new.clone();
         h.push(Command::SetScale { track: t, old: Box::new(old), new: Box::new(new) });
-        record_macro(s, state::MacroCmd::SetScale { track: t, scale: name });
     }
     if multi {
         h.end_group("Set scale");
@@ -2016,10 +2216,9 @@ fn start_preview(
     fill_seed: u64,
 ) -> Option<History> {
     use crate::excmd::ExCommand;
+    // a scratch history never records into macros — auditions are silent
     let mut scratch = History::new();
     let mut s = state.lock().unwrap();
-    // an audition is not a performance gesture: never records into macros
-    let recording = s.recording.take();
     let applied = match crate::excmd::parse(line) {
         ExCommand::Set(k, v) if k == "cycle" => state::CycleMode::parse(&v).map(|mode| {
             apply_selected(&mut s, &mut scratch, &Action::SetCycle(mode), None);
@@ -2068,7 +2267,6 @@ fn start_preview(
         }
         _ => None,
     };
-    s.recording = recording;
     drop(s);
     applied.map(|()| scratch)
 }
@@ -2610,6 +2808,7 @@ fn draw_ui(
     ex_menu: Option<(Vec<String>, Option<usize>)>,
     entries: &[crate::shm::ManifestEntry],
     live_binds: &std::collections::HashMap<usize, f32>,
+    rec: Option<(usize, usize)>,
 ) -> Result<()> {
     use crate::theme;
     use ratatui::text::Span;
@@ -3001,8 +3200,8 @@ fn draw_ui(
             }
         }
         // performance state first: recording + macros waiting on the clock
-        if let Some((idx, cmds)) = &state.recording {
-            msg_parts.push(format!("rec @{} [{}]", (b'a' + *idx as u8) as char, cmds.len()));
+        if let Some((idx, n)) = rec {
+            msg_parts.push(format!("rec @{} [{}]", (b'a' + idx as u8) as char, n));
         }
         for p in &state.pending_macros {
             msg_parts.push(format!("…@{}", (b'a' + p.idx as u8) as char));
@@ -3484,7 +3683,6 @@ fn apply_tracks(s: &mut SequencerState, params: &state::SequencerParams) {
     s.lane_pos = 0;
     s.lane_selected = s.lane_selected.min(lane_len - 1);
     s.pending_macros.clear();
-    s.recording = None;
 }
 
 pub fn run(instance: usize) -> Result<()> {
@@ -3640,11 +3838,16 @@ pub fn run(instance: usize) -> Result<()> {
         // the history, so `u` reverts a fired macro like any edit
         {
             let mut s = state.lock().unwrap();
+            if let Some(flash) = s.macro_flash.take() {
+                undo_msg = Some(flash);
+                undo_time = Some(Instant::now());
+            }
             if !s.macro_outbox.is_empty() {
                 let drained: Vec<Command> = s.macro_outbox.drain(..).collect();
                 drop(s);
                 for cmd in drained {
-                    history.push(cmd);
+                    // fired macros never re-record into a live q-recording
+                    history.push_raw(cmd);
                 }
             }
         }
@@ -3768,7 +3971,7 @@ pub fn run(instance: usize) -> Result<()> {
         } else {
             None
         };
-        draw_ui(&mut terminal, &current_state, &mode, &submode, &input_buffer, &pending_count, &gt_target, &gt_input, show_help, &status_msg, pending_hint, picker_rows, ex_menu, &ui_entries, &live_binds)?;
+        draw_ui(&mut terminal, &current_state, &mode, &submode, &input_buffer, &pending_count, &gt_target, &gt_input, show_help, &status_msg, pending_hint, picker_rows, ex_menu, &ui_entries, &live_binds, history.rec_status())?;
 
         if event::poll(Duration::from_millis(50))? {
             let ev = event::read()?;
@@ -3854,7 +4057,7 @@ pub fn run(instance: usize) -> Result<()> {
                         let drained: Vec<Command> = s.macro_outbox.drain(..).collect();
                         drop(s);
                         for cmd in drained {
-                            history.push(cmd);
+                            history.push_raw(cmd);
                         }
                     }
                 }
@@ -3985,8 +4188,6 @@ pub fn run(instance: usize) -> Result<()> {
                                             s.bpm = b.clamp(20.0, 300.0);
                                             if old_bpm != s.bpm {
                                                 history.push(Command::SetBpm { old_bpm, new_bpm: s.bpm });
-                                                let bpm = s.bpm;
-                                                record_macro(&mut s, state::MacroCmd::SetBpm { bpm });
                                             }
                                             undo_msg = Some(format!("bpm = {}", s.bpm));
                                         }
@@ -4401,24 +4602,23 @@ pub fn run(instance: usize) -> Result<()> {
                 if pending_record {
                     pending_record = false;
                     if let KeyCode::Char(c @ 'a'..='z') = key.code {
-                        let mut s = state.lock().unwrap();
-                        s.recording = Some(((c as u8 - b'a') as usize, vec![]));
-                        undo_msg = Some(format!("rec @{} — q stops", c));
+                        history.rec_start((c as u8 - b'a') as usize);
+                        undo_msg = Some(format!("rec @{} — every edit records; q stops", c));
                         undo_time = Some(Instant::now());
                     }
                     continue;
                 }
                 if key.code == KeyCode::Char('q') && mode == "normal" && submode.is_empty() {
                     pending_count = None;
-                    let mut s = state.lock().unwrap();
-                    if let Some((idx, cmds)) = s.recording.take() {
+                    if let Some((idx, cmds)) = history.rec_stop() {
+                        let mut s = state.lock().unwrap();
                         let quant =
                             s.macros[idx].as_ref().map(|m| m.quant).unwrap_or_default();
                         let n = cmds.len();
                         s.macros[idx] = Some(Macro { cmds, quant });
                         undo_msg = Some(format!(
                             "@{} recorded ({} command{})",
-                            slot_letter(idx.min(25)),
+                            (b'a' + (idx as u8).min(25)) as char,
                             n,
                             if n == 1 { "" } else { "s" }
                         ));
@@ -6732,26 +6932,77 @@ mod tests {
     // ── macros + the lane ───────────────────────────────────────────────
 
     #[test]
-    fn recording_captures_semantic_commands() {
+    fn recording_captures_everything_undoable() {
         let mut s = state_with_tracks(2);
         let mut h = History::new();
-        s.recording = Some((0, vec![]));
+        h.rec_start(0);
         s.current_track = 1;
         apply_action(&mut s, &mut h, &Action::ToggleMute);
         apply_action(&mut s, &mut h, &Action::SwitchSlot(2));
         apply_action(&mut s, &mut h, &Action::SetCycle(state::CycleMode::Reverse));
-        let (_, cmds) = s.recording.clone().expect("still recording");
-        assert_eq!(
-            cmds,
-            vec![
-                state::MacroCmd::SetMute { track: 1, muted: true },
-                state::MacroCmd::SwitchPattern { track: 1, slot: 2 },
-                state::MacroCmd::SetCycle { track: 1, mode: state::CycleMode::Reverse },
-            ]
-        );
-        // navigation and step edits do NOT record
+        // step edits record too now — as absolute state
+        s.selected = 5;
         apply_action(&mut s, &mut h, &Action::ToggleStep);
-        assert_eq!(s.recording.as_ref().map(|(_, c)| c.len()), Some(3));
+        apply_action(
+            &mut s,
+            &mut h,
+            &Action::Adjust { layer: state::BindTarget::Velocity, steps: 1, coarse: false },
+        );
+        let (idx, cmds) = h.rec_stop().expect("was recording");
+        assert_eq!(idx, 0);
+        assert_eq!(cmds[0], state::MacroCmd::SetMute { track: 1, muted: true });
+        assert_eq!(cmds[1], state::MacroCmd::SwitchPattern { track: 1, slot: 2 });
+        assert_eq!(
+            cmds[2],
+            state::MacroCmd::SetCycle { track: 1, mode: state::CycleMode::Reverse }
+        );
+        assert!(matches!(
+            cmds[3],
+            state::MacroCmd::SetActive { track: 1, step: 5, active: true }
+        ));
+        assert!(matches!(cmds[4], state::MacroCmd::SetSteps { track: 1, start: 5, .. }));
+        assert_eq!(cmds.len(), 5);
+    }
+
+    #[test]
+    fn recorded_edits_replay_exactly_and_sweeps_merge() {
+        let mut s = state_with_tracks(1);
+        let mut h = History::new();
+        h.rec_start(3);
+        s.selected = 2;
+        apply_action(&mut s, &mut h, &Action::ToggleStep);
+        // a velocity sweep: many presses, ONE recorded command
+        for _ in 0..5 {
+            apply_action(
+                &mut s,
+                &mut h,
+                &Action::Adjust { layer: state::BindTarget::Velocity, steps: 1, coarse: false },
+            );
+        }
+        let (_, cmds) = h.rec_stop().expect("recording");
+        assert_eq!(cmds.len(), 2, "sweep merged: {cmds:?}");
+        let velocity_after = s.tracks[0].steps[2].velocity;
+        // wipe the work, then fire the macro: the riff comes back
+        s.tracks[0].steps[2] = Step::default();
+        s.macros[3] = Some(Macro { cmds, quant: state::Quant::Now });
+        fire_macro_now(&mut s, 3, 0);
+        assert!(s.tracks[0].steps[2].active, "toggle replayed");
+        assert_eq!(s.tracks[0].steps[2].velocity, velocity_after, "sweep replayed absolutely");
+        assert_eq!(s.macro_flash.as_deref(), Some("@d"));
+        // firing again: state already matches → honest no-change flash
+        fire_macro_now(&mut s, 3, 0);
+        assert_eq!(s.macro_flash.as_deref(), Some("@d: no change"));
+    }
+
+    #[test]
+    fn fired_macros_do_not_leak_into_a_recording() {
+        let mut h = History::new();
+        h.rec_start(0);
+        // a thread-fired macro's undo lands via push_raw
+        h.push_raw(Command::ToggleMute { track: 0, was_muted: false });
+        assert_eq!(h.rec_status(), Some((0, 0)), "push_raw is invisible to rec");
+        h.push(Command::ToggleMute { track: 0, was_muted: false });
+        assert_eq!(h.rec_status(), Some((0, 1)));
     }
 
     #[test]
@@ -6854,6 +7105,21 @@ mod tests {
                 state::MacroCmd::SetScale { track: 0, scale: String::new() },
                 state::MacroCmd::Fill { track: 1, kind: state::FillKind::Density, arg: 0.4 },
                 state::MacroCmd::SetBpm { bpm: 93.5 },
+                state::MacroCmd::SetSteps {
+                    track: 0,
+                    start: 2,
+                    steps: vec![state::StepParam {
+                        active: true,
+                        note: 71,
+                        velocity: 90,
+                        mod_value: 0.0,
+                        prob: 60,
+                        bind: None,
+                    }],
+                },
+                state::MacroCmd::SetActive { track: 1, step: 7, active: true },
+                state::MacroCmd::SetEuclid { track: 0, pulses: 3, length: 12, rotation: 1 },
+                state::MacroCmd::SetMode { track: 1, mode: TrackMode::Modulation },
             ],
             quant: state::Quant::Beat,
         });

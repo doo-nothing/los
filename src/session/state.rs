@@ -525,6 +525,13 @@ pub enum MacroCmd {
     SetScale { track: usize, scale: String },
     Fill { track: usize, kind: FillKind, arg: f32 },
     SetBpm { bpm: f64 },
+    /// Absolute step rewrite — how recorded edits replay exactly.
+    SetSteps { track: usize, start: usize, steps: Vec<StepParam> },
+    /// A single trigger set absolutely (recorded step toggles).
+    SetActive { track: usize, step: usize, active: bool },
+    /// Euclidean params, re-applied on replay.
+    SetEuclid { track: usize, pulses: usize, length: usize, rotation: usize },
+    SetMode { track: usize, mode: TrackMode },
 }
 
 /// A saved macro: single-letter id, quantize, command list.
