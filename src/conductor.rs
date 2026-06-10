@@ -74,6 +74,22 @@ fn tmux_cmd_ok(args: &[&str]) {
 
 // ── session creation ───────────────────────────────────────────────────────
 
+/// Create the detached `los` session sized to the launching terminal.
+/// A bare `new-session -d` defaults to 80x24, so every layout computation
+/// would happen in a tiny window and only get proportionally rescaled on
+/// attach — content-aware sizing needs the real geometry up front.
+fn new_los_session(window_name: &str) -> Result<()> {
+    let mut args: Vec<String> = ["new-session", "-d", "-s", "los", "-n", window_name]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    if let Ok((w, h)) = crossterm::terminal::size() {
+        args.extend(["-x".into(), w.to_string(), "-y".into(), h.to_string()]);
+    }
+    let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    tmux_cmd(&args_ref).map(|_| ())
+}
+
 fn exe_path() -> Result<String> {
     Ok(std::env::current_exe()?
         .to_str()
@@ -131,9 +147,12 @@ fn spawn_session_panes(panes_data: &[(&str, &str)]) -> Result<()> {
     // Create window
     tmux_cmd(&["new-window", "-t", session, "-n", win])?;
 
-    // Create all required panes
+    // Create all required panes. Rebalance after every split: repeated
+    // bare splits halve the same pane and hit "no space for new pane" in
+    // small windows; the saved layout is applied over this afterwards.
     for _ in 1..panes_data.len() {
         tmux_cmd(&["split-window", "-t", &format!("{}:{}", session, win)])?;
+        tmux_cmd_ok(&["select-layout", "-t", &format!("{}:{}", session, win), "tiled"]);
     }
 
     // Enable pane borders
@@ -184,6 +203,69 @@ fn install_transport_keys(exe: &str) {
         &format!("run-shell -b '{} ctl stop'", exe),
         "choose-tree -Zs",
     ]);
+}
+
+/// Re-apply the content-aware house sizes after a client resize. tmux only
+/// rescales panes proportionally, which slowly distorts the content-sized
+/// rows as the terminal changes. Acts ONLY while the session still has the
+/// untouched house pane set (six panes, stock titles) and was created
+/// fresh (`@los_house 1`) — loaded states and custom arrangements are left
+/// to tmux's proportional rescale.
+pub fn relayout() -> Result<()> {
+    let house = tmux_cmd(&["show-options", "-t", "los", "-v", "@los_house"]).unwrap_or_default();
+    if house.trim() != "1" {
+        return Ok(());
+    }
+    let win = "los:modules";
+    let panes = tmux_cmd(&["list-panes", "-t", win, "-F", "#{pane_id}\t#{pane_title}"])?;
+    let by_title: std::collections::HashMap<&str, &str> = panes
+        .lines()
+        .filter_map(|l| l.split_once('\t').map(|(id, t)| (t, id)))
+        .collect();
+    let expected = ["SEQ", "MIX", "VOICE", "MATHs", "los", "SCOPE"];
+    if by_title.len() != expected.len() || !expected.iter().all(|t| by_title.contains_key(t)) {
+        return Ok(()); // not the house anymore — leave it be
+    }
+    let dims = tmux_cmd(&["display-message", "-p", "-t", win, "#{window_width} #{window_height}"])?;
+    let mut it = dims.split_whitespace().filter_map(|n| n.parse::<usize>().ok());
+    let (w, h) = (it.next().unwrap_or(120), it.next().unwrap_or(40));
+    let (top, row2, col) = house_dims(w, h);
+    // order matters: SEQ pins the top block, then the row split, then the
+    // column widths (the divider between vertical splits costs one line)
+    tmux_cmd_ok(&["resize-pane", "-t", by_title["SEQ"], "-y", &h.saturating_sub(top + 1).to_string()]);
+    tmux_cmd_ok(&["resize-pane", "-t", by_title["VOICE"], "-y", &row2.to_string()]);
+    tmux_cmd_ok(&["resize-pane", "-t", by_title["los"], "-x", &col.to_string()]);
+    tmux_cmd_ok(&["resize-pane", "-t", by_title["SCOPE"], "-y", &(top.saturating_sub(1) / 2).to_string()]);
+    Ok(())
+}
+
+/// Re-run the house sizing whenever the attached client resizes.
+/// `house` marks whether the session has the fresh house layout (loaded
+/// states keep their own arrangement and skip the recompute).
+fn install_resize_hook(exe: &str, house: bool) {
+    tmux_cmd_ok(&["set-option", "-t", "los", "@los_house", if house { "1" } else { "0" }]);
+    tmux_cmd_ok(&[
+        "set-hook", "-t", "los", "client-resized",
+        &format!("run-shell -b '{} relayout'", exe),
+    ]);
+}
+
+/// Canonical module name for a pane title or CLI word. Display titles
+/// (SEQ, MIX, MATHs, los) and aliases (sto, seq) all map to the one name
+/// that save, load, and dispatch agree on — pane titles are the save
+/// format's source of truth, so this is what keeps the round-trip closed.
+pub fn canonical_module(name: &str) -> Option<&'static str> {
+    Some(match name.to_lowercase().as_str() {
+        "sequencer" | "seq" => "sequencer",
+        "voice" | "sto" => "voice",
+        "mixer" | "mix" => "mixer",
+        "scope" => "scope",
+        "envelope" | "maths" => "envelope",
+        "badge" | "los" => "badge",
+        "tone" => "tone",
+        "conductor" => "conductor",
+        _ => return None,
+    })
 }
 
 /// Module types the conductor (and `los add`) can spawn at runtime.
@@ -362,7 +444,7 @@ pub fn create_session() -> Result<()> {
     let _ = tmux_cmd(&["kill-session", "-t", "los"]);
 
     // Create conductor window
-    tmux_cmd(&["new-session", "-d", "-s", "los", "-n", "conductor"])?;
+    new_los_session("conductor")?;
     
     // Start conductor TUI in its pane
     let panes = list_session_panes("los", "conductor")?;
@@ -384,6 +466,7 @@ pub fn create_session() -> Result<()> {
 
     install_transport_keys(&exe);
     install_shell_theme();
+    install_resize_hook(&exe, true);
 
     // Attach (blocks until detached; use raw .status())
     let _ = Command::new("tmux")
@@ -410,7 +493,7 @@ pub fn load_session(state_path: &str) -> Result<()> {
     let _ = tmux_cmd(&["kill-session", "-t", "los"]);
 
     // Create conductor window
-    tmux_cmd(&["new-session", "-d", "-s", "los", "-n", "conductor"])?;
+    new_los_session("conductor")?;
 
     let exe = exe_path()?;
 
@@ -480,6 +563,7 @@ pub fn load_session(state_path: &str) -> Result<()> {
 
     install_transport_keys(&exe);
     install_shell_theme();
+    install_resize_hook(&exe, false);
 
     let _ = Command::new("tmux")
         .args(["attach-session", "-t", "los"])
@@ -879,9 +963,13 @@ pub fn run_conductor() -> Result<()> {
                                 let t = title.trim();
                                 let parts: Vec<&str> = t.split_whitespace().collect();
                                 if parts.is_empty() { continue; }
-                                let module_name = parts[0].to_lowercase();
+                                // canonicalize: house titles (SEQ, MIX, los)
+                                // must save as spawnable module names
+                                let Some(module_name) = canonical_module(parts[0]) else {
+                                    continue;
+                                };
                                 let instance = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-                                pane_info.push((module_name, instance));
+                                pane_info.push((module_name.to_string(), instance));
                             }
                         }
                         // Fallback to default order if tmux query fails or returns nothing
@@ -1098,6 +1186,21 @@ fn prompt_string(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, prompt: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn house_titles_round_trip_to_spawnable_modules() {
+        // every house pane title must canonicalize to a real module, or
+        // save/load silently spawns dead panes
+        for title in ["SEQ", "MIX", "VOICE", "MATHs", "los", "SCOPE"] {
+            let m = canonical_module(title);
+            assert!(m.is_some(), "house title {title} must map to a module");
+        }
+        // labels from add_module ("Voice 1") and plain names work too
+        assert_eq!(canonical_module("Voice"), Some("voice"));
+        assert_eq!(canonical_module("envelope"), Some("envelope"));
+        assert_eq!(canonical_module("maths"), Some("envelope"));
+        assert_eq!(canonical_module("nonsense"), None);
+    }
 
     #[test]
     fn house_dims_adapt_to_window() {

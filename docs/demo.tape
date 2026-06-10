@@ -7,7 +7,7 @@ Set FontSize 14
 Set Width 1300
 Set Height 840
 Set Padding 4
-Set Framerate 15
+Set Framerate 10
 Set Theme { "background": "#0d0b08", "foreground": "#e8dcc8" }
 
 # Launch off-camera: the gif opens on the rig, not on a shell prompt.

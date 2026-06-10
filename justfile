@@ -36,4 +36,7 @@ demo: build
         vhs docs/demo.tape; \
     fi
     -tmux kill-session -t los 2>/dev/null
+    @if command -v gifsicle >/dev/null; then \
+        gifsicle -O3 --lossy=60 docs/demo.gif -o docs/demo.gif.opt && mv docs/demo.gif.opt docs/demo.gif; \
+    fi
     @ls -lh docs/demo.gif
