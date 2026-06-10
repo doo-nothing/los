@@ -10,8 +10,8 @@
 Output docs/demo.gif
 
 Set FontSize 14
-Set Width 1300
-Set Height 1060
+Set Width 1200
+Set Height 1160
 Set Padding 4
 Set Framerate 10
 Set Theme { "background": "#0d0b08", "foreground": "#e8dcc8" }
