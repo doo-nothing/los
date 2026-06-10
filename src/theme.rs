@@ -105,9 +105,9 @@ pub fn meter_char(level: f32) -> char {
     METER[idx.min(7)]
 }
 
-/// A minimal fader `width` cells wide: a dim track `─`, a bone thumb `┃` at
-/// the set position, and the teal ghost `▴` riding the live (modulated)
-/// position — the §5 mod-feedback rule without block-gauge bulk.
+/// A fader `width` cells wide: an airy dim dot track, a chunky bone block
+/// thumb (1-bit soul), and the teal ghost `▴` riding the live (modulated)
+/// position — the §5 mod-feedback rule.
 pub fn fader(set: f32, live: Option<f32>, width: usize) -> Vec<Span<'static>> {
     let width = width.max(3);
     let pos = |v: f32| ((v.clamp(0.0, 1.0)) * (width - 1) as f32).round() as usize;
@@ -118,9 +118,12 @@ pub fn fader(set: f32, live: Option<f32>, width: usize) -> Vec<Span<'static>> {
             if ghost == Some(i) && i != thumb {
                 Span::styled(GHOST.to_string(), signal(cv()))
             } else if i == thumb {
-                Span::styled("┃".to_string(), value())
+                Span::styled("█".to_string(), value())
             } else {
-                Span::styled("─".to_string(), dim())
+                Span::styled(
+                    if i % 2 == 0 { "·" } else { " " }.to_string(),
+                    dim(),
+                )
             }
         })
         .collect()
@@ -190,11 +193,11 @@ mod tests {
     #[test]
     fn fader_renders_thumb_and_ghost() {
         let g = fader_str(0.5, None, 9);
-        assert_eq!(g, "────┃────");
+        assert_eq!(g, "· · █ · ·");
         let g = fader_str(0.0, Some(1.0), 5);
-        assert_eq!(g, "┃───▴", "thumb at zero, ghost riding high");
+        assert_eq!(g, "█ · ▴", "thumb at zero, ghost riding high");
         let g = fader_str(1.0, Some(1.0), 5);
-        assert_eq!(g, "────┃", "ghost under the thumb yields to it");
+        assert_eq!(g, "· · █", "ghost under the thumb yields to it");
         assert_eq!(fader_str(0.5, Some(0.75), 8).chars().count(), 8);
     }
 

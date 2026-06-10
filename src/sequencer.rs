@@ -1055,7 +1055,10 @@ fn draw_ui(
                     (TrackMode::Modulation, false) => theme::MOD_OFF,
                 };
                 // playhead + wake (CLOCK hue), trigger flash on the live cell
-                let style = if state.playing && i == tstep && !trk.muted {
+                let style = if is_cur && i == state.selected {
+                    // your edit cursor, visible in the overview too
+                    theme::selected()
+                } else if state.playing && i == tstep && !trk.muted {
                     if on {
                         theme::flash(hue)
                     } else {

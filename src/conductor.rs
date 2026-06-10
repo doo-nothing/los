@@ -252,73 +252,78 @@ pub fn remove_module(module: &str, instance: usize) -> Result<()> {
 /// other tmux sessions keep their look.
 fn install_shell_theme() {
     let t = |args: &[&str]| tmux_cmd_ok(args);
-    t(&["set-option", "-t", "los", "pane-border-style", "fg=#4a4438,bg=#0d0b08"]);
-    t(&["set-option", "-t", "los", "pane-active-border-style", "fg=#e3a818,bg=#0d0b08"]);
-    t(&["set-option", "-t", "los", "pane-border-format", " #{pane_title} "]);
+    t(&["set-option", "-w", "-t", "los:modules", "pane-border-style", "fg=#4a4438,bg=#070605"]);
+    t(&["set-option", "-w", "-t", "los:modules", "pane-active-border-style", "fg=#e3a818,bold,bg=#1b1610"]);
+    t(&["set-option", "-w", "-t", "los:modules", "pane-border-format", " #{pane_title} "]);
     t(&["set-option", "-t", "los", "status-style", "fg=#9a7b2d,bg=#0d0b08"]);
     t(&["set-option", "-t", "los", "status-left", "#[fg=#e3a818,bold] los #[fg=#9a7b2d]· "]);
     t(&["set-option", "-t", "los", "status-right", "#[fg=#c45dd4]♪ #{session_name} "]);
     t(&["set-option", "-t", "los", "window-status-current-style", "fg=#e8dcc8,bold"]);
     t(&["set-option", "-t", "los", "window-status-style", "fg=#7d7363"]);
-    // Active-pane clarity: inactive panes sit on a darker, cooler ground
-    // with dimmed ink; the active pane is warmer and brighter — plus the
-    // amber border. You can feel the focus before you read it.
-    t(&["set-window-option", "-t", "los:modules", "window-style", "fg=#a89a82,bg=#060504"]);
-    t(&["set-window-option", "-t", "los:modules", "window-active-style", "fg=#e8dcc8,bg=#110e0a"]);
+    // Active-pane clarity: inactive panes sink into near-black with dimmed
+    // ink; the active pane sits on a clearly lifted warm charcoal with full
+    // ink — plus the bold amber border. Unmissable.
+    t(&["set-option", "-w", "-t", "los:modules", "window-style", "fg=#8d8170,bg=#070605"]);
+    t(&["set-option", "-w", "-t", "los:modules", "window-active-style", "fg=#e8dcc8,bg=#1b1610"]);
 }
 
-/// Build the default window layout (see create_session diagram). Every
-/// split names its pane so failures are loud, and the sequencer — the
-/// instrument you play most — gets the full-width bottom half.
+/// Build the default window layout:
+///   ┌──────┬───────────────┐
+///   │ los  │               │
+///   ├──────┤      MIX      │
+///   │SCOPE │               │
+///   ├──────┴──┬────────────┤
+///   │  VOICE  │   MATHs    │
+///   ├─────────┴────────────┤
+///   │         SEQ          │
+///   └──────────────────────┘
 fn build_house_layout(exe: &str) -> Result<()> {
     let win = "los:modules";
     tmux_cmd(&["new-window", "-t", "los", "-n", "modules"])?;
-    tmux_cmd(&["set-option", "-t", win, "pane-border-status", "top"])?;
-    tmux_cmd(&["set-option", "-t", win, "pane-border-format", " #{pane_title} "])?;
+    tmux_cmd(&["set-option", "-w", "-t", win, "pane-border-status", "top"])?;
+    tmux_cmd(&["set-option", "-w", "-t", win, "pane-border-format", " #{pane_title} "])?;
 
-    // the window's first pane becomes SEQ (bottom, after the split)
+    // the window's first pane becomes SEQ (bottom) after the splits
     let seq = tmux_cmd(&["list-panes", "-t", win, "-F", "#{pane_id}"])?
         .lines()
         .next()
         .unwrap_or_default()
         .to_string();
-    // top area: 55% of the window, above SEQ
-    let top = tmux_cmd(&[
-        "split-window", "-t", &seq, "-v", "-b", "-l", "55%", "-P", "-F", "#{pane_id}",
+    // top block (rows 1+2) above SEQ: 60% of the window; row 1 = mixer
+    let row1 = tmux_cmd(&[
+        "split-window", "-t", &seq, "-v", "-b", "-l", "60%", "-P", "-F", "#{pane_id}",
+        &format!("{} mixer 0", exe),
+    ])?;
+    let row1 = row1.trim().to_string();
+    // row 2 under row 1: voice | maths
+    let voice = tmux_cmd(&[
+        "split-window", "-t", &row1, "-v", "-l", "50%", "-P", "-F", "#{pane_id}",
         &format!("{} voice 0", exe),
     ])?;
-    let top = top.trim().to_string();
-    // left column for badge + scope (24 cols)
+    let voice = voice.trim().to_string();
+    let maths = tmux_cmd(&[
+        "split-window", "-t", &voice, "-h", "-l", "50%", "-P", "-F", "#{pane_id}",
+        &format!("{} envelope 0", exe),
+    ])?;
+    // row 1 left column: badge over scope
     let badge = tmux_cmd(&[
-        "split-window", "-t", &top, "-h", "-b", "-l", "24", "-P", "-F", "#{pane_id}",
+        "split-window", "-t", &row1, "-h", "-b", "-l", "24", "-P", "-F", "#{pane_id}",
         &format!("{} badge 0", exe),
     ])?;
     let badge = badge.trim().to_string();
-    // scope under the badge (badge keeps ~7 rows)
     let scope = tmux_cmd(&[
-        "split-window", "-t", &badge, "-v", "-l", "60%", "-P", "-F", "#{pane_id}",
+        "split-window", "-t", &badge, "-v", "-l", "50%", "-P", "-F", "#{pane_id}",
         &format!("{} scope 0", exe),
     ])?;
-    // maths + mix split off the voice pane
-    let maths = tmux_cmd(&[
-        "split-window", "-t", &top, "-h", "-l", "66%", "-P", "-F", "#{pane_id}",
-        &format!("{} envelope 0", exe),
-    ])?;
-    let maths = maths.trim().to_string();
-    let mix = tmux_cmd(&[
-        "split-window", "-t", &maths, "-h", "-l", "50%", "-P", "-F", "#{pane_id}",
-        &format!("{} mixer 0", exe),
-    ])?;
-    // SEQ runs in the original pane
     tmux_cmd(&["respawn-pane", "-k", "-t", &seq, &format!("{} sequencer 0", exe)])?;
 
     for (id, title) in [
         (seq.as_str(), "SEQ"),
-        (top.as_str(), "VOICE"),
+        (row1.as_str(), "MIX"),
+        (voice.as_str(), "VOICE"),
+        (maths.trim(), "MATHs"),
         (badge.as_str(), "los"),
         (scope.trim(), "SCOPE"),
-        (maths.as_str(), "MATHs"),
-        (mix.trim(), "MIX"),
     ] {
         tmux_cmd_ok(&["select-pane", "-t", id, "-T", title]);
     }
