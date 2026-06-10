@@ -676,7 +676,54 @@ pub fn run(instance: usize) -> Result<()> {
         draw_ui(&mut terminal, &current_state, selected, show_help, overlay.as_deref(), picker_rows, &ghosts, &ui_entries, &picker_colors, instance, bpm, playing)?;
 
         if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
+            let ev = event::read()?;
+            if let Event::Mouse(m) = ev {
+                use crossterm::event::{MouseButton, MouseEventKind};
+                use crate::undo::{ParamUndo, ParamValue};
+                // rows 1..=7 are shape/sub/fm/out/amp/notes/lpg
+                let row_at = |y: u16| -> Option<usize> {
+                    (1..=7).contains(&y).then(|| y as usize - 1)
+                };
+                match m.kind {
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                        let steps = if m.kind == MouseEventKind::ScrollUp { 1 } else { -1 };
+                        let mut s = state.lock().unwrap();
+                        let old = s.get_param(selected);
+                        adjust(&mut s, selected, steps, false);
+                        let new = s.get_param(selected);
+                        if let (Some(old), Some(new)) = (old, new) {
+                            history.record(selected, "Adjust", old, new);
+                        }
+                    }
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        if let Some(row) = row_at(m.row) {
+                            selected = row;
+                        }
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        // drag the bar of a value row: bar starts after the
+                        // 7-char label
+                        if let Some(row) = row_at(m.row) {
+                            if matches!(row, 0 | 1 | 2 | 6) {
+                                selected = row;
+                                let w = terminal.size().map(|r| r.width as usize).unwrap_or(60);
+                                let bar_w = (w.saturating_sub(24)).clamp(8, 22);
+                                let x = (m.column as usize).saturating_sub(7);
+                                let v = (x as f32 / bar_w.saturating_sub(1).max(1) as f32).clamp(0.0, 1.0);
+                                let mut s = state.lock().unwrap();
+                                let old = s.get_param(row);
+                                s.set_param(row, ParamValue::F32(v));
+                                if let Some(old) = old {
+                                    history.record(row, "Slide", old, ParamValue::F32(v));
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            if let Event::Key(key) = ev {
                 ex_msg = None;
                 if picker.is_active() {
                     if let crate::picker::PickerEvent::Chosen(addr) = picker.handle_key(key.code) {

@@ -520,7 +520,60 @@ pub fn run() -> Result<()> {
         )?;
 
         if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
+            let ev = event::read()?;
+            if let Event::Mouse(m) = ev {
+                use crossterm::event::{MouseButton, MouseEventKind};
+                use crate::undo::{ParamUndo, ParamValue};
+                let n = inner.lock().unwrap().tracks.len();
+                // y: 1..=n strips; n+2 master
+                let strip_at = |y: u16| -> Option<usize> {
+                    let y = y as usize;
+                    if (1..=n).contains(&y) {
+                        Some(y - 1)
+                    } else if y == n + 2 {
+                        Some(n)
+                    } else {
+                        None
+                    }
+                };
+                match m.kind {
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                        let steps = if m.kind == MouseEventKind::ScrollUp { 1 } else { -1 };
+                        let mut s = inner.lock().unwrap();
+                        let slot = strip_slot(&s, 0);
+                        let old = s.get_param(slot);
+                        adjust_level(&mut s, steps, false);
+                        let new = s.get_param(slot);
+                        if let (Some(old), Some(new)) = (old, new) {
+                            history.record(slot, "Level", old, new);
+                        }
+                    }
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        if let Some(strip) = strip_at(m.row) {
+                            inner.lock().unwrap().selected = strip;
+                        }
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        if let Some(strip) = strip_at(m.row) {
+                            let w = terminal.size().map(|r| r.width as usize).unwrap_or(60);
+                            let bar_w = (w.saturating_sub(28)).clamp(8, 22);
+                            let x = (m.column as usize).saturating_sub(12);
+                            let v = (x as f32 / bar_w.saturating_sub(1).max(1) as f32).clamp(0.0, 1.0);
+                            let mut s = inner.lock().unwrap();
+                            s.selected = strip;
+                            let slot = strip_slot(&s, 0);
+                            let old = s.get_param(slot);
+                            s.set_param(slot, ParamValue::F32(v));
+                            if let Some(old) = old {
+                                history.record(slot, "Slide", old, ParamValue::F32(v));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            if let Event::Key(key) = ev {
                 ex_msg = None;
                 if ex.is_active() {
                     let candidates = crate::excmd::patch_names(&state::patches_dir());

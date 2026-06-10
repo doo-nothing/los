@@ -1168,7 +1168,69 @@ pub fn run(instance: usize) -> Result<()> {
         draw_ui(&mut terminal, &current_state, selected, show_help, overlay.as_deref(), picker_rows, &ghosts, &ui_entries, &picker_colors, instance, bpm, playing)?;
 
         if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
+            let ev = event::read()?;
+            if let Event::Mouse(m) = ev {
+                use crossterm::event::{MouseButton, MouseEventKind};
+                use crate::undo::{ParamUndo, ParamValue};
+                // y: 1 = overview (click selects channel); 3 = trig row;
+                // 4..=9 = rise/fall/shap/attn/offs/plck; 10 = sig
+                let row_at = |y: u16| -> Option<usize> {
+                    match y {
+                        3 => Some(ROW_TRIGGER),
+                        4..=9 => Some(y as usize - 4),
+                        10 => Some(ROW_SIGNAL),
+                        _ => None,
+                    }
+                };
+                match m.kind {
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                        let steps = if m.kind == MouseEventKind::ScrollUp { 1 } else { -1 };
+                        let mut s = state.lock().unwrap();
+                        let slot = row_slot(s.current_channel, selected);
+                        let old = s.get_param(slot);
+                        adjust(&mut s, selected, steps, false);
+                        let new = s.get_param(slot);
+                        if let (Some(old), Some(new)) = (old, new) {
+                            history.record(slot, "Adjust", old, new);
+                        }
+                    }
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        if m.row == 1 {
+                            // overview strip: each channel cell is ~6 wide
+                            let ch = (m.column as usize) / 6;
+                            let mut s = state.lock().unwrap();
+                            s.current_channel = ch.min(s.params.len() - 1);
+                        } else if let Some(row) = row_at(m.row) {
+                            selected = row;
+                        }
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        if let Some(row) = row_at(m.row) {
+                            if row <= 5 {
+                                selected = row;
+                                let w = terminal.size().map(|r| r.width as usize).unwrap_or(60);
+                                let bar_w = (w.saturating_sub(26)).clamp(8, 22);
+                                let x = (m.column as usize).saturating_sub(6);
+                                let mut v = (x as f32 / bar_w.saturating_sub(1).max(1) as f32)
+                                    .clamp(0.0, 1.0);
+                                if matches!(row, 3 | 4) {
+                                    v = v * 2.0 - 1.0; // attn/offs are bipolar
+                                }
+                                let mut s = state.lock().unwrap();
+                                let slot = row_slot(s.current_channel, row);
+                                let old = s.get_param(slot);
+                                s.set_param(slot, ParamValue::F32(v));
+                                if let Some(old) = old {
+                                    history.record(slot, "Slide", old, ParamValue::F32(v));
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            if let Event::Key(key) = ev {
                 ex_msg = None;
                 if picker.is_active() {
                     use crate::picker::PickerEvent;

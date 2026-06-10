@@ -252,6 +252,9 @@ pub fn remove_module(module: &str, instance: usize) -> Result<()> {
 /// other tmux sessions keep their look.
 fn install_shell_theme() {
     let t = |args: &[&str]| tmux_cmd_ok(args);
+    // Mouse: click focuses panes (tmux native) and events pass through to
+    // the modules (wheel = adjust, click = select, drag = slide).
+    t(&["set-option", "-t", "los", "mouse", "on"]);
     t(&["set-option", "-w", "-t", "los:modules", "pane-border-style", "fg=#4a4438,bg=#070605"]);
     t(&["set-option", "-w", "-t", "los:modules", "pane-active-border-style", "fg=#e3a818,bold,bg=#1b1610"]);
     t(&["set-option", "-w", "-t", "los:modules", "pane-border-format", " #{pane_title} "]);
