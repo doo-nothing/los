@@ -833,7 +833,8 @@ fn draw_ui(
 
         let mut lines: Vec<Line> = Vec::new();
         let ctx = format!("ch{}/{}", cur + 1, n);
-        lines.push(theme::header("MATHs", &ctx, &theme::transport_echo(bpm, playing, None), w));
+        let _ = (bpm, playing);
+        lines.push(theme::header("MATHs", &ctx, "", w));
 
         // ── overview: every channel at a glance + the buses ─────────────
         let mut ov: Vec<Span> = Vec::new();
@@ -920,7 +921,7 @@ fn draw_ui(
         ];
         for (row, name, set, disp, ghost, src) in rows {
             let mut spans = vec![row_label(row, name)];
-            spans.push(Span::styled(theme::gauge(set, ghost, gauge_w), theme::value()));
+            spans.extend(theme::fader(set, ghost, gauge_w));
             spans.push(Span::styled(format!(" {:>7}", disp), theme::value()));
             if let Some(Some(a)) = src {
                 spans.push(Span::styled(

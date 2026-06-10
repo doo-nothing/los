@@ -283,12 +283,8 @@ fn draw_ui(
         let w = area.width as usize;
         let mut lines: Vec<Line> = Vec::new();
 
-        lines.push(theme::header(
-            "VOICE",
-            &instance.to_string(),
-            &theme::transport_echo(bpm, playing, None),
-            w,
-        ));
+        let _ = (bpm, playing);
+        lines.push(theme::header("VOICE", &instance.to_string(), "", w));
 
         let gauge_w = (w.saturating_sub(22)).clamp(8, 24);
         let label = |row: usize, name: &str| -> Span<'static> {
@@ -307,7 +303,7 @@ fn draw_ui(
         ];
         for (row, name, set, src, ghost) in value_rows {
             let mut spans = vec![label(row, name)];
-            spans.push(Span::styled(theme::gauge(set, ghost, gauge_w), theme::value()));
+            spans.extend(theme::fader(set, ghost, gauge_w));
             spans.push(Span::styled(format!(" {:.2}", set), theme::value()));
             if let Some(a) = src {
                 spans.push(Span::styled(
@@ -349,15 +345,16 @@ fn draw_ui(
         ]));
 
         // LPG
-        lines.push(Line::from(vec![
-            label(6, "lpg"),
-            Span::styled(theme::gauge(state.lpg, None, gauge_w), theme::value()),
+        let mut lpg_spans = vec![label(6, "lpg")];
+        lpg_spans.extend(theme::fader(state.lpg, None, gauge_w));
+        lpg_spans.extend(vec![
             Span::styled(format!(" {:.2}", state.lpg), theme::value()),
             Span::styled(
                 if state.lpg > 0.0 { " vactrol" } else { "" }.to_string(),
                 theme::signal(theme::audio()),
             ),
-        ]));
+        ]);
+        lines.push(Line::from(lpg_spans));
 
         lines.push(theme::rule(w));
 

@@ -105,19 +105,30 @@ pub fn meter_char(level: f32) -> char {
     METER[idx.min(7)]
 }
 
-/// A horizontal gauge `width` cells wide with an optional ghost marker at
-/// the live (modulated) position — the §5 mod-feedback rule.
-pub fn gauge(set: f32, live: Option<f32>, width: usize) -> String {
-    let width = width.max(1);
-    let set_cells = (set.clamp(0.0, 1.0) * width as f32).round() as usize;
-    let mut cells: Vec<char> = (0..width)
-        .map(|i| if i < set_cells { '▓' } else { '░' })
-        .collect();
-    if let Some(live) = live {
-        let pos = ((live.clamp(0.0, 1.0) * (width.saturating_sub(1)) as f32).round()) as usize;
-        cells[pos.min(width - 1)] = GHOST;
-    }
-    cells.into_iter().collect()
+/// A minimal fader `width` cells wide: a dim track `─`, a bone thumb `┃` at
+/// the set position, and the teal ghost `▴` riding the live (modulated)
+/// position — the §5 mod-feedback rule without block-gauge bulk.
+pub fn fader(set: f32, live: Option<f32>, width: usize) -> Vec<Span<'static>> {
+    let width = width.max(3);
+    let pos = |v: f32| ((v.clamp(0.0, 1.0)) * (width - 1) as f32).round() as usize;
+    let thumb = pos(set);
+    let ghost = live.map(pos);
+    (0..width)
+        .map(|i| {
+            if ghost == Some(i) && i != thumb {
+                Span::styled(GHOST.to_string(), signal(cv()))
+            } else if i == thumb {
+                Span::styled("┃".to_string(), value())
+            } else {
+                Span::styled("─".to_string(), dim())
+            }
+        })
+        .collect()
+}
+
+/// Plain-string form of [`fader`] for tests and width math.
+pub fn fader_str(set: f32, live: Option<f32>, width: usize) -> String {
+    fader(set, live, width).iter().map(|s| s.content.clone()).collect()
 }
 
 // ── pane anatomy ────────────────────────────────────────────────────────────
@@ -177,14 +188,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gauge_renders_set_and_ghost() {
-        let g = gauge(0.5, None, 8);
-        assert_eq!(g, "▓▓▓▓░░░░");
-        let g = gauge(0.5, Some(0.75), 8);
-        assert_eq!(g.chars().count(), 8);
-        assert_eq!(g.chars().nth(5), Some(GHOST), "ghost rides the live position");
-        let g = gauge(1.0, Some(0.0), 4);
-        assert_eq!(g.chars().next(), Some(GHOST), "ghost at zero");
+    fn fader_renders_thumb_and_ghost() {
+        let g = fader_str(0.5, None, 9);
+        assert_eq!(g, "────┃────");
+        let g = fader_str(0.0, Some(1.0), 5);
+        assert_eq!(g, "┃───▴", "thumb at zero, ghost riding high");
+        let g = fader_str(1.0, Some(1.0), 5);
+        assert_eq!(g, "────┃", "ghost under the thumb yields to it");
+        assert_eq!(fader_str(0.5, Some(0.75), 8).chars().count(), 8);
     }
 
     #[test]

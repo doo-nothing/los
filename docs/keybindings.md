@@ -161,8 +161,9 @@ e.g. `envelope/0/eoc` for self-patching) · `:set rise 0|100ms|2s|1.5m|0.42`
 (also fall/shape/atten/offset/pluck, `mode trig|gate`) · `:` · undo (all ✅)
 
 ### Mixer
-`h/l` select channel (counts) · `j/k` level down/up · `J/K` coarse ·
-`<`/`>` pan (replaces `+/-`) · `gg` first track / `G` master · `m` mute ·
+Strips are vertical rows: `j/k` select strip (counts) · `h/l` level
+down/up · `H/L` coarse ·
+`<`/`>` pan · `gg` first track / `G` master · `m` mute ·
 `s` solo · `:` · undo (all ✅)
 
 ### Scope
@@ -170,7 +171,8 @@ Rebuilt as a vertical param list (✅): `j/k` select (mode, source, channel,
 modbus ch, zoom, gain, trigger) · `h/l` adjust · `H/L` coarse · counts ·
 `gg/G` · the old `g/G t/T n/N m c b +/-` keys are gone. `@` on the source /
 modbus rows opens the picker; the channel row shows the live source label
-(`envelope/0/sum`). `:` ✅.
+(`envelope/0/sum`). The param strip auto-hides ~4s after the last
+interaction — the scope is the picture. `:` ✅.
 
 ### Conductor
 Two views, `Tab` switches. **States**: `j/k` nav (counts) · `gg/G` ·

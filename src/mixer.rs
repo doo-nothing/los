@@ -322,12 +322,8 @@ fn draw_ui(
         let w = area.width as usize;
         let mut lines: Vec<Line> = Vec::new();
 
-        lines.push(theme::header(
-            "MIX",
-            &format!("{}ch", tracks.len()),
-            &theme::transport_echo(bpm, playing, None),
-            w,
-        ));
+        let _ = (bpm, playing);
+        lines.push(theme::header("MIX", &format!("{}ch", tracks.len()), "", w));
 
         let gauge_w = (w.saturating_sub(30)).clamp(8, 20);
         // channel strips as dense rows: name · meter · level gauge · pan · M/S
@@ -341,10 +337,11 @@ fn draw_ui(
                 format!("{} ", theme::meter_char(m)),
                 theme::signal(theme::audio()),
             ));
-            spans.push(Span::styled(
-                theme::gauge(t.level, None, gauge_w),
-                if t.mute { theme::dim() } else { theme::value() },
-            ));
+            if t.mute {
+                spans.push(Span::styled(theme::fader_str(t.level, None, gauge_w), theme::dim()));
+            } else {
+                spans.extend(theme::fader(t.level, None, gauge_w));
+            }
             spans.push(Span::styled(format!(" {:>3.0}%", t.level * 100.0), theme::value()));
             let pan = if t.pan.abs() < 0.05 {
                 String::from(" ·")
@@ -368,19 +365,22 @@ fn draw_ui(
         // master strip
         let sel = selected >= tracks.len();
         let name_style = if sel { theme::selected() } else { theme::chrome_hi() };
-        lines.push(Line::from(vec![
+        let mut mspans = vec![
             Span::styled(format!(" {:<9}", "MASTER"), name_style),
             Span::styled(
                 format!("{} ", theme::meter_char(master_meter)),
                 theme::signal(if master_meter > 0.95 { theme::alert() } else { theme::audio() }),
             ),
-            Span::styled(theme::gauge(master, None, gauge_w), theme::value()),
+        ];
+        mspans.extend(theme::fader(master, None, gauge_w));
+        mspans.extend(vec![
             Span::styled(format!(" {:>3.0}%", master * 100.0), theme::value()),
             Span::styled(
                 format!("  {}", theme::AUDIO_GLYPH),
                 theme::signal(theme::audio()),
             ),
-        ]));
+        ]);
+        lines.push(Line::from(mspans));
 
         lines.push(theme::rule(w));
         lines.push(theme::status("NORMAL", overlay.unwrap_or(""), "", w));
@@ -391,9 +391,9 @@ fn draw_ui(
             let help_text = vec![
                 Line::from("━━━ MIX ━━━"),
                 Line::from(""),
-                Line::from("  h/l       Select strip (counts, wraps)"),
+                Line::from("  j/k       Select strip (counts, wraps)"),
                 Line::from("  gg / G    First strip / master"),
-                Line::from("  j/k       Level down/up (J/K ×10)"),
+                Line::from("  h/l       Level down/up (H/L ×10)"),
                 Line::from("  < / >     Pan left/right"),
                 Line::from("  m / s     Mute / solo"),
                 Line::from("  u/^r      Undo / redo"),
@@ -580,23 +580,23 @@ pub fn run() -> Result<()> {
                 }
                 match key.code {
                     KeyCode::Char(c) if c.is_ascii_digit() && count.push(c) => {}
-                    KeyCode::Char('h') | KeyCode::Left => {
-                        select_strip(&mut inner.lock().unwrap(), -(count.take() as i32));
-                    }
-                    KeyCode::Char('l') | KeyCode::Right => {
+                    KeyCode::Char('j') | KeyCode::Down => {
                         select_strip(&mut inner.lock().unwrap(), count.take() as i32);
                     }
-                    KeyCode::Char('j' | 'k' | 'J' | 'K') | KeyCode::Down | KeyCode::Up => {
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        select_strip(&mut inner.lock().unwrap(), -(count.take() as i32));
+                    }
+                    KeyCode::Char('h' | 'l' | 'H' | 'L') | KeyCode::Left | KeyCode::Right => {
                         let c = match key.code {
                             KeyCode::Char(c) => c,
-                            KeyCode::Down => 'j',
-                            _ => 'k',
+                            KeyCode::Left => 'h',
+                            _ => 'l',
                         };
                         let n = count.take() as i32;
                         let (steps, coarse) = match c {
-                            'j' => (-n, false),
-                            'k' => (n, false),
-                            'J' => (-n, true),
+                            'h' => (-n, false),
+                            'l' => (n, false),
+                            'H' => (-n, true),
                             _ => (n, true),
                         };
                         use crate::undo::ParamUndo;

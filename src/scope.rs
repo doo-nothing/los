@@ -243,16 +243,20 @@ fn draw_ui(
     show_help: bool,
     overlay: Option<&str>,
     picker: Option<(Vec<String>, usize)>,
+    show_menu: bool,
 ) -> Result<()> {
     terminal.draw(|f| {
         let area = f.area();
         
+        // the scope is the picture: chrome auto-hides when you're not
+        // touching it, leaving a full-bleed waveform
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(0),
-                Constraint::Length(1),
-            ])
+            .constraints(if show_menu {
+                [Constraint::Min(0), Constraint::Length(1)]
+            } else {
+                [Constraint::Min(0), Constraint::Length(0)]
+            })
             .split(area);
 
         // Param list as one status line, theme anatomy: selected row inverse
@@ -439,6 +443,8 @@ pub fn run(instance: usize) -> Result<()> {
     let mut picker = crate::picker::Picker::default();
     let mut history = crate::undo::ParamHistory::default();
     let mut ex = crate::excmd::ExLine::default();
+    // param strip auto-hides ~4s after the last interaction
+    let mut menu_until = std::time::Instant::now() + Duration::from_secs(4);
     let mut ex_msg: Option<String> = None;
     let mut patch_name: Option<String> = None;
     let mut baseline = state::to_toml_string(&snapshot_params(&state.lock().unwrap())).unwrap_or_default();
@@ -474,7 +480,8 @@ pub fn run(instance: usize) -> Result<()> {
             ex_msg.clone()
         };
         let picker_rows = if picker.is_active() { Some(picker.rows()) } else { None };
-        draw_ui(&mut terminal, &current_state, show_help, overlay.as_deref(), picker_rows)?;
+        let show_menu = std::time::Instant::now() < menu_until || overlay.is_some();
+        draw_ui(&mut terminal, &current_state, show_help, overlay.as_deref(), picker_rows, show_menu)?;
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
@@ -538,6 +545,10 @@ pub fn run(instance: usize) -> Result<()> {
                 }
                 if !matches!(key.code, KeyCode::Char('g')) {
                     pending_g = false;
+                }
+                // any interaction reveals the param strip for a few seconds
+                if !matches!(key.code, KeyCode::Char(' ')) {
+                    menu_until = std::time::Instant::now() + Duration::from_secs(4);
                 }
                 // Ctrl-s: save module state
                 if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::CONTROL {

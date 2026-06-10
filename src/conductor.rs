@@ -267,6 +267,65 @@ fn install_shell_theme() {
     t(&["set-window-option", "-t", "los:modules", "window-active-style", "fg=#e8dcc8,bg=#110e0a"]);
 }
 
+/// Build the default window layout (see create_session diagram). Every
+/// split names its pane so failures are loud, and the sequencer — the
+/// instrument you play most — gets the full-width bottom half.
+fn build_house_layout(exe: &str) -> Result<()> {
+    let win = "los:modules";
+    tmux_cmd(&["new-window", "-t", "los", "-n", "modules"])?;
+    tmux_cmd(&["set-option", "-t", win, "pane-border-status", "top"])?;
+    tmux_cmd(&["set-option", "-t", win, "pane-border-format", " #{pane_title} "])?;
+
+    // the window's first pane becomes SEQ (bottom, after the split)
+    let seq = tmux_cmd(&["list-panes", "-t", win, "-F", "#{pane_id}"])?
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    // top area: 55% of the window, above SEQ
+    let top = tmux_cmd(&[
+        "split-window", "-t", &seq, "-v", "-b", "-l", "55%", "-P", "-F", "#{pane_id}",
+        &format!("{} voice 0", exe),
+    ])?;
+    let top = top.trim().to_string();
+    // left column for badge + scope (24 cols)
+    let badge = tmux_cmd(&[
+        "split-window", "-t", &top, "-h", "-b", "-l", "24", "-P", "-F", "#{pane_id}",
+        &format!("{} badge 0", exe),
+    ])?;
+    let badge = badge.trim().to_string();
+    // scope under the badge (badge keeps ~7 rows)
+    let scope = tmux_cmd(&[
+        "split-window", "-t", &badge, "-v", "-l", "60%", "-P", "-F", "#{pane_id}",
+        &format!("{} scope 0", exe),
+    ])?;
+    // maths + mix split off the voice pane
+    let maths = tmux_cmd(&[
+        "split-window", "-t", &top, "-h", "-l", "66%", "-P", "-F", "#{pane_id}",
+        &format!("{} envelope 0", exe),
+    ])?;
+    let maths = maths.trim().to_string();
+    let mix = tmux_cmd(&[
+        "split-window", "-t", &maths, "-h", "-l", "50%", "-P", "-F", "#{pane_id}",
+        &format!("{} mixer 0", exe),
+    ])?;
+    // SEQ runs in the original pane
+    tmux_cmd(&["respawn-pane", "-k", "-t", &seq, &format!("{} sequencer 0", exe)])?;
+
+    for (id, title) in [
+        (seq.as_str(), "SEQ"),
+        (top.as_str(), "VOICE"),
+        (badge.as_str(), "los"),
+        (scope.trim(), "SCOPE"),
+        (maths.as_str(), "MATHs"),
+        (mix.trim(), "MIX"),
+    ] {
+        tmux_cmd_ok(&["select-pane", "-t", id, "-T", title]);
+    }
+    tmux_cmd_ok(&["select-pane", "-t", &seq]);
+    Ok(())
+}
+
 pub fn create_session() -> Result<()> {
     state::ensure_dirs()?;
     let _ = tmux_cmd(&["kill-session", "-t", "los"]);
@@ -282,25 +341,15 @@ pub fn create_session() -> Result<()> {
     }
     
     // Spawn module panes (each with instance 0 by default)
-    let modules = [
-        ("sequencer 0", "SEQ"),
-        ("voice 0", "VOICE"),
-        ("mixer 0", "MIX"),
-        ("scope 0", "SCOPE"),
-        ("envelope 0", "MATHs"),
-    ];
-    spawn_session_panes(&modules)?;
-
-    // Apply default tiled layout, then carve a short badge slice off the
-    // last pane only (tiling is zero-sum: this border move affects just
-    // that one neighbor, nobody else)
-    tmux_cmd(&["select-layout", "-t", "los:modules", "tiled"])?;
-    if let Ok(pane_id) = tmux_cmd(&[
-        "split-window", "-t", "los:modules", "-l", "7", "-P", "-F", "#{pane_id}",
-        &format!("{} badge 0", exe),
-    ]) {
-        tmux_cmd_ok(&["select-pane", "-t", pane_id.trim(), "-T", "los"]);
-    }
+    // The house layout:
+    //   ┌───────┬─────────┬─────────┬───────┐
+    //   │ los   │         │         │       │
+    //   ├───────┤  VOICE  │  MATHs  │  MIX  │
+    //   │ SCOPE │         │         │       │
+    //   ├───────┴─────────┴─────────┴───────┤
+    //   │               SEQ                 │
+    //   └───────────────────────────────────┘
+    build_house_layout(&exe)?;
 
     install_transport_keys(&exe);
     install_shell_theme();

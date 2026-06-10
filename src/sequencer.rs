@@ -19,7 +19,9 @@ use ratatui::{
 use crate::shm::{AudioEvent, EventRingbuf, Manifest, ModulationBus, ShmTransport};
 use crate::state::{self, TrackMode};
 
-const NUM_STEPS: usize = 16;
+/// Hard ceiling on pattern length. Tracks default to 16; crank `#L` or
+/// `:set length 128` for the long game — the UI scrolls, nothing clips.
+const NUM_STEPS: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Step {
@@ -48,7 +50,7 @@ struct Track {
 impl Track {
     fn new() -> Self {
         let mut steps = vec![Step::default(); NUM_STEPS];
-        for i in (0..NUM_STEPS).step_by(4) {
+        for i in (0..16).step_by(4) {
             steps[i].active = true;
         }
         Self { steps, length: 16, pulses: 5, rotation: 0, muted: false, mode: state::TrackMode::Note }
@@ -566,9 +568,9 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
         Action::Euclid(op) => {
             let old = EuclidState::capture(&s.tracks[tidx]);
             match op {
-                EuclidOp::Pulses(n) => s.tracks[tidx].pulses = (*n).min(16),
+                EuclidOp::Pulses(n) => s.tracks[tidx].pulses = (*n).min(NUM_STEPS),
                 EuclidOp::Length(n) => {
-                    s.tracks[tidx].length = (*n).clamp(1, 16);
+                    s.tracks[tidx].length = (*n).clamp(1, NUM_STEPS);
                     let len = s.tracks[tidx].length;
                     s.selected = s.selected.min(len - 1);
                 }
@@ -1011,13 +1013,37 @@ fn draw_ui(
             };
             let row_style = if trk.muted { theme::dim() } else { theme::value() };
 
-            let mut spans: Vec<Span> = Vec::with_capacity(trk.length + 8);
+            let info_text = format!(
+                "  {:>3} P{} R{}{}{}",
+                trk.length,
+                trk.pulses,
+                trk.rotation,
+                if trk.mode == TrackMode::Modulation { " ⌁" } else { "" },
+                if trk.muted { " M" } else { "" },
+            );
+            // window the steps so the info column never clips (long
+            // patterns scroll; ‹ › mark hidden steps)
+            let budget = w.saturating_sub(5 + info_text.chars().count() + 2);
+            let visible = ((budget * 4) / 5).clamp(4, trk.length.max(4)).min(trk.length);
+            let anchor = if is_cur { state.selected } else { tstep };
+            let start = if trk.length <= visible {
+                0
+            } else {
+                anchor
+                    .saturating_sub(visible / 2)
+                    .min(trk.length - visible)
+            };
+            let mut spans: Vec<Span> = Vec::with_capacity(visible + 10);
             spans.push(Span::styled(
                 format!("{}t{} ", if is_cur { theme::PLAYHEAD } else { ' ' }, ti + 1),
                 if is_cur { theme::chrome_hi() } else { theme::chrome() },
             ));
-            for i in 0..trk.length {
-                if i > 0 && i % 4 == 0 {
+            spans.push(Span::styled(
+                if start > 0 { "‹" } else { " " }.to_string(),
+                theme::dim(),
+            ));
+            for i in start..start + visible {
+                if i > start && (i - start) % 4 == 0 {
                     spans.push(Span::raw(" "));
                 }
                 let step = &trk.steps[i];
@@ -1035,6 +1061,9 @@ fn draw_ui(
                     } else {
                         theme::signal(theme::clock())
                     }
+                } else if !state.playing && i == tstep {
+                    // paused: a still CLOCK-hue marker says "you are here"
+                    theme::signal(theme::clock())
                 } else if state.playing && !trk.muted && wake_offset(i, tstep, trk.length).is_some() {
                     theme::signal(theme::clock())
                 } else if trk.muted {
@@ -1052,20 +1081,18 @@ fn draw_ui(
                         }
                         _ => glyph,
                     }
+                } else if !state.playing && i == tstep && !on {
+                    theme::PLAYHEAD
                 } else {
                     glyph
                 };
                 spans.push(Span::styled(shown.to_string(), style));
             }
-            let info = format!(
-                "  {:2} P{} R{}{}{}",
-                trk.length,
-                trk.pulses,
-                trk.rotation,
-                if trk.mode == TrackMode::Modulation { " ⌁" } else { "" },
-                if trk.muted { " M" } else { "" },
-            );
-            spans.push(Span::styled(info, if is_cur { row_style } else { theme::dim() }));
+            spans.push(Span::styled(
+                if start + visible < trk.length { "›" } else { " " }.to_string(),
+                theme::dim(),
+            ));
+            spans.push(Span::styled(info_text, if is_cur { row_style } else { theme::dim() }));
             lines.push(Line::from(spans));
         }
 
@@ -1093,7 +1120,8 @@ fn draw_ui(
             let sel = i == state.selected;
             let num_style = if sel {
                 theme::selected()
-            } else if i == cstep && state.playing {
+            } else if i == cstep {
+                // playing or paused: the position always shows
                 theme::signal(theme::clock())
             } else {
                 theme::dim()
@@ -1546,9 +1574,9 @@ pub fn run(instance: usize) -> Result<()> {
                                             let tidx = s.current_track;
                                             let old = EuclidState::capture(&s.tracks[tidx]);
                                             match k.as_str() {
-                                                "pulses" => s.tracks[tidx].pulses = n.min(16),
+                                                "pulses" => s.tracks[tidx].pulses = n.min(NUM_STEPS),
                                                 "length" => {
-                                                    s.tracks[tidx].length = n.clamp(1, 16);
+                                                    s.tracks[tidx].length = n.clamp(1, NUM_STEPS);
                                                     let len = s.tracks[tidx].length;
                                                     s.selected = s.selected.min(len - 1);
                                                 }
@@ -2333,7 +2361,7 @@ mod tests {
     fn set_length(s: &mut SequencerState, h: &mut History, length: usize) {
         let tidx = s.current_track;
         let old = EuclidState::capture(&s.tracks[tidx]);
-        s.tracks[tidx].length = length.clamp(1, 16);
+        s.tracks[tidx].length = length.clamp(1, NUM_STEPS);
         s.selected = s.selected.min(s.tracks[tidx].length - 1);
         let (p, l, r) = (s.tracks[tidx].pulses, s.tracks[tidx].length, s.tracks[tidx].rotation);
         euclidean_apply(&mut s.tracks[tidx].steps, p, l, r);
