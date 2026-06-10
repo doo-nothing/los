@@ -37,7 +37,8 @@ struct VoiceState {
     fm_src: Option<SourceAddr>,
     level_src: Option<SourceAddr>,
     /// Amplitude control (replaces the old hardwired modbus ch 0).
-    /// None or unresolvable = 1.0 — an unpatched voice is audible.
+    /// None = 1.0 (an unpatched voice is audible); bound but unresolvable
+    /// = 0.0 (a dead envelope silences the voice instead of droning it).
     amp_src: Option<SourceAddr>,
     /// Which sequencer track's notes this voice plays. None = all tracks.
     notes_src: Option<SourceAddr>,
@@ -66,6 +67,17 @@ impl Default for VoiceState {
             notes_src: None,
             lpg: 0.0,
         }
+    }
+}
+
+/// The amplitude rule: unbound = 1.0 (audible, drone by choice); bound =
+/// the resolved modbus value, or 0.0 when the binding is orphaned (source
+/// module gone). Full volume is never the failure mode.
+fn amp_level(bound: bool, resolved: Option<f32>) -> f32 {
+    if bound {
+        resolved.unwrap_or(0.0)
+    } else {
+        1.0
     }
 }
 
@@ -173,13 +185,11 @@ fn voice_thread(
             ch.and_then(|c| modbus.as_ref().map(|m| m.get(c)))
         };
 
-        // Amplitude: bound + resolvable -> modbus value; otherwise 1.0 so an
-        // unpatched (or orphaned) voice stays audible.
-        let amp = if s.amp_src.is_some() {
-            chan_val(ch_amp).unwrap_or(1.0)
-        } else {
-            1.0
-        };
+        // Amplitude: unbound -> 1.0 (a drone, by explicit choice). Bound ->
+        // the source owns the level; if the binding can't resolve (envelope
+        // removed or dead) go SILENT, not full-volume — a vanished envelope
+        // must never turn the voice into a drone.
+        let amp = amp_level(s.amp_src.is_some(), chan_val(ch_amp));
 
         let shape = chan_val(ch_shape).unwrap_or(s.shape).clamp(0.0, 1.0);
         let sub_mix = chan_val(ch_sub).unwrap_or(s.sub).clamp(0.0, 1.0);
@@ -332,6 +342,10 @@ fn draw_ui(
         lines.push(Line::from(vec![
             label(4, "amp"),
             match &state.amp_src {
+                Some(a) if crate::routing::resolve(entries, a).is_none() => Span::styled(
+                    format!("{}{} ✗ offline = silent", theme::BIND, a),
+                    theme::flash(theme::note()),
+                ),
                 Some(a) => Span::styled(format!("{}{}", theme::BIND, a), theme::signal(crate::routing::cable_color(entries, a))),
                 None => Span::styled("unbound = 1.0".to_string(), theme::dim()),
             },
@@ -968,5 +982,17 @@ mod tests {
         let mut back = VoiceState::default();
         apply_params(&mut back, &snap);
         assert_eq!(back.lpg, 1.0);
+    }
+
+    #[test]
+    fn amp_rule_never_fails_loud() {
+        // unbound: audible drone by choice
+        assert_eq!(amp_level(false, None), 1.0);
+        assert_eq!(amp_level(false, Some(0.3)), 1.0);
+        // bound + live: the source owns the level
+        assert_eq!(amp_level(true, Some(0.42)), 0.42);
+        assert_eq!(amp_level(true, Some(0.0)), 0.0);
+        // bound + orphaned: SILENT — a dead envelope is not a drone
+        assert_eq!(amp_level(true, None), 0.0);
     }
 }

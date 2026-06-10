@@ -885,6 +885,18 @@ fn sequencer_thread(
                 s.last_notes.push(None);
             }
 
+            // Release any held note that a step advance can no longer end:
+            // paused/stopped transport, a track muted mid-note, or a track
+            // switched out of note mode. Without this the voice keeps its
+            // gate and gate-mode envelope channels sustain into a drone.
+            for (t, n) in stuck_notes(&s.tracks, &s.last_notes, playing) {
+                let _ = events.write_event(&AudioEvent::note_off_source(n, t as u8, s.current_steps[t] as u32));
+                s.last_notes[t] = None;
+                if let (Some(ref mut bus), Some(base)) = (modbus.as_mut(), s.mod_base) {
+                    bus.set(base + t, 0.0);
+                }
+            }
+
             for (t, last_step) in last_steps.iter_mut().enumerate().take(s.tracks.len()) {
                 let len = s.tracks[t].length;
                 let current_step = if samples_per_step > 0 && playing {
@@ -937,6 +949,21 @@ fn sequencer_thread(
     }
 
     Ok(())
+}
+
+/// Held notes that the step-advance loop can no longer end: the transport
+/// is paused/stopped, the track was muted mid-note, or the track switched
+/// out of note mode. These must be released explicitly or they hang.
+fn stuck_notes(tracks: &[Track], last_notes: &[Option<u8>], playing: bool) -> Vec<(usize, u8)> {
+    last_notes
+        .iter()
+        .take(tracks.len())
+        .enumerate()
+        .filter_map(|(t, n)| n.map(|n| (t, n)))
+        .filter(|(t, _)| {
+            !playing || tracks[*t].muted || tracks[*t].mode == TrackMode::Modulation
+        })
+        .collect()
 }
 
 fn midi_note_name(note: u8) -> String {
@@ -3072,5 +3099,25 @@ mod tests {
         assert_eq!(row_visible(60, 12, 16), 16);
         assert!(row_visible(60, 12, 128) >= 4);
         assert!(row_visible(10, 12, 128) >= 4, "tiny panes stay sane");
+    }
+
+    #[test]
+    fn stuck_notes_release_on_pause_mute_and_mode_switch() {
+        let mut tracks = vec![Track::new(), Track::new(), Track::new()];
+        let held = vec![Some(60u8), Some(62), None];
+        // playing, nothing muted: no stuck notes
+        assert!(stuck_notes(&tracks, &held, true).is_empty());
+        // paused: every held note is stuck
+        assert_eq!(stuck_notes(&tracks, &held, false), vec![(0, 60), (1, 62)]);
+        // muted mid-note: that track's note is stuck even while playing
+        tracks[0].muted = true;
+        assert_eq!(stuck_notes(&tracks, &held, true), vec![(0, 60)]);
+        // switched to modulation mode mid-note: stuck
+        tracks[0].muted = false;
+        tracks[1].mode = TrackMode::Modulation;
+        assert_eq!(stuck_notes(&tracks, &held, true), vec![(1, 62)]);
+        // last_notes longer than tracks never panics
+        let extra = vec![Some(60u8); 5];
+        assert_eq!(stuck_notes(&tracks, &extra, false).len(), 3);
     }
 }

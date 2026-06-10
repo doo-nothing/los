@@ -146,7 +146,8 @@ gate — amplitude and brightness fall together).
 `1/2/3` output shortcuts removed — digits are counts ·
 `@` source picker on bindable rows · new rows: `notes` (which seq track's
 notes to play; unbound = all) and `amp` (amplitude source, default
-`envelope/0/ch1`; unbound = 1.0) · `:` · undo (all ✅)
+`envelope/0/ch1`; unbound = 1.0 — a drone by choice; bound but offline =
+silent, with a `✗ offline` marker on the row) · `:` · undo (all ✅)
 
 ### Envelope / Maths
 Maths-style panel: one column per channel + a logic column (SUM/OR/AND/INV,
@@ -156,8 +157,10 @@ Atten, Offset, Plck (vactrol snap+ring decay), Sig (slew input), Trig.
 `gg/G` first/last channel · `a`/`x` add/remove channel (up to 6) ·
 `t` manual trigger · `c` cycle · `m` trig/gate per channel (trig = full
 rise→fall per note, note-off ignored — the default; gate = sustain until
-note off) · `o` manual gate · `@` bind row (Trig row offers
-— any note — / — off — / sources; a non-note source = rising-edge trigger,
+note off; flipping a sustaining channel to trig releases it) · `o` manual
+gate · `@` bind row (Trig row offers
+— any note — / — off — / sources; a non-note source triggers on its rising
+edge and, in gate mode, releases on its falling edge —
 e.g. `envelope/0/eoc` for self-patching) · `:set rise 0|100ms|2s|1.5m|0.42`
 (also fall/shape/atten/offset/pluck, `mode trig|gate`) · `:` · undo (all ✅)
 
