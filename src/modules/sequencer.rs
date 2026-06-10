@@ -175,6 +175,7 @@ fn default_tracks(count: usize) -> Vec<Track> {
         .map(|i| Track { out: i, ..Track::empty() })
         .collect();
     if let Some(t) = tracks.get_mut(0) {
+        let out = t.out;
         // A minor lead: arpeggio up, answer down
         *t = Track::with_melody(&[
             (0, 69),  // A4
@@ -186,10 +187,13 @@ fn default_tracks(count: usize) -> Vec<Track> {
             (12, 69), // A4
             (14, 71), // B4
         ]);
+        t.out = out;
     }
     if let Some(t) = tracks.get_mut(2) {
         // bass roots: Am . . . | F . G .
+        let out = t.out;
         *t = Track::with_melody(&[(0, 45), (4, 45), (8, 41), (12, 43)]);
+        t.out = out;
     }
     for i in [1usize, 3] {
         if let Some(t) = tracks.get_mut(i) {
@@ -6589,6 +6593,12 @@ mod tests {
         for t in &s.tracks[4..] {
             assert!(t.steps.iter().all(|st| !st.active));
         }
+        // OUTPUT IDENTITIES ARE UNIQUE FROM BOOT — the bass being born
+        // on the melody's channel scrambled every voice in the rig
+        let mut outs: Vec<usize> = s.tracks.iter().map(|t| t.out).collect();
+        outs.sort_unstable();
+        outs.dedup();
+        assert_eq!(outs.len(), s.tracks.len(), "fresh outs collide");
         // bass sits well below the lead
         let lead_min = s.tracks[0].steps[..16].iter().filter(|st| st.active).map(|st| st.note).min();
         let bass_max = s.tracks[2].steps[..16].iter().filter(|st| st.active).map(|st| st.note).max();
