@@ -2042,12 +2042,7 @@ fn sequencer_thread(
             }
 
             let gstep = if samples_per_step > 0 {
-                let p = match phase {
-                    None => clock as f64 / samples_per_step as f64,
-                    Some(p) => {
-                        p + clock.saturating_sub(last_clock) as f64 / samples_per_step as f64
-                    }
-                };
+                let p = advance_phase(phase, clock, last_clock, samples_per_step);
                 phase = Some(p);
                 last_clock = clock;
                 p as u64
@@ -2189,6 +2184,20 @@ fn sequencer_thread(
     }
 
     Ok(())
+}
+
+/// Advance the global step phase by the clock delta. Phase-accumulated so
+/// a bpm change rescales only the future; a BACKWARD clock (mixer respawn,
+/// session reload re-creating the transport) rebases instead of freezing —
+/// `saturating_sub` here once silenced the whole sequencer until its
+/// process restarted.
+fn advance_phase(phase: Option<f64>, clock: u64, last_clock: u64, samples_per_step: u64) -> f64 {
+    match phase {
+        Some(p) if clock >= last_clock => {
+            p + (clock - last_clock) as f64 / samples_per_step as f64
+        }
+        _ => clock as f64 / samples_per_step as f64,
+    }
 }
 
 /// Where a track's playhead sits at global step `gstep`, given its cycle
@@ -5902,6 +5911,24 @@ mod tests {
             let m = prime_jump_mult(len);
             assert_eq!(gcd(m, len as u64), 1, "len {len} got multiplier {m}");
         }
+    }
+
+    #[test]
+    fn phase_survives_bpm_changes_and_clock_regression() {
+        // steady clock at 1000 samples/step
+        let p0 = advance_phase(None, 4000, 0, 1000);
+        assert_eq!(p0 as u64, 4);
+        // bpm change (samples_per_step halves): future rescales, no jump
+        let p1 = advance_phase(Some(p0), 4500, 4000, 500);
+        assert_eq!(p1 as u64, 5);
+        // the clock goes BACKWARD (mixer respawn): rebase, never freeze
+        let p2 = advance_phase(Some(p1), 1000, 4500, 500);
+        assert_eq!(p2 as u64, 2, "rebased to the new clock");
+        let p3 = advance_phase(Some(p2), 1500, 1000, 500);
+        assert!(p3 > p2, "and keeps advancing after the rebase");
+        // paused transport: clock frozen, phase frozen
+        let p4 = advance_phase(Some(p3), 1500, 1500, 500);
+        assert_eq!(p4, p3);
     }
 
     #[test]

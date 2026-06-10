@@ -136,6 +136,55 @@ fn main() -> Result<()> {
                 conductor::load_session(&path)
             }
             "ctl" => ctl(args.get(2).map(|s| s.as_str()).unwrap_or("toggle")),
+            // Debug tap: watch live note events (with their source bytes)
+            // and the sequencer's modbus channels for a few seconds —
+            // `los tap [secs]`. Read-only; safe against a running session.
+            "tap" => {
+                let secs: f32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(4.0);
+                let m = shm::Manifest::open()
+                    .map_err(|_| anyhow::anyhow!("no manifest — is a session running?"))?;
+                let seq_base = m
+                    .entries()
+                    .iter()
+                    .find(|e| e.module_name == "sequencer")
+                    .and_then(|e| e.mod_base);
+                let mut events = shm::EventRingbuf::open(shm::consumer_id("tap", 0))?;
+                let bus = shm::ModulationBus::open().ok();
+                // skip the backlog; we only want what happens from now on
+                while events.read_event().is_some() {}
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_secs_f32(secs);
+                println!("tapping {secs}s… (sequencer modbus base: {seq_base:?})");
+                let mut last_bus = String::new();
+                while std::time::Instant::now() < deadline {
+                    while let Some(ev) = events.read_event() {
+                        let kind = match ev.event_type {
+                            0 => "note_on ",
+                            1 => "note_off",
+                            t => {
+                                let _ = t;
+                                continue;
+                            }
+                        };
+                        println!(
+                            "{} src={} value={:.2}Hz vel/note={} step={}",
+                            kind, ev.source, ev.value, ev.param, ev.step
+                        );
+                    }
+                    if let (Some(ref bus), Some(base)) = (&bus, seq_base) {
+                        let row: Vec<String> = (0..los::NUM_TRACKS)
+                            .map(|t| format!("t{}={:+.2}", t + 1, bus.get(base + t)))
+                            .collect();
+                        let row = row.join(" ");
+                        if row != last_bus {
+                            println!("modbus: {row}");
+                            last_bus = row;
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Ok(())
+            }
             "relayout" => conductor::relayout(),
             "record" => {
                 let secs: f32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(10.0);
