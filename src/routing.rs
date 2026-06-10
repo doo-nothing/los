@@ -114,6 +114,15 @@ pub fn label_for_channel(entries: &[ManifestEntry], channel: usize) -> Option<So
     None
 }
 
+/// The cable color for an address: identity hue of its live claimed
+/// channel, falling back to a stable hash when the source isn't running.
+pub fn cable_color(entries: &[ManifestEntry], addr: &SourceAddr) -> ratatui::style::Color {
+    match resolve(entries, addr) {
+        Some(ch) => crate::theme::channel_color(ch),
+        None => crate::theme::source_color(&addr.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

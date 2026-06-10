@@ -40,6 +40,24 @@ State is brightness, not hue: selected = `ink` on a bone block (inverse),
 active = full hue, inactive = `ink-dim`. The four signal hues never appear
 as chrome.
 
+## 2.5 The color law (identity colors)
+
+Identity colors are **patch-cable colors**: `theme::channel_color(claimed
+modbus channel)` — collision-free while ≤12 sources share a window, both
+cable ends compute the same hue independently, and cross-window reuse is
+fine (windows never share a screen). Where identity color may appear:
+
+- ✓ a source's own label + out-meter in its pane (SEQ `t3`, MATHs `C2`)
+- ✓ a bound param's bar + `⌁tag` (**cable wins** over page identity)
+- ✓ the focused channel's page accents + its own unbound sliders
+- ✓ picker rows
+- ✓ pitch-class wheel on note step cells ONLY (muted, de-primaried hues;
+  brightness rises with octave); CV teal ramp on mod cells only
+
+Forbidden: identity or pitch hues on chrome, rules, borders, status lines,
+help, or anything decorative. New modules derive colors from their claimed
+channels via `theme::channel_color` — never invent hues.
+
 ## 3. Glyph vocabulary
 
 ```

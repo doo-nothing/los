@@ -1034,9 +1034,12 @@ fn draw_ui(
                     .min(trk.length - visible)
             };
             let mut spans: Vec<Span> = Vec::with_capacity(visible + 10);
-            // the track label wears its source-identity color — the same hue
-            // any param bound to this track shows on its bar
-            let cable = theme::source_color(&format!("sequencer/0/t{}", ti + 1));
+            // the track label wears its channel-slot identity color — the
+            // exact hue any param bound to this track shows on its bar
+            let cable = match state.mod_base {
+                Some(base) => theme::channel_color(base + ti),
+                None => theme::source_color(&format!("sequencer/0/t{}", ti + 1)),
+            };
             spans.push(Span::styled(
                 format!("{}", if is_cur { theme::PLAYHEAD } else { ' ' }),
                 if is_cur { theme::chrome_hi() } else { theme::chrome() },
@@ -1079,7 +1082,11 @@ fn draw_ui(
                 } else if trk.muted {
                     theme::dim()
                 } else if on {
-                    theme::signal(hue)
+                    match trk.mode {
+                        // pitch-class wheel: see the melody from across the room
+                        TrackMode::Note => theme::signal(theme::pitch_color(step.note)),
+                        TrackMode::Modulation => theme::signal(theme::cv_ramp(step.mod_value)),
+                    }
                 } else {
                     theme::dim()
                 };
@@ -1154,8 +1161,8 @@ fn draw_ui(
                 theme::flash(theme::cv())
             } else if step.active {
                 theme::signal(match trk.mode {
-                    TrackMode::Note => theme::note(),
-                    TrackMode::Modulation => theme::cv(),
+                    TrackMode::Note => theme::pitch_color(step.note),
+                    TrackMode::Modulation => theme::cv_ramp(step.mod_value),
                 })
             } else {
                 theme::dim()
@@ -1169,7 +1176,11 @@ fn draw_ui(
             };
             vels.push(Span::styled(
                 format!("{:^cell$}", vel),
-                if step.active { theme::signal(theme::note()) } else { theme::dim() },
+                if step.active {
+                    theme::signal(theme::pitch_color(step.note))
+                } else {
+                    theme::dim()
+                },
             ));
         }
         lines.push(Line::from(nums));
