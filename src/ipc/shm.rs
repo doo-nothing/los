@@ -1422,6 +1422,12 @@ impl Manifest {
                         ptr::write_unaligned(data.add(16) as *mut u32, instance as u32);
                         ptr::write_unaligned(data.add(20) as *mut u32, std::process::id());
 
+                        // a reused slot must not inherit the previous
+                        // occupant's audio ring: a ring-less module (badge,
+                        // sequencer) registering into a dead voice's slot
+                        // showed up in the mixer as a ghost channel playing
+                        // someone else's audio
+                        std::ptr::write_bytes(data.add(24), 0u8, 32);
                         if let Some(shm) = audio_shm {
                             let shm_bytes = shm.as_bytes();
                             let dst = data.add(24);
