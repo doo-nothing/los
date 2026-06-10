@@ -593,6 +593,11 @@ enum Action {
     SaveSlot(usize),
     /// `:fill`, `F` — auto-fill the pattern with a generator
     Fill { kind: state::FillKind, arg: f32, seed: u64 },
+    /// `B` (picker) / `gB`: patch a mod source into the step's current
+    /// layer — `None` source clears the cable
+    BindStep { target: state::BindTarget, source: Option<String> },
+    /// `(` / `)`: scale the bound source's influence
+    BindAmount { delta: f32 },
 }
 
 impl Action {
@@ -919,6 +924,38 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
             s.tracks[tidx].slots[slot] = Some(copy.clone());
             h.push(Command::SaveSlot { track: tidx, slot, old, new: copy });
             Some(format!("Saved → {}", slot_letter(slot)))
+        }
+        Action::BindStep { target, source } => {
+            let sel = s.selected;
+            let old_step = s.tracks[tidx].steps[sel].clone();
+            s.tracks[tidx].steps[sel].bind = source.as_ref().map(|src| StepBind {
+                target: *target,
+                // rebinding the same source keeps its dialed-in amount
+                amount: match &old_step.bind {
+                    Some(b) if b.source == *src => b.amount,
+                    _ => 1.0,
+                },
+                source: src.clone(),
+            });
+            let new_step = s.tracks[tidx].steps[sel].clone();
+            let msg = match source {
+                Some(src) => format!("step {} ← {}", sel + 1, src),
+                None => String::from("bind cleared"),
+            };
+            push_step_edit(h, tidx, sel, old_step, new_step);
+            Some(msg)
+        }
+        Action::BindAmount { delta } => {
+            let sel = s.selected;
+            let old_step = s.tracks[tidx].steps[sel].clone();
+            let Some(b) = s.tracks[tidx].steps[sel].bind.as_mut() else {
+                return Some(String::from("No binding on this step (B binds)"));
+            };
+            b.amount = (b.amount + delta).clamp(-2.0, 2.0);
+            let msg = format!("amount {:+.2}", b.amount);
+            let new_step = s.tracks[tidx].steps[sel].clone();
+            push_step_edit(h, tidx, sel, old_step, new_step);
+            Some(msg)
         }
         Action::Fill { kind, arg, seed } => {
             use crate::theory::gen;
@@ -1452,7 +1489,9 @@ fn is_multi_action(action: &Action) -> bool {
         | Action::SetCycle(_)
         | Action::SwitchSlot(_)
         | Action::SaveSlot(_)
-        | Action::Fill { .. } => true,
+        | Action::Fill { .. }
+        | Action::BindStep { .. }
+        | Action::BindAmount { .. } => true,
         Action::Op { op, .. } => matches!(op, Operator::Delete | Operator::Change),
         Action::OpTrack(op) => matches!(op, Operator::Delete | Operator::Change),
         Action::YankStep
@@ -2279,6 +2318,7 @@ fn draw_ui(
     show_help: bool,
     undo_msg: &Option<String>,
     pending: Option<&str>,
+    picker: Option<(Vec<String>, usize)>,
 ) -> Result<()> {
     use crate::theme;
     use ratatui::text::Span;
@@ -2619,6 +2659,34 @@ fn draw_ui(
                     .border_style(theme::chrome())
                     .title(Span::styled(" SEQ ", theme::chrome_hi())));
             f.render_widget(help, area);
+        }
+
+        // ── bind-source picker overlay (B on a step) ────────────────────
+        if let Some((rows, sel)) = picker {
+            let h = (rows.len() as u16 + 2).min(area.height);
+            let pw = rows.iter().map(|r| r.len()).max().unwrap_or(10).max(20) as u16 + 4;
+            let r = ratatui::layout::Rect::new(
+                (area.width.saturating_sub(pw)) / 2,
+                (area.height.saturating_sub(h)) / 2,
+                pw.min(area.width),
+                h,
+            );
+            f.render_widget(ratatui::widgets::Clear, r);
+            let items: Vec<ratatui::widgets::ListItem> = rows
+                .iter()
+                .enumerate()
+                .map(|(i, row)| {
+                    let style = if i == sel { theme::selected() } else { theme::value() };
+                    ratatui::widgets::ListItem::new(row.clone()).style(style)
+                })
+                .collect();
+            let list = ratatui::widgets::List::new(items).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(theme::chrome())
+                    .title(Span::styled(" bind step ", theme::chrome_hi())),
+            );
+            f.render_widget(list, r);
         }
     })?;
 
@@ -3096,6 +3164,8 @@ pub fn run(instance: usize) -> Result<()> {
     let mut undo_msg: Option<String> = None;
     let mut undo_time: Option<Instant> = None;
     let mut ex = crate::excmd::ExLine::default();
+    // `B`: the source picker patches a mod cable into the current step
+    let mut picker = crate::picker::Picker::default();
     let mut patch_name: Option<String> = None;
     let mut baseline = state::to_toml_string(&patch_params(&state.lock().unwrap())).unwrap_or_default();
     let mut should_quit = false;
@@ -3217,7 +3287,8 @@ pub fn run(instance: usize) -> Result<()> {
         } else {
             None
         };
-        draw_ui(&mut terminal, &current_state, &mode, &submode, &input_buffer, &pending_count, &gt_target, &gt_input, show_help, &status_msg, pending_hint)?;
+        let picker_rows = picker.is_active().then(|| picker.rows());
+        draw_ui(&mut terminal, &current_state, &mode, &submode, &input_buffer, &pending_count, &gt_target, &gt_input, show_help, &status_msg, pending_hint, picker_rows)?;
 
         if event::poll(Duration::from_millis(50))? {
             let ev = event::read()?;
@@ -3277,6 +3348,22 @@ pub fn run(instance: usize) -> Result<()> {
                 // (the undo/redo handlers below set a fresh one)
                 undo_msg = None;
                 undo_time = None;
+
+                // The bind-source picker captures every key while open
+                if picker.is_active() {
+                    if let crate::picker::PickerEvent::Chosen(addr) = picker.handle_key(key.code)
+                    {
+                        let target = state.lock().unwrap().layer;
+                        let action = Action::BindStep {
+                            target,
+                            source: addr.map(|a| a.to_string()),
+                        };
+                        undo_msg = exec_action(&state, &mut history, &action);
+                        undo_time = Some(Instant::now());
+                        last_change = Some(action);
+                    }
+                    continue;
+                }
 
                 // Ex command line captures every key while open
                 if ex.is_active() {
@@ -4063,6 +4150,16 @@ pub fn run(instance: usize) -> Result<()> {
                             undo_time = Some(Instant::now());
                             continue;
                         }
+                        // gB unplugs the step's mod cable
+                        KeyCode::Char('B') => {
+                            pending_count = None;
+                            let target = state.lock().unwrap().layer;
+                            let action = Action::BindStep { target, source: None };
+                            undo_msg = exec_action(&state, &mut history, &action);
+                            undo_time = Some(Instant::now());
+                            last_change = Some(action);
+                            continue;
+                        }
                         _ => {} // unrecognized chord: fall through plain
                     }
                 }
@@ -4462,6 +4559,33 @@ pub fn run(instance: usize) -> Result<()> {
                                 ));
                                 undo_time = Some(Instant::now());
                             }
+                        }
+                        // B patches a mod cable into the current step's
+                        // active layer (the picker chooses the source)
+                        KeyCode::Char('B') => {
+                            pending_count = None;
+                            let sources = Manifest::open()
+                                .map(|m| crate::routing::live_sources(&m.entries()))
+                                .unwrap_or_default();
+                            let s = state.lock().unwrap();
+                            let current = s.track().steps[s.selected]
+                                .bind
+                                .as_ref()
+                                .and_then(|b| crate::routing::SourceAddr::parse(&b.source));
+                            drop(s);
+                            picker.open(sources, current.as_ref());
+                        }
+                        // ( / ) dial the bound source's influence
+                        KeyCode::Char(c @ ('(' | ')')) => {
+                            let n: i32 = pending_count
+                                .take()
+                                .and_then(|s| s.parse().ok())
+                                .unwrap_or(1);
+                            let delta = 0.05 * n as f32 * if c == '(' { -1.0 } else { 1.0 };
+                            let action = Action::BindAmount { delta };
+                            undo_msg = exec_action(&state, &mut history, &action);
+                            undo_time = Some(Instant::now());
+                            last_change = Some(action);
                         }
                         // F re-runs the last :fill with a fresh seed — the
                         // spam-until-it-grooves gesture (. repeats exactly)
@@ -5897,6 +6021,46 @@ mod tests {
         assert_eq!(parse_root("C-1"), Some(0));
         assert_eq!(parse_root("H4"), None);
         assert_eq!(parse_root(""), None);
+    }
+
+    #[test]
+    fn bind_step_patches_and_unpatches() {
+        let mut s = state_with_tracks(1);
+        let mut h = History::new();
+        let bind = Action::BindStep {
+            target: state::BindTarget::Velocity,
+            source: Some(String::from("envelope/0/ch1")),
+        };
+        apply_action(&mut s, &mut h, &bind);
+        let b = s.tracks[0].steps[0].bind.as_ref().expect("bound");
+        assert_eq!(b.target, state::BindTarget::Velocity);
+        assert!((b.amount - 1.0).abs() < 1e-6);
+        // dial the amount, then rebind the same source: amount survives
+        apply_action(&mut s, &mut h, &Action::BindAmount { delta: -0.45 });
+        apply_action(&mut s, &mut h, &bind);
+        let b = s.tracks[0].steps[0].bind.as_ref().expect("still bound");
+        assert!((b.amount - 0.55).abs() < 1e-4, "rebind keeps the dialed amount");
+        // clamp
+        for _ in 0..100 {
+            apply_action(&mut s, &mut h, &Action::BindAmount { delta: 0.5 });
+        }
+        assert!((s.tracks[0].steps[0].bind.as_ref().map(|b| b.amount).unwrap_or(0.0) - 2.0).abs() < 1e-6);
+        // unbind + undo round trip — fresh history so the sweep-coalescing
+        // rule (all the edits above were the same step, same second)
+        // doesn't fold this into the earlier edits
+        let mut h2 = History::new();
+        apply_action(
+            &mut s,
+            &mut h2,
+            &Action::BindStep { target: state::BindTarget::Velocity, source: None },
+        );
+        assert!(s.tracks[0].steps[0].bind.is_none());
+        assert!(h2.undo(&mut s).is_some());
+        assert!(s.tracks[0].steps[0].bind.is_some(), "undo replugs the cable");
+        // amount on an unbound step explains itself
+        let mut s2 = state_with_tracks(1);
+        let msg = apply_action(&mut s2, &mut h, &Action::BindAmount { delta: 0.1 });
+        assert_eq!(msg.as_deref(), Some("No binding on this step (B binds)"));
     }
 
     // ── macros + the lane ───────────────────────────────────────────────
