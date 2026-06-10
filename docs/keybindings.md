@@ -17,7 +17,7 @@ Status markers: **✅ today** · **🔜 v1** (see `docs/plans/v1-polish.md`) ·
 | `Ctrl-s` | Save module state. ✅ |
 | `Space` | Global transport play/pause (except sequencer insert mode); also `Ctrl-b p`/`Ctrl-b s` and `los ctl`. ✅ |
 | `u` / `Ctrl-r` | Undo / redo, count-prefixed; value sweeps coalesce into one entry. ✅ |
-| `@` | Open the source picker on a bindable param (live sources from the manifest; Enter binds, x unbinds). ✅ |
+| `@` | Open the source picker on a bindable param (live sources from the manifest; Enter binds, x unbinds). **Sequencer exception:** `@` fires macros there; its picker key is `B` (per-step bindings). ✅ |
 | `:` | Ex command line (`:w :e :q :q! :x :set`); not in conductor (session save/load lives there). ✅ |
 | `gg` / `G` | First / last of the module's primary collection (sequencer tracks, envelope/mixer channels, voice/scope params, conductor states). ✅ |
 

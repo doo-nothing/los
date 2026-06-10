@@ -233,6 +233,12 @@ struct SequencerState {
     /// Undo entries produced by thread-side macro firings, drained into
     /// the UI loop's history each frame.
     macro_outbox: Vec<Command>,
+    /// Note-offs owed to the voices: (note, source channel at note-on
+    /// time). Filled whenever track indices shift or patterns are
+    /// replaced wholesale — note-offs match by SOURCE, so a held note
+    /// must be released under its original channel before bookkeeping
+    /// moves. The playback thread drains this every tick.
+    pending_offs: Vec<(u8, u8)>,
 }
 
 impl Default for SequencerState {
@@ -263,6 +269,7 @@ impl Default for SequencerState {
             lane_register: None,
             pending_macros: Vec::new(),
             macro_outbox: Vec::new(),
+            pending_offs: Vec::new(),
         }
     }
 }
@@ -704,7 +711,12 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
                 if times > 1 {
                     h.begin_group();
                 }
+                let mut full = false;
                 for i in 0..times {
+                    if s.tracks.len() >= crate::NUM_TRACKS {
+                        full = true;
+                        break;
+                    }
                     let at = if *before { tidx } else { tidx + 1 + i };
                     insert_track(s, at, trk.clone());
                     h.push(Command::PasteTrack { at, track: trk.clone() });
@@ -712,7 +724,7 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
                 if times > 1 {
                     h.end_group("Paste tracks");
                 }
-                None
+                full.then(|| format!("Track limit ({})", crate::NUM_TRACKS))
             }
         },
         Action::Adjust { layer, steps, coarse } => {
@@ -801,9 +813,11 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
                 if s.tracks.len() <= 1 {
                     return Some(String::from("Can't delete the last track"));
                 }
+                flush_held_notes(s);
                 let track = s.tracks.remove(tidx);
                 s.current_steps.remove(tidx);
                 s.last_notes.remove(tidx);
+                s.marks.remove(tidx);
                 s.register = Some(Register::Track(Box::new(track.clone())));
                 h.push(Command::DeleteTrack { at: tidx, track });
                 s.focus(tidx, Some(0));
@@ -840,6 +854,9 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
             None
         }
         Action::NewTrack { before } => {
+            if s.tracks.len() >= crate::NUM_TRACKS {
+                return Some(format!("Track limit ({})", crate::NUM_TRACKS));
+            }
             let at = if *before { tidx } else { tidx + 1 };
             insert_track(s, at, Track::new());
             h.push(Command::NewTrack { at });
@@ -1150,8 +1167,27 @@ fn switch_slot(track: &mut Track, to: usize) {
     track.active_slot = to;
 }
 
-/// Insert a track at `at`, keeping the per-track bookkeeping vectors in sync.
+/// Queue note-offs for every held note under its CURRENT source channel,
+/// then forget them. Must run before track indices shift (insert/remove)
+/// or patterns are replaced wholesale (reload, patch load) — otherwise
+/// the eventual note-off goes to the wrong channel and a voice drones.
+fn flush_held_notes(state: &mut SequencerState) {
+    for t in 0..state.last_notes.len() {
+        if let Some(n) = state.last_notes[t].take() {
+            state.pending_offs.push((n, t as u8));
+        }
+    }
+}
+
+/// Insert a track at `at`, keeping the per-track bookkeeping vectors in
+/// sync. Refuses beyond the modbus channel claim (the rig registers
+/// exactly [`crate::NUM_TRACKS`] outputs; a 9th track would stomp the
+/// next module's channels).
 fn insert_track(state: &mut SequencerState, at: usize, track: Track) {
+    if state.tracks.len() >= crate::NUM_TRACKS {
+        return;
+    }
+    flush_held_notes(state);
     let at = at.min(state.tracks.len());
     state.tracks.insert(at, track);
     state.current_steps.insert(at, 0);
@@ -1164,6 +1200,7 @@ fn insert_track(state: &mut SequencerState, at: usize, track: Track) {
 /// sync. Never removes the last remaining track.
 fn remove_track(state: &mut SequencerState, at: usize) {
     if state.tracks.len() > 1 && at < state.tracks.len() {
+        flush_held_notes(state);
         state.tracks.remove(at);
         state.current_steps.remove(at);
         state.last_notes.remove(at);
@@ -1667,12 +1704,15 @@ fn apply_macro_cmd(s: &mut SequencerState, cmd: &state::MacroCmd, seed: u64) -> 
             if t >= s.tracks.len() {
                 return None;
             }
-            // route through apply_action's Fill arm on a scratch history
+            // route through apply_action's Fill arm on a scratch history;
+            // a lane-fired fill must NOT leak into a user's q-recording
             let cur = s.current_track;
+            let recording = s.recording.take();
             s.current_track = t;
             let mut scratch = History::new();
             apply_action(s, &mut scratch, &Action::Fill { kind: *kind, arg: *arg, seed });
             s.current_track = cur.min(s.tracks.len().saturating_sub(1));
+            s.recording = recording;
             scratch.commands.pop().map(|(cmd, _)| cmd)
         }
         state::MacroCmd::SetBpm { bpm } => {
@@ -1906,8 +1946,11 @@ fn sequencer_thread(
         transport.set_playing(s.playing);
     }
 
-    // Global step counter the playheads derive from; per-track drunk-walk
-    // positions; manifest + resolution cache for per-step mod-in bindings.
+    // Global step counter the playheads derive from. Phase-accumulated so
+    // a bpm change rescales the FUTURE only — dividing the absolute clock
+    // would teleport gstep and re-fire the whole macro lane.
+    let mut phase: Option<f64> = None;
+    let mut last_clock: u64 = 0;
     let mut last_gstep: Option<u64> = None;
     // Bar counter for the macro lane (None until the first tick so the
     // very first bar's slot fires too).
@@ -1961,6 +2004,20 @@ fn sequencer_thread(
                 drunk.push(0);
             }
 
+            // Note-offs owed from track inserts/removes/reloads: the held
+            // note's source channel was captured before indices shifted.
+            if !s.pending_offs.is_empty() {
+                let offs: Vec<(u8, u8)> = s.pending_offs.drain(..).collect();
+                for (n, src) in offs {
+                    let _ = events.write_event(&AudioEvent::note_off_source(n, src, 0));
+                    if let (Some(ref mut bus), Some(base)) = (modbus.as_mut(), s.mod_base) {
+                        if (src as usize) < crate::NUM_TRACKS {
+                            bus.set(base + src as usize, 0.0);
+                        }
+                    }
+                }
+            }
+
             // Release any held note that a step advance can no longer end:
             // paused/stopped transport, a track muted mid-note, or a track
             // switched out of note mode. Without this the voice keeps its
@@ -1984,7 +2041,19 @@ fn sequencer_thread(
                 }
             }
 
-            let gstep = clock.checked_div(samples_per_step).unwrap_or(0);
+            let gstep = if samples_per_step > 0 {
+                let p = match phase {
+                    None => clock as f64 / samples_per_step as f64,
+                    Some(p) => {
+                        p + clock.saturating_sub(last_clock) as f64 / samples_per_step as f64
+                    }
+                };
+                phase = Some(p);
+                last_clock = clock;
+                p as u64
+            } else {
+                last_gstep.unwrap_or(0)
+            };
 
             // Live macro firings: quantized while playing, immediate when
             // the transport is stopped.
@@ -2912,7 +2981,7 @@ fn snapshot_params(s: &SequencerState) -> state::SequencerParams {
         euclidean_rotation: None,
         steps: vec![],
         tracks: s.tracks.iter().map(|trk| state::TrackParam {
-            steps: trk.steps.iter().map(step_to_param).collect(),
+            steps: trimmed_steps(&trk.steps),
             length: Some(trk.length),
             pulses: Some(trk.pulses),
             rotation: Some(trk.rotation),
@@ -2971,14 +3040,25 @@ fn patch_params(s: &SequencerState) -> state::SequencerParams {
 }
 
 /// Resolve a saved scale: stored cents are authoritative (covers `.scl`
-/// imports), a bare name re-resolves against the library.
+/// imports), a bare name re-resolves against the library. Cents from a
+/// hand-edited/corrupt file are validated against the Scale invariants —
+/// garbage falls back to the name, then to chromatic, never to NaN Hz.
 fn scale_from_params(tp: &state::TrackParam) -> Option<crate::theory::scales::Scale> {
     if !tp.scale_cents.is_empty() {
-        return Some(crate::theory::scales::Scale {
-            name: tp.scale.clone().unwrap_or_else(|| String::from("imported")),
-            degrees: tp.scale_cents.clone(),
-            period: tp.scale_period.unwrap_or(1200.0),
-        });
+        let period = tp.scale_period.unwrap_or(1200.0);
+        let degrees = &tp.scale_cents;
+        let valid = period.is_finite()
+            && period > 0.0
+            && degrees.iter().all(|d| d.is_finite() && *d >= 0.0 && *d < period)
+            && degrees[0].abs() < 1e-9
+            && degrees.windows(2).all(|w| w[1] > w[0]);
+        if valid {
+            return Some(crate::theory::scales::Scale {
+                name: tp.scale.clone().unwrap_or_else(|| String::from("imported")),
+                degrees: degrees.clone(),
+                period,
+            });
+        }
     }
     tp.scale.as_deref().and_then(crate::theory::scales::lookup)
 }
@@ -2996,11 +3076,13 @@ fn apply_tracks(s: &mut SequencerState, params: &state::SequencerParams) {
     if params.tracks.is_empty() {
         return;
     }
+    // held gates must close under their old channels before the world moves
+    flush_held_notes(s);
     s.tracks.clear();
     s.current_steps.clear();
     s.last_notes.clear();
     s.marks.clear();
-    for tp in &params.tracks {
+    for tp in params.tracks.iter().take(crate::NUM_TRACKS) {
         let mut slots: [Option<PatternData>; NUM_SLOTS] = Default::default();
         for sp in &tp.slots {
             if sp.slot < NUM_SLOTS {
@@ -3101,16 +3183,24 @@ pub fn run(instance: usize) -> Result<()> {
     // Load saved state if available
     if let Ok(params) = state::load_module_state::<state::SequencerParams>("sequencer", instance) {
         let mut s = state.lock().unwrap();
-        if let Some(bpm) = params.bpm { s.bpm = bpm; }
+        if let Some(bpm) = params.bpm {
+            // corrupt/hand-edited saves must not freeze the transport
+            if bpm.is_finite() {
+                s.bpm = bpm.clamp(20.0, 300.0);
+            }
+        }
         if let Some(playing) = params.playing { s.playing = playing; }
         if !params.tracks.is_empty() {
             apply_tracks(&mut s, &params);
         } else {
-            // Fallback: load flat fields into first track
+            // Fallback: load flat v1 fields into a CLEAN first track (the
+            // fresh-session demo melody must not bleed through a shorter
+            // saved pattern), with the same clamps apply_tracks uses
             let trk = &mut s.tracks[0];
-            if let Some(p) = params.euclidean_pulses { trk.pulses = p; }
-            if let Some(l) = params.euclidean_length { trk.length = l; }
-            if let Some(r) = params.euclidean_rotation { trk.rotation = r; }
+            *trk = Track::empty();
+            if let Some(p) = params.euclidean_pulses { trk.pulses = p.min(NUM_STEPS); }
+            if let Some(l) = params.euclidean_length { trk.length = l.clamp(1, NUM_STEPS); }
+            if let Some(r) = params.euclidean_rotation { trk.rotation = r.min(255); }
             for (i, step) in params.steps.iter().enumerate().take(trk.steps.len()) {
                 trk.steps[i] = step_from_param(step);
             }
@@ -3182,7 +3272,11 @@ pub fn run(instance: usize) -> Result<()> {
         if state::check_reload_signal() {
             if let Ok(params) = state::load_module_state::<state::SequencerParams>("sequencer", instance) {
                 let mut s = state.lock().unwrap();
-                if let Some(bpm) = params.bpm { s.bpm = bpm; }
+                if let Some(bpm) = params.bpm {
+                    if bpm.is_finite() {
+                        s.bpm = bpm.clamp(20.0, 300.0);
+                    }
+                }
                 if let Some(playing) = params.playing {
                     s.playing = playing;
                     if transport_ui.is_none() {
@@ -3209,7 +3303,13 @@ pub fn run(instance: usize) -> Result<()> {
             }
         }
 
-        // Auto-execute gt on timeout (only when digits were collected)
+        // Auto-execute gt on timeout (only when digits were collected;
+        // never while a modal prompt owns the keyboard)
+        if gt_target.is_some() && (ex.is_active() || picker.is_active()) {
+            gt_target = None;
+            gt_input.clear();
+            gt_last_key = None;
+        }
         if let Some(ref target) = gt_target {
             if gt_last_key.as_ref().is_some_and(|t| t.elapsed() > Duration::from_millis(300)) && !gt_input.is_empty() {
                 let mut s = state.lock().unwrap();
@@ -3235,7 +3335,12 @@ pub fn run(instance: usize) -> Result<()> {
             }
         }
 
-        // Auto-execute f#/t# on timeout (only when digits were collected)
+        // Auto-execute f#/t# on timeout (only when digits were collected;
+        // never while a modal prompt owns the keyboard — a cf8 must not
+        // clear steps and flip to insert mode under an open ex line)
+        if (ex.is_active() || picker.is_active()) && pending_find.is_some() {
+            pending_find = None;
+        }
         if let Some((kind, op, fcount, ref digits, t0)) = pending_find.clone() {
             if t0.elapsed() > Duration::from_millis(300) && !digits.is_empty() {
                 pending_find = None;
@@ -3294,6 +3399,23 @@ pub fn run(instance: usize) -> Result<()> {
             let ev = event::read()?;
             if let Event::Mouse(m) = ev {
                 use crossterm::event::{MouseButton, MouseEventKind};
+                // the picker / ex line own the input while open — a click
+                // must not move the cursor under them
+                if picker.is_active() || ex.is_active() {
+                    continue;
+                }
+                if matches!(m.kind, MouseEventKind::Down(_)) {
+                    // a click is a context switch: abandon half-typed chords
+                    pending_count = None;
+                    pending_g = false;
+                    pending_op = None;
+                    pending_find = None;
+                    pending_angle = None;
+                    pending_layer = false;
+                    pending_quote = false;
+                    pending_record = false;
+                    pending_at = false;
+                }
                 match m.kind {
                     MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                         let mut s = state.lock().unwrap();
@@ -3349,6 +3471,19 @@ pub fn run(instance: usize) -> Result<()> {
                 undo_msg = None;
                 undo_time = None;
 
+                // a macro fired during the poll window must land in history
+                // BEFORE whatever this key is about to push
+                {
+                    let mut s = state.lock().unwrap();
+                    if !s.macro_outbox.is_empty() {
+                        let drained: Vec<Command> = s.macro_outbox.drain(..).collect();
+                        drop(s);
+                        for cmd in drained {
+                            history.push(cmd);
+                        }
+                    }
+                }
+
                 // The bind-source picker captures every key while open
                 if picker.is_active() {
                     if let crate::picker::PickerEvent::Chosen(addr) = picker.handle_key(key.code)
@@ -3380,7 +3515,11 @@ pub fn run(instance: usize) -> Result<()> {
                             ExCommand::Edit(name) => match state::load_patch::<state::SequencerParams>(&name) {
                                 Ok(p) => {
                                     let mut s = state.lock().unwrap();
-                                    if let Some(bpm) = p.bpm { s.bpm = bpm; }
+                                    if let Some(bpm) = p.bpm {
+                                        if bpm.is_finite() {
+                                            s.bpm = bpm.clamp(20.0, 300.0);
+                                        }
+                                    }
                                     apply_tracks(&mut s, &p);
                                     baseline = state::to_toml_string(&patch_params(&s)).unwrap_or_default();
                                     drop(s);
@@ -3414,6 +3553,8 @@ pub fn run(instance: usize) -> Result<()> {
                                             s.bpm = b.clamp(20.0, 300.0);
                                             if old_bpm != s.bpm {
                                                 history.push(Command::SetBpm { old_bpm, new_bpm: s.bpm });
+                                                let bpm = s.bpm;
+                                                record_macro(&mut s, state::MacroCmd::SetBpm { bpm });
                                             }
                                             undo_msg = Some(format!("bpm = {}", s.bpm));
                                         }
@@ -3637,10 +3778,19 @@ pub fn run(instance: usize) -> Result<()> {
                     continue;
                 }
 
-                // ':' opens the ex command line (any mode, when no prompt is active)
+                // ':' opens the ex command line (any mode, when no prompt
+                // is active) — and abandons every half-typed chord, so a
+                // stray `q:`/`@:`/`d:` can't fire on the key after Enter
                 if key.code == KeyCode::Char(':') && submode.is_empty() && gt_target.is_none() {
                     pending_count = None;
                     pending_g = false;
+                    pending_op = None;
+                    pending_find = None;
+                    pending_angle = None;
+                    pending_layer = false;
+                    pending_quote = false;
+                    pending_record = false;
+                    pending_at = false;
                     ex.open();
                     continue;
                 }
@@ -3791,6 +3941,14 @@ pub fn run(instance: usize) -> Result<()> {
                     pending_record = false;
                     pending_at = false;
                     continue;
+                }
+
+                // a half-typed >>/<< chord dies on any other key — `>h>`
+                // must not count as `>>`
+                if pending_angle.is_some()
+                    && !matches!(key.code, KeyCode::Char('>') | KeyCode::Char('<'))
+                {
+                    pending_angle = None;
                 }
 
                 // `q`: start/stop macro recording (normal mode). Recording
@@ -4014,6 +4172,16 @@ pub fn run(instance: usize) -> Result<()> {
                                 let playing = t.toggle_playing();
                                 state.lock().unwrap().playing = playing;
                             }
+                        }
+                        KeyCode::Char('s') => {
+                            pending_count = None;
+                            if transport_ui.is_none() {
+                                transport_ui = ShmTransport::open().ok();
+                            }
+                            if let Some(ref mut t) = transport_ui {
+                                t.set_playing(false);
+                            }
+                            state.lock().unwrap().playing = false;
                         }
                         KeyCode::Char('u') => {
                             let count = pending_count
@@ -4675,9 +4843,8 @@ pub fn run(instance: usize) -> Result<()> {
                             exec_action(&state, &mut history, &action);
                             last_change = Some(action);
                         }
-                        // M toggles note/modulation mode (@ is reserved for
-                        // macros; kept as a legacy alias until they land)
-                        KeyCode::Char('M') | KeyCode::Char('@') => {
+                        // M toggles note/modulation mode (@ fires macros)
+                        KeyCode::Char('M') => {
                             pending_count = None;
                             pending_g = false;
                             let action = Action::ToggleMode;
@@ -6177,6 +6344,20 @@ mod tests {
             cmds: vec![state::MacroCmd::SetMute { track: 0, muted: true }],
             quant: state::Quant::PatternEnd,
         });
+        // every MacroCmd variant must survive TOML
+        s.macros[2] = Some(Macro {
+            cmds: vec![
+                state::MacroCmd::SwitchPattern { track: 1, slot: 3 },
+                state::MacroCmd::SetMute { track: 0, muted: false },
+                state::MacroCmd::SetCycle { track: 1, mode: state::CycleMode::Drunk },
+                state::MacroCmd::TransposeTrack { track: 0, by: -2 },
+                state::MacroCmd::RotateTrack { track: 1, by: 3 },
+                state::MacroCmd::SetScale { track: 0, scale: String::new() },
+                state::MacroCmd::Fill { track: 1, kind: state::FillKind::Density, arg: 0.4 },
+                state::MacroCmd::SetBpm { bpm: 93.5 },
+            ],
+            quant: state::Quant::Beat,
+        });
         s.lane = vec![Some(1), None, Some(1), None, None, None];
         let params = snapshot_params(&s);
         let toml = state::to_toml_string(&params).expect("serializes");
@@ -6184,8 +6365,77 @@ mod tests {
         let mut s2 = SequencerState::default();
         apply_tracks(&mut s2, &back);
         assert_eq!(s2.macros[1], s.macros[1]);
+        assert_eq!(s2.macros[2], s.macros[2], "all eight command shapes round-trip");
         assert!(s2.macros[0].is_none());
         assert_eq!(s2.lane, s.lane);
+    }
+
+    #[test]
+    fn deleting_a_track_keeps_marks_and_flushes_gates() {
+        let mut s = state_with_tracks(3);
+        let mut h = History::new();
+        s.marks = vec![false, false, true]; // mark t3
+        s.last_notes = vec![Some(60), Some(64), Some(67)]; // all sounding
+        s.current_track = 0;
+        apply_action(&mut s, &mut h, &Action::OpTrack(Operator::Delete));
+        assert_eq!(s.marks, vec![false, true], "mark followed its track");
+        // every held note owes a note-off under its ORIGINAL channel
+        assert_eq!(s.pending_offs, vec![(60, 0), (64, 1), (67, 2)]);
+        assert!(s.last_notes.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn track_count_caps_at_the_modbus_claim() {
+        let mut s = state_with_tracks(crate::NUM_TRACKS);
+        let mut h = History::new();
+        let msg = apply_action(&mut s, &mut h, &Action::NewTrack { before: false });
+        assert_eq!(s.tracks.len(), crate::NUM_TRACKS, "o refuses at the cap");
+        assert!(msg.is_some_and(|m| m.contains("limit")));
+        s.register = Some(Register::Track(Box::new(Track::new())));
+        apply_action(&mut s, &mut h, &Action::PasteAsTrack { before: false, times: 3 });
+        assert_eq!(s.tracks.len(), crate::NUM_TRACKS, "gp refuses at the cap");
+        // a corrupt save with too many tracks loads clamped
+        let mut params = snapshot_params(&s);
+        params.tracks.extend(params.tracks.clone());
+        let mut s2 = SequencerState::default();
+        apply_tracks(&mut s2, &params);
+        assert_eq!(s2.tracks.len(), crate::NUM_TRACKS);
+    }
+
+    #[test]
+    fn corrupt_scale_cents_fall_back_safely() {
+        let mut s = state_with_tracks(1);
+        s.tracks[0].scale = crate::theory::scales::lookup("dorian");
+        let mut params = snapshot_params(&s);
+        // corrupt: non-ascending cents and a garbage period
+        params.tracks[0].scale_cents = vec![0.0, 700.0, 300.0];
+        params.tracks[0].scale_period = Some(f64::NAN);
+        let mut s2 = SequencerState::default();
+        apply_tracks(&mut s2, &params);
+        // cents rejected → the name re-resolves against the library
+        let sc = s2.tracks[0].scale.as_ref().expect("name fallback");
+        assert_eq!(sc.name, "dorian");
+        // with a bogus name too, it falls all the way to chromatic
+        params.tracks[0].scale = Some(String::from("not a scale"));
+        let mut s3 = SequencerState::default();
+        apply_tracks(&mut s3, &params);
+        assert!(s3.tracks[0].scale.is_none());
+    }
+
+    #[test]
+    fn saved_tracks_trim_default_tails() {
+        let s = state_with_tracks(1); // 16-step pattern, nothing past it
+        let params = snapshot_params(&s);
+        assert!(
+            params.tracks[0].steps.len() <= 16,
+            "saved {} step tables for a 16-step pattern",
+            params.tracks[0].steps.len()
+        );
+        // and the round trip still restores the full grid
+        let mut s2 = SequencerState::default();
+        apply_tracks(&mut s2, &params);
+        assert_eq!(s2.tracks[0].steps.len(), NUM_STEPS);
+        assert_eq!(s2.tracks[0].steps[..16], s.tracks[0].steps[..16]);
     }
 
     #[test]

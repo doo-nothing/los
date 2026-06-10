@@ -113,7 +113,10 @@ fn flip_trigger(steps: &mut [GenStep], rng: &mut Rng) {
         return;
     }
     let active = steps.iter().filter(|s| s.active).count();
-    if (active + 1) as f32 > MUTATE_DENSITY_CAP * len as f32 {
+    // floor of the cap, but never below one trigger — a 1-step loop must
+    // still be able to turn on
+    let cap = ((MUTATE_DENSITY_CAP * len as f32) as usize).max(1);
+    if active + 1 > cap {
         let actives: Vec<usize> = (0..len).filter(|&k| steps[k].active).collect();
         if let Some(&j) = rng.pick(&actives) {
             steps[j].active = false;

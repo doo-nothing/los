@@ -268,7 +268,11 @@ static LIB: &[(&str, Spec)] = &[
     ("major blues",      Spec::Semis(&[0,2,3,4,7,9])),
     ("bebop dominant",   Spec::Semis(&[0,2,4,5,7,9,10,11])),
     ("bebop major",      Spec::Semis(&[0,2,4,5,7,8,9,11])),
+    // "bebop minor" follows the melodic-minor reading; some references
+    // use the name for the dorian-add-major-third form (bebop dorian here)
     ("bebop minor",      Spec::Semis(&[0,2,3,5,7,8,9,11])),
+    ("bebop melodic minor", Spec::Semis(&[0,2,3,5,7,8,9,11])),
+    ("bebop dorian",     Spec::Semis(&[0,2,3,4,5,7,9,10])),
     // symmetric scales
     ("whole tone",       Spec::Semis(&[0,2,4,6,8,10])),
     ("octatonic hw",     Spec::Semis(&[0,1,3,4,6,7,9,10])),

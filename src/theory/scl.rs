@@ -70,7 +70,9 @@ pub fn parse_scl(text: &str) -> Result<Scale, SclError> {
     let mut lines = text
         .lines()
         .map(|l| l.trim_end_matches('\r'))
-        .filter(|l| !l.trim_start().starts_with('!'));
+        // per the Scala spec a comment line starts with '!' in column one;
+        // leading whitespace makes it data
+        .filter(|l| !l.starts_with('!'));
 
     let description = lines.next().ok_or(SclError::Truncated)?.trim();
     let count_line = lines.next().ok_or(SclError::Truncated)?.trim();
