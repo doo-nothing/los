@@ -233,6 +233,10 @@ struct SequencerState {
     /// Undo entries produced by thread-side macro firings, drained into
     /// the UI loop's history each frame.
     macro_outbox: Vec<Command>,
+    /// Recently-visited positions per track, most recent first (max 3) —
+    /// the playhead trail. Visit HISTORY, not position math, so reverse,
+    /// spiral, random and drunk all read correctly.
+    trails: Vec<Vec<usize>>,
     /// Note-offs owed to the voices: (note, source channel at note-on
     /// time). Filled whenever track indices shift or patterns are
     /// replaced wholesale — note-offs match by SOURCE, so a held note
@@ -270,6 +274,7 @@ impl Default for SequencerState {
             pending_macros: Vec::new(),
             macro_outbox: Vec::new(),
             pending_offs: Vec::new(),
+            trails: vec![Vec::new(); track_count],
         }
     }
 }
@@ -414,7 +419,9 @@ impl EuclidState {
 #[derive(Debug, Clone, PartialEq)]
 enum Register {
     Steps(Vec<Step>),
-    Track(Box<Track>),
+    /// One or more whole tracks, in row order (multi-select yanks fill
+    /// several; `p` block-pastes them, `gp` inserts them all).
+    Tracks(Vec<Track>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -660,40 +667,68 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
         Action::Paste { before, times } => match s.register.clone() {
             None => Some(String::from("Nothing in register")),
             Some(reg) => {
-                // both register kinds paste INTO the track at the cursor —
-                // a yanked track contributes its pattern's steps (gp/gP
-                // materialize registers as new tracks instead)
-                let slice: Vec<Step> = match reg {
-                    Register::Steps(v) => v,
-                    Register::Track(t) => t.steps[..t.length].to_vec(),
+                // every register kind pastes INTO rows at the cursor — a
+                // multi-track yank BLOCK-pastes down successive rows
+                // (gp/gP materialize registers as new tracks instead)
+                let slices: Vec<Vec<Step>> = match reg {
+                    Register::Steps(v) => vec![v],
+                    Register::Tracks(ts) => {
+                        ts.iter().map(|t| t.steps[..t.length].to_vec()).collect()
+                    }
                 };
-                if slice.is_empty() {
+                if slices.iter().all(Vec::is_empty) {
                     return Some(String::from("Nothing in register"));
                 }
-                let len = s.tracks[tidx].length;
-                let total = (slice.len() * times.max(&1)).min(len);
-                let start = if *before {
-                    (s.selected + 1).saturating_sub(total)
-                } else {
-                    s.selected.min(len - 1)
-                };
-                let end = (start + total - 1).min(len - 1);
-                let old: Vec<Step> = s.tracks[tidx].steps[start..=end].to_vec();
-                let new: Vec<Step> = (0..=(end - start)).map(|i| slice[i % slice.len()].clone()).collect();
-                if old == new {
-                    return None;
+                let block = slices.len() > 1;
+                if block {
+                    h.begin_group();
                 }
-                s.tracks[tidx].steps[start..=end].clone_from_slice(&new);
-                h.push(Command::EditSteps { track: tidx, start, old, new });
-                s.selected = start;
-                None
+                let mut wrote = 0usize;
+                let mut first_start = None;
+                for (k, slice) in slices.iter().enumerate() {
+                    let row = tidx + k;
+                    if row >= s.tracks.len() || slice.is_empty() {
+                        break;
+                    }
+                    let len = s.tracks[row].length;
+                    let total = (slice.len() * times.max(&1)).min(len);
+                    let start = if *before {
+                        (s.selected + 1).saturating_sub(total)
+                    } else {
+                        s.selected.min(len - 1)
+                    };
+                    let end = (start + total - 1).min(len - 1);
+                    let old: Vec<Step> = s.tracks[row].steps[start..=end].to_vec();
+                    let new: Vec<Step> =
+                        (0..=(end - start)).map(|i| slice[i % slice.len()].clone()).collect();
+                    if old == new {
+                        continue;
+                    }
+                    s.tracks[row].steps[start..=end].clone_from_slice(&new);
+                    h.push(Command::EditSteps { track: row, start, old, new });
+                    first_start.get_or_insert(start);
+                    wrote += 1;
+                }
+                if block {
+                    h.end_group("Block paste");
+                }
+                if let Some(start) = first_start {
+                    s.selected = start;
+                }
+                if wrote == 0 {
+                    None
+                } else if block {
+                    Some(format!("{} rows", wrote))
+                } else {
+                    None
+                }
             }
         },
         Action::PasteAsTrack { before, times } => match s.register.clone() {
             None => Some(String::from("Nothing in register")),
             Some(reg) => {
-                let trk = match reg {
-                    Register::Track(t) => (*t).clone(),
+                let tracks: Vec<Track> = match reg {
+                    Register::Tracks(ts) => ts,
                     // a steps register becomes a track of exactly that
                     // length — yank 3 steps, gp a 3-step polymeter
                     Register::Steps(v) => {
@@ -704,24 +739,29 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
                         }
                         t.length = n;
                         t.pulses = t.steps[..n].iter().filter(|st| st.active).count();
-                        t
+                        vec![t]
                     }
                 };
                 let times = (*times).max(1);
-                if times > 1 {
+                let many = times > 1 || tracks.len() > 1;
+                if many {
                     h.begin_group();
                 }
                 let mut full = false;
-                for i in 0..times {
-                    if s.tracks.len() >= crate::NUM_TRACKS {
-                        full = true;
-                        break;
+                let mut inserted = 0usize;
+                'outer: for _ in 0..times {
+                    for trk in &tracks {
+                        if s.tracks.len() >= crate::NUM_TRACKS {
+                            full = true;
+                            break 'outer;
+                        }
+                        let at = if *before { tidx + inserted } else { tidx + 1 + inserted };
+                        insert_track(s, at, trk.clone());
+                        h.push(Command::PasteTrack { at, track: trk.clone() });
+                        inserted += 1;
                     }
-                    let at = if *before { tidx } else { tidx + 1 + i };
-                    insert_track(s, at, trk.clone());
-                    h.push(Command::PasteTrack { at, track: trk.clone() });
                 }
-                if times > 1 {
+                if many {
                     h.end_group("Paste tracks");
                 }
                 full.then(|| format!("Track limit ({})", crate::NUM_TRACKS))
@@ -806,7 +846,7 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
         }
         Action::OpTrack(op) => match op {
             Operator::Yank => {
-                s.register = Some(Register::Track(Box::new(s.tracks[tidx].clone())));
+                s.register = Some(Register::Tracks(vec![s.tracks[tidx].clone()]));
                 Some(String::from("Yanked track"))
             }
             Operator::Delete => {
@@ -818,7 +858,10 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
                 s.current_steps.remove(tidx);
                 s.last_notes.remove(tidx);
                 s.marks.remove(tidx);
-                s.register = Some(Register::Track(Box::new(track.clone())));
+                if tidx < s.trails.len() {
+                    s.trails.remove(tidx);
+                }
+                s.register = Some(Register::Tracks(vec![track.clone()]));
                 h.push(Command::DeleteTrack { at: tidx, track });
                 s.focus(tidx, Some(0));
                 None
@@ -1193,6 +1236,7 @@ fn insert_track(state: &mut SequencerState, at: usize, track: Track) {
     state.current_steps.insert(at, 0);
     state.last_notes.insert(at, None);
     state.marks.insert(at, false);
+    state.trails.insert(at, Vec::new());
     state.focus(at, Some(0));
 }
 
@@ -1205,6 +1249,9 @@ fn remove_track(state: &mut SequencerState, at: usize) {
         state.current_steps.remove(at);
         state.last_notes.remove(at);
         state.marks.remove(at);
+        if at < state.trails.len() {
+            state.trails.remove(at);
+        }
         state.focus(state.current_track, Some(0));
     }
 }
@@ -1565,22 +1612,46 @@ fn apply_selected(
     action: &Action,
     span: Option<(usize, usize)>,
 ) -> Option<String> {
+    let track_yank = matches!(action, Action::OpTrack(Operator::Yank));
     let targets: Vec<usize> = match span {
         Some((a, b)) => {
             let hi = b.min(s.tracks.len().saturating_sub(1));
             (a.min(hi)..=hi).collect()
         }
-        None if is_multi_action(action) => marked_targets(s),
+        None if is_multi_action(action) || track_yank => marked_targets(s),
         None => vec![s.current_track],
     };
+    // a multi-select track yank fills the register with EVERY selected
+    // track, row order — p block-pastes them, gp re-inserts them all
+    if track_yank && targets.len() > 1 {
+        let tracks: Vec<Track> = targets
+            .iter()
+            .filter(|&&t| t < s.tracks.len())
+            .map(|&t| s.tracks[t].clone())
+            .collect();
+        let n = tracks.len();
+        s.register = Some(Register::Tracks(tracks));
+        return Some(format!("{} tracks yanked", n));
+    }
     if targets.len() <= 1 || !is_multi_action(action) {
         return apply_action(s, h, action);
     }
     let cur = s.current_track;
     let sel = s.selected;
+    // a multi-select track DELETE also yanks everything it removes
+    let track_delete = matches!(action, Action::OpTrack(Operator::Delete));
+    let deleted: Vec<Track> = if track_delete {
+        targets
+            .iter()
+            .filter(|&&t| t < s.tracks.len())
+            .map(|&t| s.tracks[t].clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
     // deleting tracks shifts indices — walk top-down so they stay valid
     let mut targets = targets;
-    if matches!(action, Action::OpTrack(Operator::Delete)) {
+    if track_delete {
         targets.reverse();
     }
     h.begin_group();
@@ -1594,6 +1665,9 @@ fn apply_selected(
         msg = apply_action(s, h, action);
     }
     h.end_group("Edit tracks");
+    if track_delete && !deleted.is_empty() {
+        s.register = Some(Register::Tracks(deleted));
+    }
     s.current_track = cur.min(s.tracks.len().saturating_sub(1));
     s.selected = sel.min(s.tracks[s.current_track].length.saturating_sub(1));
     msg
@@ -1897,6 +1971,135 @@ fn parse_root(input: &str) -> Option<u8> {
     (0..=127).contains(&midi).then_some(midi as u8)
 }
 
+/// The sequencer's command-bar completer: command names, scale names,
+/// fill kinds, set keys/values, patch names, defined macros. `macro_ids`
+/// is precomputed (the completer must not take the state lock).
+fn seq_completer(macro_ids: Vec<String>) -> impl Fn(&str, &str) -> Vec<String> {
+    move |head: &str, word: &str| {
+        let items: Vec<String> = match head {
+            "" => ["w", "e", "q", "q!", "wq", "x", "set", "scale", "fill", "macro"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            "e" | "edit" | "w" | "write" | "wq" | "x" => {
+                crate::excmd::patch_names(&state::patches_dir())
+            }
+            "scale" => {
+                let mut v = vec![String::from("off"), String::from("root")];
+                v.extend(crate::theory::scales::names().iter().map(|s| s.to_string()));
+                v
+            }
+            "fill" => {
+                ["mutate", "density", "markov", "cantor", "thuemorse", "fibonacci", "sierpinski"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect()
+            }
+            "set" => ["bpm", "pulses", "length", "rotation", "cycle", "root"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            "set cycle" => state::CycleMode::ALL.iter().map(|m| m.name().to_string()).collect(),
+            "macro" => macro_ids.clone(),
+            _ => Vec::new(),
+        };
+        crate::excmd::filter_prefix(items, word)
+    }
+}
+
+/// Apply an auditionable command line into a fresh scratch history (the
+/// command-bar arrow-key preview). Returns None when the line isn't
+/// previewable — only :scale, :fill, and :set cycle audition.
+fn start_preview(
+    state: &Mutex<SequencerState>,
+    line: &str,
+    fill_seed: u64,
+) -> Option<History> {
+    use crate::excmd::ExCommand;
+    let mut scratch = History::new();
+    let mut s = state.lock().unwrap();
+    // an audition is not a performance gesture: never records into macros
+    let recording = s.recording.take();
+    let applied = match crate::excmd::parse(line) {
+        ExCommand::Set(k, v) if k == "cycle" => state::CycleMode::parse(&v).map(|mode| {
+            apply_selected(&mut s, &mut scratch, &Action::SetCycle(mode), None);
+        }),
+        ExCommand::Unknown(c) => {
+            let (head, rest) = match c.split_once(char::is_whitespace) {
+                Some((h, r)) => (h, r.trim()),
+                None => (c.as_str(), ""),
+            };
+            match head {
+                "scale" if rest == "off" => {
+                    set_scale(&mut s, &mut scratch, Some(None), None);
+                    Some(())
+                }
+                "scale" if !rest.is_empty() && !rest.starts_with("root") => {
+                    let sc = if rest.ends_with(".scl") {
+                        crate::theory::scl::load_scl(std::path::Path::new(rest)).ok()
+                    } else {
+                        crate::theory::scales::lookup(rest)
+                    };
+                    sc.map(|sc| {
+                        set_scale(&mut s, &mut scratch, Some(Some(sc)), None);
+                    })
+                }
+                "fill" if !rest.is_empty() => {
+                    let (kind_str, arg_str) = match rest.split_once(char::is_whitespace) {
+                        Some((a, b)) => (a, b.trim()),
+                        None => (rest, ""),
+                    };
+                    state::FillKind::parse(kind_str).map(|kind| {
+                        let default = match kind {
+                            state::FillKind::Mutate => 0.3,
+                            state::FillKind::Density => 0.5,
+                            _ => 0.0,
+                        };
+                        let arg = arg_str.parse().unwrap_or(default);
+                        // a stable per-session seed so arrowing back and
+                        // forth re-plays the same take
+                        let action =
+                            Action::Fill { kind, arg, seed: fill_seed ^ 0xA0D1_710E };
+                        apply_selected(&mut s, &mut scratch, &action, None);
+                    })
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    s.recording = recording;
+    drop(s);
+    applied.map(|()| scratch)
+}
+
+/// Revert (`keep = false`) or commit (`keep = true`) a live audition.
+fn end_preview(
+    state: &Mutex<SequencerState>,
+    history: &mut History,
+    preview: &mut Option<(History, String)>,
+    keep: bool,
+) {
+    let Some((mut scratch, _)) = preview.take() else {
+        return;
+    };
+    if keep {
+        let cmds: Vec<Command> = scratch.commands.drain(..).map(|(c, _)| c).collect();
+        match cmds.len() {
+            0 => {}
+            1 => {
+                if let Some(c) = cmds.into_iter().next() {
+                    history.push(c);
+                }
+            }
+            _ => history.push(Command::Group { cmds, desc: "Audition" }),
+        }
+    } else {
+        let mut s = state.lock().unwrap();
+        while scratch.undo(&mut s).is_some() {}
+    }
+}
+
 /// Lock + apply with multi-select honored — the key handlers' entry point.
 fn exec_action(
     state: &Mutex<SequencerState>,
@@ -1999,6 +2202,9 @@ fn sequencer_thread(
             }
             while s.marks.len() < s.tracks.len() {
                 s.marks.push(false);
+            }
+            while s.trails.len() < s.tracks.len() {
+                s.trails.push(Vec::new());
             }
             while drunk.len() < s.tracks.len() {
                 drunk.push(0);
@@ -2112,6 +2318,10 @@ fn sequencer_thread(
                     let prev_pos = s.current_steps[t];
                     let pos = cycle_pos(s.tracks[t].cycle, gstep, len, &mut drunk[t], track_seed(t))
                         .min(len.saturating_sub(1));
+                    if pos != prev_pos {
+                        s.trails[t].insert(0, prev_pos);
+                        s.trails[t].truncate(3);
+                    }
                     s.current_steps[t] = pos;
                     if s.tracks[t].muted {
                         continue;
@@ -2397,6 +2607,9 @@ fn draw_ui(
     undo_msg: &Option<String>,
     pending: Option<&str>,
     picker: Option<(Vec<String>, usize)>,
+    ex_menu: Option<(Vec<String>, Option<usize>)>,
+    entries: &[crate::shm::ManifestEntry],
+    live_binds: &std::collections::HashMap<usize, f32>,
 ) -> Result<()> {
     use crate::theme;
     use ratatui::text::Span;
@@ -2541,7 +2754,10 @@ fn draw_ui(
                 } else if !state.playing && i == tstep {
                     // paused: a still CLOCK-hue marker says "you are here"
                     theme::signal(theme::clock())
-                } else if state.playing && !trk.muted && wake_offset(i, tstep, trk.length).is_some() {
+                } else if state.playing
+                    && !trk.muted
+                    && state.trails.get(ti).is_some_and(|tr| tr.contains(&i))
+                {
                     theme::signal(theme::clock())
                 } else if trk.muted {
                     theme::dim()
@@ -2550,14 +2766,25 @@ fn draw_ui(
                 } else {
                     theme::dim()
                 };
-                // a patched-in mod binding wears an underline
-                let style = if step.bind.is_some() {
-                    style.add_modifier(ratatui::style::Modifier::UNDERLINED)
-                } else {
-                    style
+                // a patched-in mod binding wears an underline in the
+                // source's cable color (one color at both ends, the law)
+                let style = match &step.bind {
+                    Some(b) => {
+                        let cable = crate::routing::SourceAddr::parse(&b.source)
+                            .map(|a| crate::routing::cable_color(entries, &a))
+                            .unwrap_or_else(theme::clock);
+                        style
+                            .add_modifier(ratatui::style::Modifier::UNDERLINED)
+                            .underline_color(cable)
+                    }
+                    None => style,
                 };
+                let recency = state
+                    .trails
+                    .get(ti)
+                    .and_then(|tr| tr.iter().position(|&p| p == i));
                 let shown = if state.playing && !trk.muted {
-                    match wake_offset(i, tstep, trk.length) {
+                    match recency {
                         Some(o) if i != tstep => theme::WAKE[2 - o.min(2)],
                         _ if i == tstep => {
                             if on { glyph } else { theme::PLAYHEAD }
@@ -2638,12 +2865,54 @@ fn draw_ui(
             } else {
                 theme::dim()
             };
-            if step.bind.is_some() {
-                val_style = val_style.add_modifier(ratatui::style::Modifier::UNDERLINED);
+            if let Some(b) = &step.bind {
+                let cable = crate::routing::SourceAddr::parse(&b.source)
+                    .map(|a| crate::routing::cable_color(entries, &a))
+                    .unwrap_or_else(theme::clock);
+                val_style = val_style
+                    .add_modifier(ratatui::style::Modifier::UNDERLINED)
+                    .underline_color(cable);
             }
             vals.push(Span::styled(format!("{:^cell$}", val), val_style));
 
-            // third row: the active layer's value, numeric
+            // third row: the active layer's value, numeric. A live cable
+            // on this layer's param shows base→effective, breathing with
+            // the source, in the cable's color.
+            let live = step.bind.as_ref().zip(live_binds.get(&i)).filter(|(b, _)| {
+                b.target == state.layer
+                    || (b.target == state::BindTarget::Note
+                        && state.layer == state::BindTarget::Note)
+            });
+            if let Some((b, &v)) = live {
+                let off = bind_offsets(Some(b), Some(v));
+                let cable = crate::routing::SourceAddr::parse(&b.source)
+                    .map(|a| crate::routing::cable_color(entries, &a))
+                    .unwrap_or_else(theme::clock);
+                let text = match b.target {
+                    state::BindTarget::Note => {
+                        format!("{:+}", off.degrees)
+                    }
+                    state::BindTarget::Velocity => format!(
+                        "{}→{}",
+                        step.velocity,
+                        (i32::from(step.velocity) + off.velocity).clamp(1, 127)
+                    ),
+                    state::BindTarget::Prob => format!(
+                        "{}→{}%",
+                        step.prob,
+                        (i32::from(step.prob) + off.prob).clamp(0, 100)
+                    ),
+                    state::BindTarget::Mod => format!(
+                        "{:+.2}",
+                        (step.mod_value + off.mod_value).clamp(-1.0, 1.0)
+                    ),
+                };
+                vels.push(Span::styled(
+                    format!("{:^cell$}", text),
+                    theme::signal(cable),
+                ));
+                continue;
+            }
             let (text, color) = match state.layer {
                 state::BindTarget::Note | state::BindTarget::Velocity => (
                     if step.active && trk.mode == TrackMode::Note {
@@ -2679,6 +2948,28 @@ fn draw_ui(
                 },
             ));
         }
+        // pattern-slot chip at the right edge of the numbers row: the
+        // active slot highlighted, slots holding content lit, empties dim
+        {
+            let used: usize = (first..(first + visible).min(trk.length)).count() * cell;
+            if w > used + 2 + 2 * NUM_SLOTS {
+                nums.push(Span::raw(" ".repeat(w - used - 2 * NUM_SLOTS)));
+                for i in 0..NUM_SLOTS {
+                    let letter = slot_letter(i);
+                    let filled = trk.slots[i]
+                        .as_ref()
+                        .is_some_and(|pd| pd.steps.iter().any(|st| *st != Step::default()));
+                    let style = if i == trk.active_slot {
+                        theme::selected()
+                    } else if filled {
+                        theme::value()
+                    } else {
+                        theme::dim()
+                    };
+                    nums.push(Span::styled(format!("{} ", letter), style));
+                }
+            }
+        }
         lines.push(Line::from(nums));
         lines.push(Line::from(vals));
         lines.push(Line::from(vels));
@@ -2703,6 +2994,12 @@ fn draw_ui(
             mode_label.push_str(tag);
         }
         let mut msg_parts: Vec<String> = Vec::new();
+        // the cursor's cable, spelled out
+        if !state.on_lane {
+            if let Some(b) = state.track().steps.get(state.selected).and_then(|st| st.bind.as_ref()) {
+                msg_parts.push(format!("← {} ×{:.2}", b.source, b.amount));
+            }
+        }
         // performance state first: recording + macros waiting on the clock
         if let Some((idx, cmds)) = &state.recording {
             msg_parts.push(format!("rec @{} [{}]", (b'a' + *idx as u8) as char, cmds.len()));
@@ -2737,6 +3034,47 @@ fn draw_ui(
                     .border_style(theme::chrome())
                     .title(Span::styled(" SEQ ", theme::chrome_hi())));
             f.render_widget(help, area);
+        }
+
+        // ── command-bar completion menu (just above the modeline) ───────
+        if let Some((items, sel)) = &ex_menu {
+            if !items.is_empty() {
+                let max_rows = 8usize.min(items.len());
+                let first = sel.map_or(0, |s| s.saturating_sub(max_rows - 1));
+                let shown = &items[first..(first + max_rows).min(items.len())];
+                let mw = shown
+                    .iter()
+                    .map(|r| r.chars().count())
+                    .max()
+                    .unwrap_or(8)
+                    .max(8) as u16
+                    + 3;
+                let h = shown.len() as u16 + 1;
+                let r = ratatui::layout::Rect::new(
+                    0,
+                    area.height.saturating_sub(1 + h),
+                    mw.min(area.width),
+                    h.min(area.height),
+                );
+                f.render_widget(ratatui::widgets::Clear, r);
+                let mut rows: Vec<Line> = shown
+                    .iter()
+                    .enumerate()
+                    .map(|(i, item)| {
+                        let style = if Some(first + i) == *sel {
+                            theme::selected()
+                        } else {
+                            theme::value()
+                        };
+                        Line::from(Span::styled(format!(" {} ", item), style))
+                    })
+                    .collect();
+                rows.push(Line::from(Span::styled(
+                    format!(" {} ·Tab·↓ ", items.len()),
+                    theme::dim(),
+                )));
+                f.render_widget(Paragraph::new(rows), r);
+            }
         }
 
         // ── bind-source picker overlay (B on a step) ────────────────────
@@ -2788,6 +3126,7 @@ fn sequencer_help() -> Vec<Line<'static>> {
         Line::from("  m mute · M note/mod mode · >>/<< rotate"),
         Line::from("  'n 'v 'p 'm value layer · \"a-\"h pattern slot (\"A save)"),
         Line::from("  gc/gC cycle mode · F refill · u/^r undo/redo"),
+        Line::from("  cycles: →fwd ←rev ↔pong ?rand ~drunk ½skip ◎spiral #prime"),
         Line::from(""),
         Line::from("Macros: qa…q record · @a fire (quantized) · @@ again"),
         Line::from("  lane: @a assign · x clear · y/p · #L length · D wipe"),
@@ -2926,19 +3265,6 @@ fn row_info(trk: &Track) -> String {
         if trk.mode == TrackMode::Modulation { " ⌁" } else { "" },
         if trk.muted { " M" } else { "" },
     )
-}
-
-/// Wake position: Some(0..=2) when `i` trails the playhead by 1–3 steps.
-fn wake_offset(i: usize, head: usize, len: usize) -> Option<usize> {
-    if len == 0 {
-        return None;
-    }
-    let behind = (head + len - i) % len;
-    if (1..=3).contains(&behind) {
-        Some(behind - 1)
-    } else {
-        None
-    }
 }
 
 fn step_to_param(step: &Step) -> state::StepParam {
@@ -3091,6 +3417,7 @@ fn apply_tracks(s: &mut SequencerState, params: &state::SequencerParams) {
     s.current_steps.clear();
     s.last_notes.clear();
     s.marks.clear();
+    s.trails.clear();
     for tp in params.tracks.iter().take(crate::NUM_TRACKS) {
         let mut slots: [Option<PatternData>; NUM_SLOTS] = Default::default();
         for sp in &tp.slots {
@@ -3121,6 +3448,7 @@ fn apply_tracks(s: &mut SequencerState, params: &state::SequencerParams) {
         s.current_steps.push(0);
         s.last_notes.push(None);
         s.marks.push(false);
+        s.trails.push(Vec::new());
     }
     s.current_track = s.current_track.min(s.tracks.len().saturating_sub(1));
     let len = s.tracks[s.current_track].length;
@@ -3262,7 +3590,16 @@ pub fn run(instance: usize) -> Result<()> {
     let mut history = History::new();
     let mut undo_msg: Option<String> = None;
     let mut undo_time: Option<Instant> = None;
+    // live cable display: manifest entries (cable colors, resolution) +
+    // a read-only modbus handle, refreshed about once a second
+    let mut ui_manifest = Manifest::open().ok();
+    let mut ui_entries: Vec<crate::shm::ManifestEntry> = Vec::new();
+    let mut ui_entries_at: Option<Instant> = None;
+    let ui_modbus = ModulationBus::open().ok();
     let mut ex = crate::excmd::ExLine::default();
+    // command-bar audition: the previewed change lives in a scratch
+    // history — arrows apply it live, Esc/typing reverts, Enter commits
+    let mut preview: Option<(History, String)> = None;
     // `B`: the source picker patches a mod cable into the current step
     let mut picker = crate::picker::Picker::default();
     let mut patch_name: Option<String> = None;
@@ -3401,8 +3738,37 @@ pub fn run(instance: usize) -> Result<()> {
         } else {
             None
         };
+        if ui_entries_at.is_none_or(|t| t.elapsed() > Duration::from_secs(1)) {
+            if ui_manifest.is_none() {
+                ui_manifest = Manifest::open().ok();
+            }
+            if let Some(m) = &ui_manifest {
+                ui_entries = m.entries();
+            }
+            ui_entries_at = Some(Instant::now());
+        }
+        // live values for the current track's patched-in steps
+        let live_binds: std::collections::HashMap<usize, f32> = current_state
+            .track()
+            .steps
+            .iter()
+            .enumerate()
+            .filter_map(|(i, st)| {
+                let b = st.bind.as_ref()?;
+                let addr = crate::routing::SourceAddr::parse(&b.source)?;
+                let ch = crate::routing::resolve(&ui_entries, &addr)?;
+                let bus = ui_modbus.as_ref()?;
+                Some((i, bus.get(ch)))
+            })
+            .collect();
         let picker_rows = picker.is_active().then(|| picker.rows());
-        draw_ui(&mut terminal, &current_state, &mode, &submode, &input_buffer, &pending_count, &gt_target, &gt_input, show_help, &status_msg, pending_hint, picker_rows)?;
+        let ex_menu: Option<(Vec<String>, Option<usize>)> = if ex.is_active() {
+            let (items, sel) = ex.menu();
+            (!items.is_empty()).then(|| (items.to_vec(), sel))
+        } else {
+            None
+        };
+        draw_ui(&mut terminal, &current_state, &mode, &submode, &input_buffer, &pending_count, &gt_target, &gt_input, show_help, &status_msg, pending_hint, picker_rows, ex_menu, &ui_entries, &live_binds)?;
 
         if event::poll(Duration::from_millis(50))? {
             let ev = event::read()?;
@@ -3511,8 +3877,65 @@ pub fn run(instance: usize) -> Result<()> {
 
                 // Ex command line captures every key while open
                 if ex.is_active() {
-                    let candidates = crate::excmd::patch_names(&state::patches_dir());
-                    if let crate::excmd::ExEvent::Submit(cmd) = ex.handle_key(key.code, &candidates) {
+                    let macro_ids: Vec<String> = {
+                        let s = state.lock().unwrap();
+                        s.macros
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, m)| m.is_some())
+                            .map(|(i, _)| ((b'a' + i as u8) as char).to_string())
+                            .collect()
+                    };
+                    let completer = seq_completer(macro_ids);
+                    let ev = ex.handle_key(key.code, &completer);
+                    let cmd = match ev {
+                        crate::excmd::ExEvent::Preview(line) => {
+                            // arrow keys audition: apply live, revertible
+                            end_preview(&state, &mut history, &mut preview, false);
+                            if let Some(scratch) = start_preview(&state, &line, fill_seed) {
+                                undo_msg = Some(format!("({})", line));
+                                undo_time = Some(Instant::now());
+                                preview = Some((scratch, line));
+                            }
+                            continue;
+                        }
+                        crate::excmd::ExEvent::Pending | crate::excmd::ExEvent::Cancelled => {
+                            // typing/Tab/Esc: the audition reverts cleanly
+                            end_preview(&state, &mut history, &mut preview, false);
+                            continue;
+                        }
+                        crate::excmd::ExEvent::Submit(cmd) => cmd,
+                    };
+                    // Enter on an auditioned line: keep what you hear
+                    if preview.is_some() {
+                        let matches = preview
+                            .as_ref()
+                            .is_some_and(|(_, l)| crate::excmd::parse(l) == cmd);
+                        end_preview(&state, &mut history, &mut preview, matches);
+                        if matches {
+                            if let crate::excmd::ExCommand::Unknown(c) = &cmd {
+                                // committed fills feed F's repeat bookkeeping
+                                if let Some(rest) = c.strip_prefix("fill ") {
+                                    let (k, a) = match rest.split_once(char::is_whitespace) {
+                                        Some((k, a)) => (k, a.trim()),
+                                        None => (rest, ""),
+                                    };
+                                    if let Some(kind) = state::FillKind::parse(k) {
+                                        let default = match kind {
+                                            state::FillKind::Mutate => 0.3,
+                                            state::FillKind::Density => 0.5,
+                                            _ => 0.0,
+                                        };
+                                        last_fill = Some((kind, a.parse().unwrap_or(default)));
+                                    }
+                                }
+                            }
+                            undo_msg = Some(String::from("kept"));
+                            undo_time = Some(Instant::now());
+                            continue;
+                        }
+                    }
+                    {
                         use crate::excmd::ExCommand;
                         match cmd {
                             ExCommand::Write(name) => {
@@ -3801,6 +4224,18 @@ pub fn run(instance: usize) -> Result<()> {
                     pending_record = false;
                     pending_at = false;
                     ex.open();
+                    {
+                        let macro_ids: Vec<String> = {
+                            let s = state.lock().unwrap();
+                            s.macros
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, m)| m.is_some())
+                                .map(|(i, _)| ((b'a' + i as u8) as char).to_string())
+                                .collect()
+                        };
+                        ex.refresh(&seq_completer(macro_ids));
+                    }
                     continue;
                 }
 
@@ -4592,12 +5027,7 @@ pub fn run(instance: usize) -> Result<()> {
                                 };
                                 (span, action)
                             };
-                            // yank takes one track (one register, vi rules)
-                            let span = if matches!(action, Action::OpTrack(Operator::Yank)) {
-                                None
-                            } else {
-                                Some(span)
-                            };
+                            let span = Some(span);
                             {
                                 let mut s = state.lock().unwrap();
                                 undo_msg = apply_selected(&mut s, &mut history, &action, span);
@@ -5583,7 +6013,7 @@ mod tests {
         let mut h = History::new();
         apply_action(&mut s, &mut h, &Action::OpTrack(Operator::Delete));
         assert_eq!(s.tracks.len(), 1);
-        assert!(matches!(s.register, Some(Register::Track(_))));
+        assert!(matches!(s.register, Some(Register::Tracks(_))));
         // last track refuses
         let msg = apply_action(&mut s, &mut h, &Action::OpTrack(Operator::Delete));
         assert_eq!(msg.as_deref(), Some("Can't delete the last track"));
@@ -5771,15 +6201,6 @@ mod tests {
         assert_eq!(s.selected, 7, "step clamps to track length");
     }
 
-    #[test]
-    fn wake_trails_the_playhead_and_wraps() {
-        assert_eq!(wake_offset(8, 9, 16), Some(0), "one behind");
-        assert_eq!(wake_offset(7, 9, 16), Some(1));
-        assert_eq!(wake_offset(6, 9, 16), Some(2));
-        assert_eq!(wake_offset(5, 9, 16), None, "wake is 3 cells");
-        assert_eq!(wake_offset(9, 9, 16), None, "the head is not its own wake");
-        assert_eq!(wake_offset(15, 1, 16), Some(1), "wraps across the bar line");
-    }
 
     #[test]
     fn row_window_geometry() {
@@ -6257,6 +6678,57 @@ mod tests {
         assert_eq!(msg.as_deref(), Some("No binding on this step (B binds)"));
     }
 
+    #[test]
+    fn multi_select_yank_and_block_paste() {
+        let mut s = state_with_tracks(6);
+        let mut h = History::new();
+        for (i, t) in s.tracks.iter_mut().enumerate() {
+            t.steps[0].note = 50 + i as u8;
+        }
+        // yank rows 1, 3, 4 via marks (non-consecutive)
+        s.marks = vec![true, false, true, true, false, false];
+        s.current_track = 0;
+        let msg = apply_selected(&mut s, &mut h, &Action::OpTrack(Operator::Yank), None);
+        assert_eq!(msg.as_deref(), Some("3 tracks yanked"));
+        assert_eq!(h.undo(&mut s), None, "yank is never a change");
+        // block paste at row 4: rows 4,5,6 get the yanked patterns
+        s.marks = vec![false; 6];
+        s.current_track = 3;
+        s.selected = 0;
+        apply_selected(&mut s, &mut h, &Action::Paste { before: false, times: 1 }, None);
+        assert_eq!(s.tracks[3].steps[0].note, 50);
+        assert_eq!(s.tracks[4].steps[0].note, 52);
+        assert_eq!(s.tracks[5].steps[0].note, 53);
+        assert!(h.undo(&mut s).is_some());
+        assert_eq!(s.tracks[4].steps[0].note, 54, "one u reverts the block");
+        // gp inserts all three as new tracks
+        s.current_track = 0;
+        apply_selected(&mut s, &mut h, &Action::PasteAsTrack { before: false, times: 1 }, None);
+        // capped at 8: 6 + 2 fit
+        assert_eq!(s.tracks.len(), 8);
+        assert_eq!(s.tracks[1].steps[0].note, 50);
+        assert_eq!(s.tracks[2].steps[0].note, 52);
+    }
+
+    #[test]
+    fn multi_delete_yanks_what_it_removes() {
+        let mut s = state_with_tracks(4);
+        let mut h = History::new();
+        for (i, t) in s.tracks.iter_mut().enumerate() {
+            t.steps[0].note = 60 + i as u8;
+        }
+        apply_selected(&mut s, &mut h, &Action::OpTrack(Operator::Delete), Some((1, 2)));
+        assert_eq!(s.tracks.len(), 2);
+        match &s.register {
+            Some(Register::Tracks(ts)) => {
+                assert_eq!(ts.len(), 2);
+                assert_eq!(ts[0].steps[0].note, 61, "row order preserved");
+                assert_eq!(ts[1].steps[0].note, 62);
+            }
+            other => panic!("register should hold the deleted tracks, got {:?}", other.is_some()),
+        }
+    }
+
     // ── macros + the lane ───────────────────────────────────────────────
 
     #[test]
@@ -6418,7 +6890,7 @@ mod tests {
         let msg = apply_action(&mut s, &mut h, &Action::NewTrack { before: false });
         assert_eq!(s.tracks.len(), crate::NUM_TRACKS, "o refuses at the cap");
         assert!(msg.is_some_and(|m| m.contains("limit")));
-        s.register = Some(Register::Track(Box::new(Track::new())));
+        s.register = Some(Register::Tracks(vec![Track::new()]));
         apply_action(&mut s, &mut h, &Action::PasteAsTrack { before: false, times: 3 });
         assert_eq!(s.tracks.len(), crate::NUM_TRACKS, "gp refuses at the cap");
         // a corrupt save with too many tracks loads clamped

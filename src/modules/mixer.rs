@@ -638,8 +638,10 @@ pub fn run() -> Result<()> {
             if let Event::Key(key) = ev {
                 ex_msg = None;
                 if ex.is_active() {
-                    let candidates = crate::excmd::patch_names(&state::patches_dir());
-                    if let crate::excmd::ExEvent::Submit(cmd) = ex.handle_key(key.code, &candidates) {
+                    let completer = crate::excmd::standard_completer(
+                        crate::excmd::patch_names(&state::patches_dir()),
+                    );
+                    if let crate::excmd::ExEvent::Submit(cmd) = ex.handle_key(key.code, &completer) {
                         use crate::excmd::ExCommand;
                         let params = snapshot_params(&inner.lock().unwrap());
                         match cmd {
