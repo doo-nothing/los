@@ -741,6 +741,57 @@ and modulation bus channel allocation (Section 7.4) if applicable.
 
 ---
 
+## 11.5 Pane Geometry Contract
+
+Terminals come in every size; the rig must look intentional in all of
+them. The system rests on a few rules — follow them and a new module is
+adaptive for free:
+
+**Module-side rules (every module):**
+
+1. **Never assume a pane size.** Render from `f.area()`; clamp and window
+   content. A 20×6 pane must not panic or wrap garbage.
+2. **Bars scale through `theme::bar_width(w, reserved)`** — never a
+   hardcoded width. The renderer and the mouse hit-test MUST call it with
+   identical arguments, or drag geometry drifts (this has been a real bug
+   twice).
+3. **Pin the modeline with `theme::anchor_bottom(lines, height, bottom)`**
+   just before pushing the bottom block (rule + status). Spare height then
+   reads as a quiet middle, vim-style, instead of dangling dead space.
+4. **Fixed-height modules declare their content height.** The sequencer
+   exports `CONTENT_LINES` (derived from `NUM_TRACKS`, not a literal);
+   `conductor::house_dims` snaps the SEQ pane to it. If a draw gains or
+   loses a line, fix the constant's arithmetic — the layout and its tests
+   follow.
+
+**House-layout rules (`src/conductor.rs`):**
+
+- `house_dims(w, h) -> (row1, seq, col, badge)` is the single sizing
+  function, used by both `build_house_layout` (fresh sessions) and
+  `relayout()` (the tmux `client-resized` hook). Never size a pane
+  anywhere else.
+- The elastic panes are the **scope** (absorbs the badge column's slack)
+  and the **MATHs|MIX row** (absorbs the right side's). Everything else is
+  content-sized. When adding a pane, decide which kind it is first.
+- `HOUSE_TITLES` is the one list of house pane titles — the builder titles
+  panes from it, `relayout()` recognizes the untouched house by it, and
+  the save round-trip (`canonical_module`) maps every entry back to a
+  spawnable module. A new pane means: add the title there, map it in
+  `canonical_module`, give it a split in `build_house_layout`, and decide
+  its size in `house_dims`.
+- `relayout()` only ever acts on a fresh, untouched house (`@los_house 1`
+  and the exact title set); loaded states and customized sessions get
+  tmux's proportional rescale and are never stomped.
+- The base pane of the window is the one `split-window` never gives a
+  command to — it MUST be `respawn-pane`'d explicitly (forgetting this
+  shipped a dead scope pane once).
+
+**The safety net:** `house_geometry_invariants_across_sizes` sweeps
+window sizes 30×12 through 260×150 and asserts no pane collapses, the
+scope keeps a window, the MATHs|MIX row exists, and the SEQ snap stays
+derived from the sequencer's real content. If a layout change survives
+that test and `cargo clippy`, it is probably sound.
+
 ## 12. Future Direction
 
 ### 12.1 LosModule Trait

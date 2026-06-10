@@ -414,6 +414,14 @@ mod tests {
     }
 
     #[test]
+    fn bar_width_scales_with_pane() {
+        assert_eq!(bar_width(60, 24), 36, "wide panes get wide bars");
+        assert_eq!(bar_width(100, 24), 36, "capped so readouts stay near");
+        assert_eq!(bar_width(30, 24), 8, "floor for tiny panes");
+        assert_eq!(bar_width(10, 24), 8, "never underflows");
+    }
+
+    #[test]
     fn anchor_bottom_fills_exactly() {
         let mut lines: Vec<Line> = vec![Line::default(); 5];
         anchor_bottom(&mut lines, 20, 6);
