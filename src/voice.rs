@@ -313,19 +313,13 @@ fn draw_ui(
             lines.push(Line::from(spans));
         }
 
-        // output mode
-        lines.push(Line::from(vec![
-            label(3, "out"),
-            Span::styled(
-                match state.output {
-                    0 => "main",
-                    1 => "main+sub",
-                    _ => "mix",
-                }
-                .to_string(),
-                theme::value(),
-            ),
-        ]));
+        // output mode: every option visible, h/l slides the block
+        let mut out_spans = vec![label(3, "out")];
+        out_spans.extend(theme::segments(
+            &["main", "main+sub", "mix"],
+            state.output as usize,
+        ));
+        lines.push(Line::from(out_spans));
 
         // binding rows (CV hue — these ARE the patch cables)
         lines.push(Line::from(vec![

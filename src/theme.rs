@@ -119,6 +119,28 @@ pub fn param_dots(set: f32, live: Option<f32>) -> Vec<Span<'static>> {
     v
 }
 
+/// A segmented switch: every option visible, the active one carved out in
+/// an inverse block — a hardware toggle, not a blind cycle.
+pub fn segments(options: &[&str], active: usize) -> Vec<Span<'static>> {
+    let mut spans = Vec::with_capacity(options.len() * 2);
+    for (i, opt) in options.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("·".to_string(), dim()));
+        }
+        if i == active {
+            spans.push(Span::styled(format!("▐{}▌", opt), Style::default().fg(bg()).bg(ink())));
+        } else {
+            spans.push(Span::styled(format!(" {} ", opt), dim()));
+        }
+    }
+    spans
+}
+
+/// Plain-string form of [`segments`] for tests.
+pub fn segments_str(options: &[&str], active: usize) -> String {
+    segments(options, active).iter().map(|s| s.content.clone()).collect()
+}
+
 /// Plain-string form of [`param_dots`] for tests.
 pub fn param_dots_str(set: f32, live: Option<f32>) -> String {
     param_dots(set, live).iter().map(|s| s.content.clone()).collect()
@@ -179,6 +201,12 @@ pub fn status(mode: &str, msg: &str, right: &str, width: usize) -> Line<'static>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn segments_carve_out_the_active_option() {
+        assert_eq!(segments_str(&["main", "sub", "mix"], 0), "▐main▌· sub · mix ");
+        assert_eq!(segments_str(&["a", "b"], 1), " a ·▐b▌");
+    }
 
     #[test]
     fn param_dots_show_set_and_live() {
