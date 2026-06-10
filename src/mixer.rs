@@ -43,6 +43,10 @@ struct MixerInner {
     audio_sources: Vec<AudioSource>,
     master: f32,
     master_meter: f32,
+    /// Tape out: when armed, the audio callback streams the mixed master
+    /// blocks here until the sample budget runs out (sender drop ends the
+    /// writer thread, which finalizes the WAV and drops a .done marker).
+    tape: Option<(std::sync::mpsc::Sender<Vec<f32>>, u64)>,
     selected: usize,
     scope_rb: Option<AudioRingbuf>,
 }
@@ -66,6 +70,7 @@ fn mixer_thread(
         .map_err(|e| anyhow::anyhow!("Failed to get output config: {}", e))?;
 
     let channels = config.channels() as usize;
+    let sample_rate = config.sample_rate().0;
     let slot_len = 128; // max 64 frames * 2 channels
 
     let state_cb = Arc::clone(&state);
@@ -117,6 +122,17 @@ fn mixer_thread(
                         let _ = scope_rb.write(&data[written..written + slot_len]);
                     }
 
+                    let tape_done = if let Some((tx, remaining)) = inner.tape.as_mut() {
+                        let _ = tx.send(data[written..written + slot_len].to_vec());
+                        *remaining = remaining.saturating_sub(slot_len as u64);
+                        *remaining == 0
+                    } else {
+                        false
+                    };
+                    if tape_done {
+                        inner.tape = None;
+                    }
+
                     written += slot_len;
                 }
 
@@ -145,6 +161,20 @@ fn mixer_thread(
         let entries = manifest.entries();
 
         let mut inner = state.lock().unwrap();
+
+        // tape-out arming: `los record` drops a request file; we pick it
+        // up here (≤500ms later) and start streaming the master mix
+        let arm = state::tmp_dir().join("record.arm");
+        if inner.tape.is_none() && arm.exists() {
+            let req = std::fs::read_to_string(&arm).unwrap_or_default();
+            let _ = std::fs::remove_file(&arm);
+            if let Some((secs, path)) = parse_arm(&req) {
+                let (tx, rx) = std::sync::mpsc::channel::<Vec<f32>>();
+                let total = (secs * sample_rate as f32) as u64 * 2; // stereo samples
+                std::thread::spawn(move || tape_writer(rx, &path, sample_rate));
+                inner.tape = Some((tx, total.max(2)));
+            }
+        }
 
         let mut to_remove = Vec::new();
         for (i, source) in inner.audio_sources.iter().enumerate() {
@@ -302,6 +332,36 @@ fn select_strip(s: &mut MixerInner, delta: i32) {
     s.selected = crate::keys::cycle(s.selected, delta, n);
 }
 
+/// Parse a record.arm request: line 1 = seconds, line 2 = output path
+/// (newline-separated so paths may contain spaces).
+fn parse_arm(req: &str) -> Option<(f32, String)> {
+    let mut lines = req.lines();
+    let secs: f32 = lines.next()?.trim().parse().ok()?;
+    let path = lines.next()?.trim();
+    (secs > 0.0 && !path.is_empty()).then(|| (secs, path.to_string()))
+}
+
+/// Drains mixed blocks into a 16-bit stereo WAV; finalizes and drops a
+/// `<path>.done` marker when the sender side closes.
+fn tape_writer(rx: std::sync::mpsc::Receiver<Vec<f32>>, path: &str, sample_rate: u32) {
+    let spec = hound::WavSpec {
+        channels: 2,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let Ok(mut wr) = hound::WavWriter::create(path, spec) else {
+        return;
+    };
+    for block in rx {
+        for s in block {
+            let _ = wr.write_sample((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
+        }
+    }
+    let _ = wr.finalize();
+    let _ = std::fs::write(format!("{path}.done"), "ok");
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_ui(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
@@ -452,6 +512,7 @@ pub fn run() -> Result<()> {
         audio_sources: Vec::new(),
         master: 0.8,
         master_meter: 0.0,
+            tape: None,
         selected: 0,
         scope_rb: None,
     }));
@@ -762,6 +823,7 @@ mod tests {
             audio_sources: vec![],
             master: 0.8,
             master_meter: 0.0,
+            tape: None,
             selected: 0,
             scope_rb: None,
         }
@@ -799,5 +861,13 @@ mod tests {
         s.selected = 1; // master has no pan
         adjust_pan(&mut s, 5);
         assert_eq!(s.tracks[0].pan, -1.0, "master pan is a no-op");
+    }
+
+    #[test]
+    fn arm_request_round_trip() {
+        assert_eq!(parse_arm("16\n/tmp/out tape.wav"), Some((16.0, "/tmp/out tape.wav".into())));
+        assert_eq!(parse_arm("0\n/tmp/x.wav"), None, "zero seconds refused");
+        assert_eq!(parse_arm("abc\n/tmp/x.wav"), None);
+        assert_eq!(parse_arm("5"), None, "missing path refused");
     }
 }
