@@ -149,10 +149,10 @@ work.
 
 By default the demo records a fresh session and sketches a pattern on
 camera. To record *your* rig instead: arrange a session until it looks
-right, save it from the conductor under the name `demo` (leave the
-transport stopped — the tape presses Space), close the session, and run
-`just demo`. Save-states capture the tmux pane layout in a portable form,
-so your arrangement reproduces inside the recording terminal.
+right, save it from the conductor under the name `demo`, close the
+session, and run `just demo`. Save-states capture the tmux pane layout in
+a portable form, so your arrangement reproduces inside the recording
+terminal (playing or stopped — the tape starts the transport itself).
 
 ## License
 

@@ -52,6 +52,7 @@ fn usage() {
     eprintln!("  los ctl [play|stop|toggle|status]  Control the global transport");
     eprintln!("  los add <module> [instance]   Spawn a module in the running session");
     eprintln!("  los ps                        Inspect the live session (manifest, ring, clock)");
+    eprintln!("  los relayout                  Re-apply the house layout sizes (runs on client resize)");
     eprintln!("  los --help                    Show this help");
     eprintln!();
     eprintln!("Modules:");
@@ -70,16 +71,20 @@ fn usage() {
 }
 
 fn dispatch_module(name: &str, instance: usize) -> Result<()> {
-    match name {
+    // canonical_module also accepts display titles (SEQ, MIX, los) so
+    // saves made from pane titles always load
+    let canon = conductor::canonical_module(name)
+        .ok_or_else(|| anyhow::anyhow!("unknown module: {name}"))?;
+    match canon {
         "conductor" => conductor::run_conductor(),
         "sequencer" => sequencer::run(instance),
-        "voice" | "sto" => voice::run(instance),
+        "voice" => voice::run(instance),
         "mixer" => mixer::run(),
         "scope" => scope::run(instance),
-        "envelope" | "maths" => envelope::run(instance),
+        "envelope" => envelope::run(instance),
         "tone" => tone::run(440.0, instance),
         "badge" => badge::run(instance),
-        _ => anyhow::bail!("unknown module: {name}"),
+        other => anyhow::bail!("unknown module: {other}"),
     }
 }
 
@@ -122,6 +127,7 @@ fn main() -> Result<()> {
                 conductor::load_session(&path)
             }
             "ctl" => ctl(args.get(2).map(|s| s.as_str()).unwrap_or("toggle")),
+            "relayout" => conductor::relayout(),
             "ps" => {
                 let m = shm::Manifest::open()
                     .map_err(|_| anyhow::anyhow!("no manifest found — is a session running?"))?;
