@@ -3216,9 +3216,21 @@ fn draw_ui(
         // the cursor's cable, spelled out
         if !state.on_lane {
             if let Some(b) = state.track().steps.get(state.selected).and_then(|st| st.bind.as_ref()) {
+                let target = match b.target {
+                    state::BindTarget::Note => "note",
+                    state::BindTarget::Velocity => "vel",
+                    state::BindTarget::Prob => "prob",
+                    state::BindTarget::Mod => "mod",
+                };
                 match live_binds.get(&state.selected) {
-                    Some(v) => msg_parts.push(format!("← {} ×{:.2} = {:+.2}", b.source, b.amount, v)),
-                    None => msg_parts.push(format!("← {} ×{:.2} (source silent?)", b.source, b.amount)),
+                    Some(v) => msg_parts.push(format!(
+                        "{}←{} ×{:.2} = {:+.2}",
+                        target, b.source, b.amount, v
+                    )),
+                    None => msg_parts.push(format!(
+                        "{}←{} ×{:.2} (unresolved)",
+                        target, b.source, b.amount
+                    )),
                 }
             }
         }
