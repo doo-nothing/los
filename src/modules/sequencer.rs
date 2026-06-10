@@ -970,7 +970,14 @@ fn sequencer_thread(
         transport.set_playing(s.playing);
     }
 
-    let mut last_steps: Vec<i32> = vec![-1];
+    // Global step counter the playheads derive from; per-track drunk-walk
+    // positions; manifest + resolution cache for per-step mod-in bindings.
+    let mut last_gstep: Option<u64> = None;
+    let mut drunk: Vec<usize> = Vec::new();
+    let mut manifest: Option<Manifest> = Manifest::open().ok();
+    let mut bind_cache: std::collections::HashMap<String, Option<usize>> =
+        std::collections::HashMap::new();
+    let mut bind_cache_at = Instant::now();
 
     loop {
         if shutdown.try_recv().is_ok() {
@@ -979,6 +986,9 @@ fn sequencer_thread(
 
         if modbus.is_none() {
             modbus = ModulationBus::open().or_else(|_| ModulationBus::create()).ok();
+        }
+        if manifest.is_none() {
+            manifest = Manifest::open().ok();
         }
 
         // The SHM transport play flag is the source of truth; s.playing is a
@@ -997,11 +1007,8 @@ fn sequencer_thread(
         // Scope the lock so it's not held during sleep
         {
             let mut s = state.lock().unwrap();
-            
+
             // Grow tracking vectors as tracks are added
-            while last_steps.len() < s.tracks.len() {
-                last_steps.push(-1);
-            }
             while s.current_steps.len() < s.tracks.len() {
                 s.current_steps.push(0);
             }
@@ -1010,6 +1017,9 @@ fn sequencer_thread(
             }
             while s.marks.len() < s.tracks.len() {
                 s.marks.push(false);
+            }
+            while drunk.len() < s.tracks.len() {
+                drunk.push(0);
             }
 
             // Release any held note that a step advance can no longer end:
@@ -1024,51 +1034,97 @@ fn sequencer_thread(
                 }
             }
 
-            for (t, last_step) in last_steps.iter_mut().enumerate().take(s.tracks.len()) {
-                let len = s.tracks[t].length;
-                let current_step = if samples_per_step > 0 && playing {
-                    (clock / samples_per_step) as usize % len
-                } else {
-                    (*last_step).max(0) as usize
-                };
+            // Mute means silence on every output: keep a muted track's mod
+            // channel at 0.0 (modulation-mode tracks otherwise freeze the
+            // bus at their last value — the mute-audit bug).
+            if let (Some(ref mut bus), Some(base)) = (modbus.as_mut(), s.mod_base) {
+                for (t, trk) in s.tracks.iter().enumerate() {
+                    if trk.muted {
+                        bus.set(base + t, 0.0);
+                    }
+                }
+            }
 
-                if current_step as i32 != *last_step {
-                    s.current_steps[t] = current_step;
+            let gstep = clock.checked_div(samples_per_step).unwrap_or(0);
+            if playing && last_gstep != Some(gstep) {
+                // bind sources re-resolve about once a second, like voice
+                // param bindings (handles module restarts)
+                if bind_cache_at.elapsed() > Duration::from_secs(1) {
+                    bind_cache.clear();
+                    bind_cache_at = Instant::now();
+                }
 
-                    if playing && !s.tracks[t].muted {
-                        let track = &s.tracks[t];
-                        let step = &track.steps[current_step];
+                #[allow(clippy::needless_range_loop)] // t indexes four parallel vecs
+                for t in 0..s.tracks.len() {
+                    let len = s.tracks[t].length;
+                    let prev_pos = s.current_steps[t];
+                    let pos = cycle_pos(s.tracks[t].cycle, gstep, len, &mut drunk[t], track_seed(t))
+                        .min(len.saturating_sub(1));
+                    s.current_steps[t] = pos;
+                    if s.tracks[t].muted {
+                        continue;
+                    }
 
-                        // Always write step value to modbus per-track channel
-                        let mod_val = match track.mode {
-                            TrackMode::Note => {
-                                if step.active {
-                                    step.velocity as f32 / 127.0
-                                } else {
-                                    0.0
-                                }
+                    // resolve this step's mod-in binding to a live bus value
+                    let bind_value = s.tracks[t].steps[pos].bind.as_ref().and_then(|b| {
+                        let ch = *bind_cache.entry(b.source.clone()).or_insert_with(|| {
+                            manifest.as_ref().and_then(|m| {
+                                crate::routing::SourceAddr::parse(&b.source)
+                                    .and_then(|a| crate::routing::resolve(&m.entries(), &a))
+                            })
+                        });
+                        ch.and_then(|ch| modbus.as_ref().map(|bus| bus.get(ch)))
+                    });
+
+                    let track = &s.tracks[t];
+                    let step = &track.steps[pos];
+                    let off = bind_offsets(step.bind.as_ref(), bind_value);
+                    let prob = (i32::from(step.prob) + off.prob).clamp(0, 100) as u8;
+
+                    match track.mode {
+                        TrackMode::Note => {
+                            // probability-failed steps behave as inactive:
+                            // gate closes, bus reads 0
+                            let fires = step.active && step_fires(prob, t, gstep);
+                            let velocity =
+                                (i32::from(step.velocity) + off.velocity).clamp(1, 127) as u8;
+                            let mod_val =
+                                if fires { f32::from(velocity) / 127.0 } else { 0.0 };
+                            if let (Some(ref mut bus), Some(base)) = (modbus.as_mut(), s.mod_base) {
+                                bus.set(base + t, mod_val);
                             }
-                            TrackMode::Modulation => step.mod_value,
-                        };
-                        if let (Some(ref mut bus), Some(base)) = (modbus.as_mut(), s.mod_base) {
-                            bus.set(base + t, mod_val);
-                        }
-
-                        // Note mode: send note-on/note-off events
-                        if track.mode == TrackMode::Note {
+                            let hz = step_hz(track, step.note, off.degrees) as f32;
+                            let note_id = step.note;
                             if let Some(n) = s.last_notes[t] {
-                                let _ = events.write_event(&AudioEvent::note_off_source(n, t as u8, *last_step as u32));
+                                let _ = events.write_event(&AudioEvent::note_off_source(
+                                    n, t as u8, prev_pos as u32,
+                                ));
                             }
-                            if step.active {
-                                let _ = events.write_event(&AudioEvent::note_on_source(step.note, step.velocity, t as u8, current_step as u32));
-                                s.last_notes[t] = Some(step.note);
+                            if fires {
+                                let _ = events.write_event(&AudioEvent::note_on_hz(
+                                    hz, velocity, t as u8, pos as u32,
+                                ));
+                                s.last_notes[t] = Some(note_id);
                             } else {
                                 s.last_notes[t] = None;
                             }
                         }
+                        TrackMode::Modulation => {
+                            // probability-failed steps HOLD the bus (sample
+                            // and hold); the active flag stays cosmetic for
+                            // modulation tracks, as it always was
+                            if step_fires(prob, t, gstep) {
+                                let v = (step.mod_value + off.mod_value).clamp(-1.0, 1.0);
+                                if let (Some(ref mut bus), Some(base)) =
+                                    (modbus.as_mut(), s.mod_base)
+                                {
+                                    bus.set(base + t, v);
+                                }
+                            }
+                        }
                     }
-                    *last_step = current_step as i32;
                 }
+                last_gstep = Some(gstep);
             }
         } // lock released here, before sleep
 
@@ -1076,6 +1132,142 @@ fn sequencer_thread(
     }
 
     Ok(())
+}
+
+/// Where a track's playhead sits at global step `gstep`, given its cycle
+/// mode. Every mode except Drunk is a pure function of `gstep` (resync-safe
+/// across pause/resume and module restarts); Drunk walks `drunk` in place.
+fn cycle_pos(
+    mode: state::CycleMode,
+    gstep: u64,
+    len: usize,
+    drunk: &mut usize,
+    seed: u64,
+) -> usize {
+    use crate::theory::rng::Rng;
+    if len <= 1 {
+        return 0;
+    }
+    let l = len as u64;
+    match mode {
+        state::CycleMode::Forward => (gstep % l) as usize,
+        state::CycleMode::Reverse => (l - 1 - gstep % l) as usize,
+        state::CycleMode::PingPong => {
+            // triangle over period 2·len−2: 0,1,…,len−1,len−2,…,1
+            let period = 2 * l - 2;
+            let k = gstep % period;
+            if k < l {
+                k as usize
+            } else {
+                (period - k) as usize
+            }
+        }
+        // even lengths only ever visit half the pattern — that's the charm
+        state::CycleMode::EveryOther => ((gstep * 2) % l) as usize,
+        state::CycleMode::Spiral => {
+            // outside-in interleave: 0, len−1, 1, len−2, …
+            let k = gstep % l;
+            if k.is_multiple_of(2) {
+                (k / 2) as usize
+            } else {
+                (l - 1 - k / 2) as usize
+            }
+        }
+        state::CycleMode::PrimeJump => ((gstep * prime_jump_mult(len)) % l) as usize,
+        state::CycleMode::Random => {
+            Rng::new(seed ^ gstep.wrapping_mul(0x9E37_79B9_7F4A_7C15)).below(l) as usize
+        }
+        state::CycleMode::Drunk => {
+            let mut r = Rng::new(seed ^ gstep.wrapping_mul(0xA24B_AED4_963E_E407));
+            let delta = r.below(3) as i64 - 1; // −1, 0, +1
+            *drunk = (*drunk as i64 + delta).rem_euclid(len as i64) as usize;
+            *drunk
+        }
+    }
+}
+
+/// Multiplier for the prime-jump cycle: the smallest prime ≥ len/3 that is
+/// coprime with `len`, so the orbit is a fixed strange permutation that
+/// still visits every step.
+fn prime_jump_mult(len: usize) -> u64 {
+    fn gcd(mut a: usize, mut b: usize) -> usize {
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        a
+    }
+    fn is_prime(n: usize) -> bool {
+        n >= 2 && (2..).take_while(|d| d * d <= n).all(|d| !n.is_multiple_of(d))
+    }
+    let mut m = (len / 3).max(2);
+    // Bertrand's postulate guarantees a coprime prime well below this cap.
+    while m <= 2 * len + 3 {
+        if is_prime(m) && gcd(m, len) == 1 {
+            return m as u64;
+        }
+        m += 1;
+    }
+    1
+}
+
+/// Per-track seed for the stochastic cycle modes and the probability gate.
+fn track_seed(t: usize) -> u64 {
+    (t as u64 + 1).wrapping_mul(0xD6E8_FEB8_6659_FD93)
+}
+
+/// Probability gate: does this step fire at global step `gstep`?
+/// Deterministic per (track, gstep) so pause/resume can't replay
+/// differently than a straight run.
+fn step_fires(prob: u8, track: usize, gstep: u64) -> bool {
+    if prob >= 100 {
+        return true;
+    }
+    if prob == 0 {
+        return false;
+    }
+    let mut r = crate::theory::rng::Rng::new(
+        track_seed(track) ^ gstep.wrapping_mul(0xBF58_476D_1CE4_E5B9),
+    );
+    r.below(100) < u64::from(prob)
+}
+
+/// A step's frequency. No scale: `note` is MIDI, 12-TET. With a scale:
+/// `note` is a degree biased at 60 (60 = root), tuned by the cents engine
+/// from the track root — this is the microtonal path.
+fn step_hz(track: &Track, note: u8, degree_offset: i32) -> f64 {
+    use crate::theory::scales;
+    match &track.scale {
+        None => scales::midi_to_hz((i32::from(note) + degree_offset).clamp(0, 127) as u8),
+        Some(sc) => sc.degree_to_hz(
+            i32::from(note) - 60 + degree_offset,
+            scales::midi_to_hz(track.root),
+        ),
+    }
+}
+
+/// What a step's mod-in binding contributes at trigger time, given the
+/// source's live modbus value. One binding per step, one target each.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct BindOffsets {
+    degrees: i32,
+    velocity: i32,
+    prob: i32,
+    mod_value: f32,
+}
+
+fn bind_offsets(bind: Option<&StepBind>, value: Option<f32>) -> BindOffsets {
+    let mut o = BindOffsets::default();
+    let (Some(b), Some(v)) = (bind, value) else {
+        return o;
+    };
+    let v = v * b.amount;
+    match b.target {
+        state::BindTarget::Note => o.degrees = (v * 12.0).round() as i32,
+        state::BindTarget::Velocity => o.velocity = (v * 127.0).round() as i32,
+        state::BindTarget::Prob => o.prob = (v * 100.0).round() as i32,
+        state::BindTarget::Mod => o.mod_value = v,
+    }
+    o
 }
 
 /// Held notes that the step-advance loop can no longer end: the transport
@@ -3395,5 +3587,206 @@ mod tests {
         let lead_min = s.tracks[0].steps[..16].iter().filter(|st| st.active).map(|st| st.note).min();
         let bass_max = s.tracks[2].steps[..16].iter().filter(|st| st.active).map(|st| st.note).max();
         assert!(bass_max < lead_min, "t3 is the bass");
+    }
+
+    // ── playback engine: cycle modes, probability, pitch, bindings ──────
+
+    /// Collect the positions a cycle mode visits over `n` global steps.
+    fn walk(mode: state::CycleMode, len: usize, n: u64) -> Vec<usize> {
+        let mut drunk = 0usize;
+        (0..n).map(|g| cycle_pos(mode, g, len, &mut drunk, track_seed(0))).collect()
+    }
+
+    #[test]
+    fn cycle_forward_reverse_pingpong() {
+        assert_eq!(walk(state::CycleMode::Forward, 4, 6), vec![0, 1, 2, 3, 0, 1]);
+        assert_eq!(walk(state::CycleMode::Reverse, 4, 6), vec![3, 2, 1, 0, 3, 2]);
+        // pingpong over 4 steps: period 6, no double-hit at the ends
+        assert_eq!(
+            walk(state::CycleMode::PingPong, 4, 8),
+            vec![0, 1, 2, 3, 2, 1, 0, 1]
+        );
+    }
+
+    #[test]
+    fn cycle_exotics_stay_in_range_and_permute() {
+        for mode in state::CycleMode::ALL {
+            for len in [1usize, 2, 3, 4, 7, 16, 128] {
+                for pos in walk(mode, len, 256) {
+                    assert!(pos < len, "{mode:?} len {len} escaped: {pos}");
+                }
+            }
+        }
+        // spiral interleaves outside-in
+        assert_eq!(walk(state::CycleMode::Spiral, 6, 6), vec![0, 5, 1, 4, 2, 3]);
+        // every-other skips by two (odd lengths cover everything)
+        assert_eq!(walk(state::CycleMode::EveryOther, 5, 5), vec![0, 2, 4, 1, 3]);
+        // prime-jump visits every step exactly once per cycle
+        for len in [4usize, 6, 12, 16] {
+            let mut seen = walk(state::CycleMode::PrimeJump, len, len as u64);
+            seen.sort_unstable();
+            assert_eq!(seen, (0..len).collect::<Vec<_>>(), "prime-jump len {len}");
+        }
+    }
+
+    #[test]
+    fn cycle_random_is_deterministic_and_varied() {
+        let a = walk(state::CycleMode::Random, 16, 64);
+        let b = walk(state::CycleMode::Random, 16, 64);
+        assert_eq!(a, b, "same seed, same path");
+        let distinct: std::collections::HashSet<_> = a.iter().collect();
+        assert!(distinct.len() > 4, "random should wander");
+    }
+
+    #[test]
+    fn cycle_drunk_steps_at_most_one() {
+        let path = walk(state::CycleMode::Drunk, 16, 256);
+        for w in path.windows(2) {
+            let d = (w[1] as i64 - w[0] as i64).rem_euclid(16);
+            assert!(d == 0 || d == 1 || d == 15, "drunk lurched {} -> {}", w[0], w[1]);
+        }
+    }
+
+    #[test]
+    fn prime_jump_mult_is_coprime() {
+        fn gcd(mut a: u64, mut b: u64) -> u64 {
+            while b != 0 {
+                (a, b) = (b, a % b);
+            }
+            a
+        }
+        for len in 2usize..=128 {
+            let m = prime_jump_mult(len);
+            assert_eq!(gcd(m, len as u64), 1, "len {len} got multiplier {m}");
+        }
+    }
+
+    #[test]
+    fn probability_gate_extremes_and_determinism() {
+        for g in 0..64 {
+            assert!(step_fires(100, 0, g), "p=100 always fires");
+            assert!(!step_fires(0, 0, g), "p=0 never fires");
+        }
+        // deterministic per (track, gstep)
+        assert_eq!(step_fires(50, 3, 17), step_fires(50, 3, 17));
+        // roughly half over many steps
+        let hits = (0..2000).filter(|&g| step_fires(50, 1, g)).count();
+        assert!((800..1200).contains(&hits), "p=50 fired {hits}/2000");
+        // different tracks decorrelate
+        let same = (0..500)
+            .filter(|&g| step_fires(50, 0, g) == step_fires(50, 1, g))
+            .count();
+        assert!(same < 400, "tracks 0/1 agreed {same}/500 times");
+    }
+
+    #[test]
+    fn step_hz_unscaled_is_midi_and_scaled_is_degrees() {
+        let trk = Track::empty();
+        assert!((step_hz(&trk, 69, 0) - 440.0).abs() < 1e-9);
+        assert!((step_hz(&trk, 69, 12) - 880.0).abs() < 1e-6);
+        assert!((step_hz(&trk, 127, 12) - crate::theory::scales::midi_to_hz(127)).abs() < 1e-6, "offset clamps at the top");
+
+        let mut scaled = Track::empty();
+        scaled.scale = crate::theory::scales::lookup("major pentatonic");
+        scaled.root = 69; // A4
+        // note 60 = the root; +5 degrees = one octave in a pentatonic
+        assert!((step_hz(&scaled, 60, 0) - 440.0).abs() < 1e-9);
+        assert!((step_hz(&scaled, 65, 0) - 880.0).abs() < 1e-6);
+        assert!((step_hz(&scaled, 60, 5) - 880.0).abs() < 1e-6, "bind offset moves in degrees");
+        assert!((step_hz(&scaled, 55, 0) - 220.0).abs() < 1e-6, "below the root works");
+    }
+
+    #[test]
+    fn bind_offsets_target_one_param() {
+        let bind = StepBind {
+            target: state::BindTarget::Velocity,
+            source: String::from("envelope/0/ch1"),
+            amount: 0.5,
+        };
+        let o = bind_offsets(Some(&bind), Some(1.0));
+        assert_eq!(o.velocity, 64);
+        assert_eq!((o.degrees, o.prob), (0, 0));
+        assert_eq!(o.mod_value, 0.0);
+        // no live value (orphaned source) → no offset
+        assert_eq!(bind_offsets(Some(&bind), None), BindOffsets::default());
+        assert_eq!(bind_offsets(None, Some(1.0)), BindOffsets::default());
+        // note target moves in degrees, scaled ±12 per unit
+        let nb = StepBind { target: state::BindTarget::Note, source: String::new(), amount: -1.0 };
+        assert_eq!(bind_offsets(Some(&nb), Some(0.5)).degrees, -6);
+        let pb = StepBind { target: state::BindTarget::Prob, source: String::new(), amount: 1.0 };
+        assert_eq!(bind_offsets(Some(&pb), Some(-0.25)).prob, -25);
+    }
+
+    #[test]
+    fn persistence_roundtrips_new_fields() {
+        let mut s = state_with_tracks(2);
+        s.tracks[0].cycle = state::CycleMode::PingPong;
+        s.tracks[0].scale = crate::theory::scales::lookup("rast");
+        s.tracks[0].root = 62;
+        s.tracks[0].steps[3].prob = 40;
+        s.tracks[0].steps[3].bind = Some(StepBind {
+            target: state::BindTarget::Prob,
+            source: String::from("envelope/0/ch2"),
+            amount: 0.75,
+        });
+        s.tracks[1].active_slot = 2;
+        let mut alt = PatternData::empty();
+        alt.steps[0].active = true;
+        alt.steps[0].note = 71;
+        alt.length = 12;
+        s.tracks[1].slots[5] = Some(alt.clone());
+
+        let params = snapshot_params(&s);
+        let toml = state::to_toml_string(&params).expect("serializes");
+        let back: state::SequencerParams = toml::from_str(&toml).expect("parses");
+        let mut s2 = SequencerState::default();
+        apply_tracks(&mut s2, &back);
+
+        assert_eq!(s2.tracks[0].cycle, state::CycleMode::PingPong);
+        let sc = s2.tracks[0].scale.as_ref().expect("scale survives");
+        assert_eq!(sc.name, "rast");
+        assert!((sc.degrees[2] - 350.0).abs() < 1e-9, "quarter tones survive");
+        assert_eq!(s2.tracks[0].root, 62);
+        assert_eq!(s2.tracks[0].steps[3].prob, 40);
+        let b = s2.tracks[0].steps[3].bind.as_ref().expect("bind survives");
+        assert_eq!(b.target, state::BindTarget::Prob);
+        assert_eq!(b.source, "envelope/0/ch2");
+        assert!((b.amount - 0.75).abs() < 1e-6);
+        assert_eq!(s2.tracks[1].active_slot, 2);
+        assert_eq!(s2.tracks[1].slots[5], Some(alt));
+        assert!(s2.tracks[1].slots[2].is_none(), "active slot stays inline");
+    }
+
+    #[test]
+    fn old_save_files_load_with_defaults() {
+        // a pre-v2 save knows nothing of prob/bind/cycle/scale/slots
+        let toml = r#"
+bpm = 100.0
+
+[[tracks]]
+length = 8
+pulses = 2
+rotation = 0
+muted = false
+mode = "note"
+
+[[tracks.steps]]
+active = true
+note = 64
+velocity = 90
+"#;
+        let params: state::SequencerParams = toml::from_str(toml).expect("legacy parses");
+        let mut s = SequencerState::default();
+        apply_tracks(&mut s, &params);
+        assert_eq!(s.tracks.len(), 1);
+        let st = &s.tracks[0].steps[0];
+        assert!(st.active);
+        assert_eq!(st.prob, 100, "legacy steps always fire");
+        assert!(st.bind.is_none());
+        assert_eq!(s.tracks[0].cycle, state::CycleMode::Forward);
+        assert!(s.tracks[0].scale.is_none());
+        assert_eq!(s.tracks[0].root, 60);
+        assert_eq!(s.tracks[0].active_slot, 0);
+        assert!(s.tracks[0].slots.iter().all(Option::is_none));
     }
 }
