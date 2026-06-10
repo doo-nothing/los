@@ -98,4 +98,5 @@ the GIF/mp4 above ([vhs](https://github.com/charmbracelet/vhs) + ffmpeg);
 
 ## License
 
-TBD
+[AGPL-3.0-or-later](LICENSE) — use it, fork it, learn from it; if you
+distribute or serve a modified Los, share the source.

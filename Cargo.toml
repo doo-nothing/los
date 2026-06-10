@@ -1,6 +1,7 @@
 [package]
 name = "los"
 version = "0.2.0"
+license = "AGPL-3.0-or-later"
 edition = "2021"
 
 [dependencies]
