@@ -1013,26 +1013,12 @@ fn draw_ui(
             };
             let row_style = if trk.muted { theme::dim() } else { theme::value() };
 
-            let info_text = format!(
-                "  {:>3} P{} R{}{}{}",
-                trk.length,
-                trk.pulses,
-                trk.rotation,
-                if trk.mode == TrackMode::Modulation { " ⌁" } else { "" },
-                if trk.muted { " M" } else { "" },
-            );
+            let info_text = row_info(trk);
             // window the steps so the info column never clips (long
             // patterns scroll; ‹ › mark hidden steps)
-            let budget = w.saturating_sub(5 + info_text.chars().count() + 2);
-            let visible = ((budget * 4) / 5).clamp(4, trk.length.max(4)).min(trk.length);
+            let visible = row_visible(w, info_text.chars().count(), trk.length);
             let anchor = if is_cur { state.selected } else { tstep };
-            let start = if trk.length <= visible {
-                0
-            } else {
-                anchor
-                    .saturating_sub(visible / 2)
-                    .min(trk.length - visible)
-            };
+            let start = row_window_start(trk.length, anchor, visible);
             let mut spans: Vec<Span> = Vec::with_capacity(visible + 10);
             // the track label wears its channel-slot identity color — the
             // exact hue any param bound to this track shows on its bar
@@ -1053,7 +1039,7 @@ fn draw_ui(
                 theme::dim(),
             ));
             for i in start..start + visible {
-                if i > start && (i - start) % 4 == 0 {
+                if i > start && (i - start).is_multiple_of(4) {
                     spans.push(Span::raw(" "));
                 }
                 let step = &trk.steps[i];
@@ -1259,6 +1245,35 @@ fn sequencer_help() -> Vec<Line<'static>> {
         Line::from(""),
         Line::from("  ? closes help"),
     ]
+}
+
+/// Track-row geometry shared by the renderer and the mouse hit-test:
+/// window start for a track row given its length, the anchor to keep in
+/// view, and how many steps fit.
+fn row_window_start(len: usize, anchor: usize, visible: usize) -> usize {
+    if len <= visible {
+        0
+    } else {
+        anchor.saturating_sub(visible / 2).min(len - visible)
+    }
+}
+
+/// How many steps fit in a track row of width `w` with this info column.
+fn row_visible(w: usize, info_len: usize, len: usize) -> usize {
+    let budget = w.saturating_sub(5 + info_len + 2);
+    ((budget * 4) / 5).clamp(4, len.max(4)).min(len)
+}
+
+/// The info column text for a track row (drawn and measured identically).
+fn row_info(trk: &Track) -> String {
+    format!(
+        "  {:>3} P{} R{}{}{}",
+        trk.length,
+        trk.pulses,
+        trk.rotation,
+        if trk.mode == TrackMode::Modulation { " ⌁" } else { "" },
+        if trk.muted { " M" } else { "" },
+    )
 }
 
 /// Wake position: Some(0..=2) when `i` trails the playhead by 1–3 steps.
@@ -1556,17 +1571,11 @@ pub fn run(instance: usize) -> Result<()> {
                             let trk_len = s.track().length;
                             let rel = (m.column as usize).saturating_sub(5);
                             let idx_in_window = rel - rel / 5;
-                            // recompute the draw's window start
-                            let info_len = 12; // approximation is fine here
-                            let budget = (terminal.size().map(|r| r.width as usize).unwrap_or(60))
-                                .saturating_sub(5 + info_len + 2);
-                            let visible = ((budget * 4) / 5).clamp(4, trk_len.max(4)).min(trk_len);
-                            let anchor = s.selected;
-                            let start = if trk_len <= visible {
-                                0
-                            } else {
-                                anchor.saturating_sub(visible / 2).min(trk_len - visible)
-                            };
+                            // identical geometry to the renderer
+                            let w = terminal.size().map(|r| r.width as usize).unwrap_or(60);
+                            let info_len = row_info(s.track()).chars().count();
+                            let visible = row_visible(w, info_len, trk_len);
+                            let start = row_window_start(trk_len, s.selected, visible);
                             s.selected = (start + idx_in_window).min(trk_len - 1);
                         }
                     }
@@ -3049,5 +3058,19 @@ mod tests {
         assert_eq!(wake_offset(5, 9, 16), None, "wake is 3 cells");
         assert_eq!(wake_offset(9, 9, 16), None, "the head is not its own wake");
         assert_eq!(wake_offset(15, 1, 16), Some(1), "wraps across the bar line");
+    }
+
+    #[test]
+    fn row_window_geometry() {
+        // short pattern: no scroll
+        assert_eq!(row_window_start(16, 8, 24), 0);
+        // long pattern: anchor centered, clamped at both ends
+        assert_eq!(row_window_start(128, 0, 40), 0);
+        assert_eq!(row_window_start(128, 64, 40), 44);
+        assert_eq!(row_window_start(128, 127, 40), 88, "clamps at the tail");
+        // visible never exceeds the pattern or underflows
+        assert_eq!(row_visible(60, 12, 16), 16);
+        assert!(row_visible(60, 12, 128) >= 4);
+        assert!(row_visible(10, 12, 128) >= 4, "tiny panes stay sane");
     }
 }

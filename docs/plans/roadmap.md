@@ -595,7 +595,20 @@ Phase 5: Track routing / modulation  ✅ Complete
 Phase 6: Module lifecycle            ✅ Complete
 Phase 7: Sequencer undo/redo         ✅ Complete
 v1 polish (8 PRs, see v1-polish.md)  ✅ Complete
+Maths build-out (see maths.md)       ✅ Complete
+Design pass (see design-language.md) ✅ Complete
 ```
+
+### Design pass (2026-06, complete)
+
+The "phosphor & ink" design language landed across every module: shared
+`theme.rs` tokens with truecolor + 256-color fallback, gradient-glow sliders
+with ghost markers at the live modulated position, the color law (cable
+colors at both ends of a binding, pitch-class wheel, CV ramp — see
+design-language.md §2.5), the badge faceplate module, the house tmux layout
+with active-pane theming, session-scoped transport prefix keys, mouse
+support session-wide, 128-step scrolling sequencer tracks, and the scope's
+auto-hiding param strip. Tag `design-m1` marks the first accepted revision.
 
 ## Post-v1 (next)
 

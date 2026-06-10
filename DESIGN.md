@@ -140,13 +140,13 @@ ringbuffer.
 ```
 SequencerState
 ├── tracks: Vec<Track>         — 1-N tracks, each with its own step pattern
-│   ├── steps: Vec<Step>       — 16 steps per track
+│   ├── steps: Vec<Step>       — 128 slots per track (default length 16)
 │   │   ├── active: bool
 │   │   ├── note: u8
 │   │   ├── velocity: u8
 │   │   └── mod_value: f32
-│   ├── length: usize          — Euclidean length (1-16)
-│   ├── pulses: usize          — Euclidean pulses (0-16)
+│   ├── length: usize          — Euclidean length (1-128)
+│   ├── pulses: usize          — Euclidean pulses (0-length)
 │   ├── rotation: usize
 │   ├── muted: bool
 │   └── mode: TrackMode        — Note | Modulation
@@ -349,42 +349,36 @@ Total size: 64 bytes
 > bindings re-resolve. Output labels per module: sequencer `t1`–`t8`,
 > envelope `ch1`–`ch6`,`sum`,`or`,`and`,`inv`,`eor`,`eoc` (12 claimed).
 
-32 atomic f32 channels. Multiple writers (sequencer, envelope), many readers
+64 atomic f32 channels. Multiple writers (sequencer, envelope), many readers
 (voices, scope).
 
 ```
 Offset  Size   Field
 ------  ----   -----
-0       4      version: u32 = 1
-4       4      num_channels: u32 = 32
+0       4      version: u32
+4       4      num_channels: u32 = 64
 8       56     (reserved)
 64      4      channel[0]: f32
 68      4      channel[1]: f32
 ...    ...     ...
-188     4      channel[31]: f32
+316     4      channel[63]: f32
 
-Total size: 64 + (32 × 4) = 192 bytes
+Total size: 64 + (64 × 4) = 320 bytes
 ```
 
-**Channel allocation:**
-
-| Ch    | Writer(s)    | Meaning |
-|-------|--------------|---------|
-| 0-3   | envelope 0   | Envelope channel 1-4 output (0.0-1.0, amplitude) |
-| 4     | envelope 0   | SUM (all 4 envelope channels summed, clamped 0-1) |
-| 5     | envelope 0   | OR (max of envelope channels) |
-| 6     | envelope 0   | AND (min of envelope channels) |
-| 7     | envelope 0   | INV (inverted ch0) |
-| 8+N   | sequencer 0  | Track N mod value: velocity (note tracks) or modulation (mod tracks) |
+**Channel allocation** is dynamic: each module's `Manifest::register` claims
+a contiguous range via the atomic allocator in the manifest header (offset
+12), and the claimed base/count live in the module's manifest entry.
+`reap_dead()` reclaims ranges from dead modules (full allocator reset when
+no live claimers remain, top-range pop otherwise). Nothing is hardcoded —
+consumers always resolve a `module/instance/output` address through the
+manifest at read time (`routing::resolve`).
 
 **Protocol rules:**
 - `set(ch, val)` uses `ptr::write_volatile` + `compiler_fence(Release)`. Aligned
   f32 writes are atomic on supported architectures.
 - `get(ch)` uses `ptr::read_volatile`. No fence needed for single-channel reads.
-- Writers should only write to their allocated channels. No central allocation
-  protocol yet — channels are documented here as the source of truth.
-- Channels 0-7 are hardcoded to envelope 0. Channels 8-15 are sequencer tracks
-  0-7. Channels 16-31 are unused/unallocated.
+- Writers only write within their claimed range.
 
 ### 7.5 Manifest (`/los_manifest`)
 

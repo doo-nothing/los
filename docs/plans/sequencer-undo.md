@@ -1,5 +1,8 @@
 # Sequencer Undo/Redo
 
+**Status: ✅ Complete** (Phase 7; later generalized — `undo.rs` ParamHistory
+gives every module the same `u`/`Ctrl-r` with sweep coalescing)
+
 ## Goal
 Add Vi-style undo/redo to the sequencer: `u` = undo, `Ctrl-r` = redo.
 

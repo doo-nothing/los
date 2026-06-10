@@ -23,7 +23,8 @@ Status markers: **✅ today** · **🔜 v1** (see `docs/plans/v1-polish.md`) ·
 
 ## Vocabulary
 
-- **step** — one cell of a track's 16-slot grid. The "character" of the grammar.
+- **step** — one cell of a track's step grid (default 16 slots, up to 128;
+  long tracks scroll, `‹ ›` mark hidden steps). The "character" of the grammar.
 - **track** — one row of steps with its own length/pulses/rotation/mode. The "line".
 - **word** — a maximal run of consecutive **active** steps. Gaps (runs of
   inactive steps) separate words.
@@ -34,7 +35,7 @@ Status markers: **✅ today** · **🔜 v1** (see `docs/plans/v1-polish.md`) ·
   `h l w b e 0 $ t# f#` (steps), `j k gg G` (tracks).
 - **register** — the single clipboard. Holds either a step range
   ("charwise") or a whole track ("linewise"); paste does whatever fits what
-  it holds. 🔜 (replaces today's separate step/track clipboards)
+  it holds. ✅
 
 ## Sequencer
 
@@ -72,7 +73,7 @@ current track only in v1), **operator-pending**, **ex**. All ✅.
 |-----|--------|--------|
 | `x` | cut current step into register (normal + insert) | ✅ |
 | `y` | yank current step (insert mode; in normal mode `y` is the operator) | ✅ |
-| `p` | paste register at cursor — steps **overwrite** from cursor (fixed 16-slot grid, no shifting); a track **inserts after** current | ✅ |
+| `p` | paste register at cursor — steps **overwrite** from cursor (fixed grid, no shifting); a track **inserts after** current | ✅ |
 | `P` | paste before — track inserts before current; step range overwrites ending at cursor | ✅ |
 | `#p` | paste # times (vi idiom) | ✅ |
 
@@ -96,9 +97,9 @@ current track only in v1), **operator-pending**, **ex**. All ✅.
 | Key | Action | Status |
 |-----|--------|--------|
 | `o` / `O` | new track after / before current (`n` = alias of `o`) | ✅ |
-| `dd` / `yy` / `P`/`p` | delete / yank / paste track | ✅ (register-unified 🔜) |
+| `dd` / `yy` / `P`/`p` | delete / yank / paste track (unified register) | ✅ |
 | `m` | toggle mute | ✅ |
-| `@` | track mode / routing (becomes source picker) | ✅ → 🔜 |
+| `@` | toggle track mode (note ↔ modulation) | ✅ |
 | `>>` / `<<` | rotate the actual step pattern right / left (counts: `3>>`); preserves hand-edits, unlike Euclid `R` | ✅ |
 | `#P` / `#L` / `#R` | Euclidean pulses / length / rotation | ✅ |
 | `P`/`L`/`R` (insert, bare) | re-apply / clamp / rotate+1 | ✅ |
@@ -115,7 +116,7 @@ current track only in v1), **operator-pending**, **ex**. All ✅.
 
 | Key | Action | Status |
 |-----|--------|--------|
-| `Space` | play/pause (normal mode; global flag 🔜) | ✅ |
+| `Space` | play/pause (normal mode; global transport flag) | ✅ |
 | `s` | stop | ✅ |
 | `:set bpm <n>` | set BPM (the old `t<num>` prompt is removed; `t` is reserved for the till motion) | ✅ |
 | `u` / `Ctrl-r` / counts | undo / redo | ✅ |
@@ -181,6 +182,40 @@ Two views, `Tab` switches. **States**: `j/k` nav (counts) · `gg/G` ·
 routing overview): `j/k`/`gg/G` nav · `a` add module (type picker; instance
 auto-numbered) · `x` + y/n remove (saves state first; mixer/conductor are
 protected). Also `los add <module> [instance]` from any shell. All ✅
+
+## Mouse ✅
+
+Mouse input is on session-wide (`tmux mouse on`) and follows one dialect in
+every module — the pointer is a shortcut for the keyboard grammar, never a
+separate feature:
+
+| Gesture | Action |
+|---------|--------|
+| Wheel | Adjust the row/strip under use (same step as `h`/`l`; sweeps coalesce into one undo entry) |
+| Click | Select the row, strip, channel, or step under the pointer |
+| Drag | Slide a value bar continuously (voice/maths/mixer sliders; bipolar rows map around center) |
+
+Per module: **sequencer** wheel = step nav, click = select step in the
+visible window (identical geometry to the renderer, long tracks included) ·
+**maths** click on the overview line selects a channel, click on detail rows
+selects params, Trig/Sig rows open on click · **mixer** click/drag on a
+strip's bar sets level · **scope** wheel adjusts and wakes the param strip ·
+**conductor/badge** keyboard-first, no mouse surface.
+
+Everything the mouse does is undoable exactly like its keyboard twin.
+
+## Color (the law, briefly)
+
+Defined in `docs/plans/design-language.md` §2.5. The short version:
+
+- **Cable wins.** A bound param's slider takes the *connection's* color —
+  the same hue shown at the source's output meter (channel-slot palette,
+  12 muted hues). Unbound sliders wear the module's page hue.
+- **Pitch** uses a 12-class muted wheel (terracotta → plum, brightness rises
+  with octave) — on note steps, note names, and velocity in the sequencer.
+- **Modulation steps** use a teal intensity ramp (CV hue).
+- Signal types keep fixed hues everywhere: NOTE orange, CV teal, AUDIO
+  green, CLOCK violet.
 
 ## Future (🔮 post-v1, documented so the grammar reserves space)
 
