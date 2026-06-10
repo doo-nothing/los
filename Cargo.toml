@@ -2,6 +2,7 @@
 name = "los"
 version = "0.2.0"
 license = "AGPL-3.0-or-later"
+authors = ["doo-nothing / AU Supply"]
 edition = "2021"
 
 [dependencies]
