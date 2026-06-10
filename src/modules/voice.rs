@@ -63,6 +63,12 @@ impl VoiceState {
             notes_src: (n <= 8)
                 .then(|| SourceAddr::parse(&format!("sequencer/0/t{n}")))
                 .flatten(),
+            // voice 1 ships as an audibly different instrument (sub-heavy,
+            // darker): with identical patches, "which voice is playing?"
+            // was unanswerable by ear and made routing look broken
+            shape: if instance == 1 { 0.25 } else { 0.5 },
+            sub: if instance == 1 { 0.7 } else { 0.0 },
+            lpg: if instance == 1 { 0.35 } else { 0.0 },
             ..Default::default()
         }
     }
