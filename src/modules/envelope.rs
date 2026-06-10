@@ -218,6 +218,19 @@ fn vari_response(x: f32, shape: f32) -> f32 {
     }
 }
 
+/// Inverse of [`vari_response`]: the phase at which the curve outputs `y`.
+/// Retriggers and cycle restarts use it to CONTINUE the rise from the
+/// current level — output must never step down in one sample (the click).
+fn vari_inverse(y: f32, shape: f32) -> f32 {
+    let y = y.clamp(0.0, 1.0);
+    let tau = (shape.clamp(0.0, 1.0) - 0.5) * 18.0;
+    if tau.abs() < 0.01 {
+        y
+    } else {
+        (1.0 + y * tau.exp_m1()).ln() / tau
+    }
+}
+
 /// One sample of slew limiting toward `target` (signal-input mode).
 /// Rate comes from the rise/fall time for the movement direction; the
 /// response blends a constant-rate (linear) ramp with an RC proportional
@@ -582,13 +595,16 @@ fn advance_stage(ch: &mut EnvelopeChannel, p: &StageParams, dt: f32) -> bool {
                 ch.phase >= 1.0
             };
             if done {
-                ch.phase = 1.0;
-                ch.output = 0.0;
                 cycle_done = true;
                 if p.loop_mode {
+                    // restart the rise FROM the remaining tail (time-based
+                    // restarts land while the vactrol ring is still
+                    // audible — zeroing it clicked once per cycle)
                     ch.stage = Stage::Rise;
-                    ch.phase = 0.0;
+                    ch.phase = vari_inverse(ch.output, p.shape);
                 } else {
+                    ch.phase = 1.0;
+                    ch.output = 0.0;
                     ch.stage = Stage::Off;
                 }
             }
@@ -755,21 +771,34 @@ fn env_thread(
                     Some(RTrig::Note(want)) => note_offs & (1 << (want & 63)) != 0,
                 };
 
-            if should_release && ch.stage != Stage::Off && ch.stage != Stage::Fall {
-                ch.stage = Stage::Fall;
-                ch.phase = 0.0;
-            }
-            if should_trigger {
-                ch.stage = Stage::Rise;
-                ch.phase = 0.0;
-            }
-
             // Param modulation: bound + resolvable -> modbus value
+            // (computed before trigger handling: a retrigger needs the
+            // live shape to continue the rise from the current level)
             let chan_val = |c: Option<usize>| c.and_then(|c| modbus.as_ref().map(|m| m.get(c)));
             let rp = chan_val(r.mods[0]).map(|v| v.clamp(0.0, 1.0)).unwrap_or(params.rise_param);
             let fp = chan_val(r.mods[1]).map(|v| v.clamp(0.0, 1.0)).unwrap_or(params.fall_param);
             let sp = chan_val(r.mods[2]).map(|v| v.clamp(0.0, 1.0)).unwrap_or(params.shape_param);
             let att = chan_val(r.mods[3]).map(|v| v.clamp(-1.0, 1.0)).unwrap_or(params.attenuverter);
+
+            if should_release && ch.stage != Stage::Off && ch.stage != Stage::Fall {
+                // fall FROM the current level too: the non-pluck fall
+                // curve is 1−vari(phase), so an early release mid-rise
+                // used to jump up to 1.0 before falling
+                ch.stage = Stage::Fall;
+                ch.phase = if params.pluck > 0.0 {
+                    0.0 // pluck init captures ch.output itself
+                } else {
+                    vari_inverse(1.0 - ch.output, sp)
+                };
+            }
+            if should_trigger {
+                // continue the rise FROM the current output — a hard
+                // phase=0 reset stepped a ringing tail to zero in one
+                // sample, the click that got loud once shadowed triggers
+                // started landing
+                ch.stage = Stage::Rise;
+                ch.phase = vari_inverse(ch.output, sp);
+            }
 
             let rise_time = param_to_time(rp);
             let fall_time = param_to_time(fp);
@@ -799,10 +828,16 @@ fn env_thread(
                 } else if advance_stage(ch, &stage_params, dt) && i == n - 1 {
                     eoc_pulse = true;
                 }
-                // audio path: attenuverted function (offsets excluded — DC)
-                let a = ch.output * att;
-                audio_buf[frame * 2] += a;
-                audio_buf[frame * 2 + 1] += a;
+                // audio path: attenuverted function (offsets excluded —
+                // DC). Only CYCLING channels are audio sources: a one-shot
+                // strike is a control transient, and through the DC blocker
+                // it lands in the master as a 0.5-amplitude impulse — the
+                // click heard on every triggered note.
+                if params.loop_mode {
+                    let a = ch.output * att;
+                    audio_buf[frame * 2] += a;
+                    audio_buf[frame * 2 + 1] += a;
+                }
             }
 
             ch_final[i] = (ch.output * att + params.offset).clamp(-1.0, 1.0);
@@ -2012,6 +2047,79 @@ mod tests {
         }
         assert!(above_tenth_at_100ms, "the ring is still audible at 100ms");
         assert!(t > 0.15, "tail outlives the nominal fall time");
+    }
+
+    #[test]
+    fn vari_inverse_roundtrips() {
+        for shape in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            for i in 0..=20 {
+                let x = i as f32 / 20.0;
+                let y = vari_response(x, shape);
+                let back = vari_inverse(y, shape);
+                assert!(
+                    (back - x).abs() < 1e-3,
+                    "shape {shape} x {x}: {back}"
+                );
+            }
+        }
+    }
+
+    /// The anti-click contract: however hard you retrigger, output never
+    /// steps DOWN in a single sample (rising snaps are the instrument).
+    #[test]
+    fn retrigger_never_steps_down() {
+        let dt = 1.0 / 48000.0;
+        let p = StageParams {
+            rise_time: 0.02,
+            fall_time: 0.2,
+            shape: 0.5,
+            loop_mode: false,
+            gate_mode: false,
+            pluck: 0.8,
+        };
+        let mut ch = EnvelopeChannel { stage: Stage::Rise, ..Default::default() };
+        let mut prev = ch.output;
+        let mut max_down = 0.0f32;
+        // a 2-second trigger storm: retrigger every 50ms, exactly the way
+        // env_thread does it (Rise + vari_inverse of the live output)
+        for n in 0..(48000 * 2) {
+            if n % 2400 == 0 && n > 0 {
+                ch.stage = Stage::Rise;
+                ch.phase = vari_inverse(ch.output, p.shape);
+            }
+            advance_stage(&mut ch, &p, dt);
+            max_down = max_down.max(prev - ch.output);
+            prev = ch.output;
+        }
+        // steepest legitimate slope is the pluck fast pole; a hard reset
+        // used to register ~0.3 here
+        assert!(max_down < 0.02, "downward step {max_down}");
+    }
+
+    #[test]
+    fn cycle_restart_is_continuous() {
+        let dt = 1.0 / 48000.0;
+        let p = StageParams {
+            rise_time: 0.05,
+            fall_time: 0.2,
+            shape: 0.5,
+            loop_mode: true,
+            gate_mode: false,
+            pluck: 0.8,
+        };
+        let mut ch = EnvelopeChannel { stage: Stage::Rise, ..Default::default() };
+        let mut prev = ch.output;
+        let mut max_down = 0.0f32;
+        let mut cycles = 0;
+        for _ in 0..(48000 * 5) {
+            if advance_stage(&mut ch, &p, dt) {
+                cycles += 1;
+            }
+            max_down = max_down.max(prev - ch.output);
+            prev = ch.output;
+        }
+        assert!(cycles >= 10, "still cycles on time: {cycles}");
+        assert!(max_down < 0.02, "restart cliff {max_down}");
     }
 
     #[test]
