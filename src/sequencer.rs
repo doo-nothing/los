@@ -1530,7 +1530,51 @@ pub fn run(instance: usize) -> Result<()> {
         draw_ui(&mut terminal, &current_state, &mode, &submode, &input_buffer, &pending_count, &gt_target, &gt_input, show_help, &status_msg, pending_hint)?;
 
         if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
+            let ev = event::read()?;
+            if let Event::Mouse(m) = ev {
+                use crossterm::event::{MouseButton, MouseEventKind};
+                match m.kind {
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                        let mut s = state.lock().unwrap();
+                        let len = s.track().length;
+                        s.selected = if m.kind == MouseEventKind::ScrollUp {
+                            (s.selected + 1) % len
+                        } else {
+                            (s.selected + len - 1) % len
+                        };
+                    }
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        let mut s = state.lock().unwrap();
+                        let n = s.tracks.len();
+                        let y = m.row as usize;
+                        // track rows live at y = 1..=n
+                        if (1..=n).contains(&y) {
+                            s.current_track = y - 1;
+                            // map column back to a step: label(4) + ‹(1),
+                            // then 4 cells + 1 space repeating, window
+                            // starts where the draw started it
+                            let trk_len = s.track().length;
+                            let rel = (m.column as usize).saturating_sub(5);
+                            let idx_in_window = rel - rel / 5;
+                            // recompute the draw's window start
+                            let info_len = 12; // approximation is fine here
+                            let budget = (terminal.size().map(|r| r.width as usize).unwrap_or(60))
+                                .saturating_sub(5 + info_len + 2);
+                            let visible = ((budget * 4) / 5).clamp(4, trk_len.max(4)).min(trk_len);
+                            let anchor = s.selected;
+                            let start = if trk_len <= visible {
+                                0
+                            } else {
+                                anchor.saturating_sub(visible / 2).min(trk_len - visible)
+                            };
+                            s.selected = (start + idx_in_window).min(trk_len - 1);
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            if let Event::Key(key) = ev {
                 // Undo/redo status message clears on the next keypress
                 // (the undo/redo handlers below set a fresh one)
                 undo_msg = None;

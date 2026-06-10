@@ -484,7 +484,25 @@ pub fn run(instance: usize) -> Result<()> {
         draw_ui(&mut terminal, &current_state, show_help, overlay.as_deref(), picker_rows, show_menu)?;
 
         if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
+            let ev = event::read()?;
+            if let Event::Mouse(m) = ev {
+                use crossterm::event::MouseEventKind;
+                use crate::undo::ParamUndo;
+                if matches!(m.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+                    menu_until = std::time::Instant::now() + Duration::from_secs(4);
+                    let steps = if m.kind == MouseEventKind::ScrollUp { 1 } else { -1 };
+                    let mut s = state.lock().unwrap();
+                    let slot = s.selected;
+                    let old = s.get_param(slot);
+                    adjust(&mut s, steps, false);
+                    let new = s.get_param(slot);
+                    if let (Some(old), Some(new)) = (old, new) {
+                        history.record(slot, "Adjust", old, new);
+                    }
+                }
+                continue;
+            }
+            if let Event::Key(key) = ev {
                 ex_msg = None;
                 if picker.is_active() {
                     if let crate::picker::PickerEvent::Chosen(Some(addr)) = picker.handle_key(key.code) {
