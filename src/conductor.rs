@@ -362,19 +362,20 @@ fn install_shell_theme() {
 ///   ├─────────┴────────────┤
 ///   │         SEQ          │
 ///   └──────────────────────┘
-/// Content-aware split sizes for the house layout: `(module_row, seq,
-/// left_col, badge)` in cells, given the window size. SEQ snaps to its
-/// content (≤15: header + 8 tracks + detail strip + modeline) and the
-/// voices row is content-sized (≤14); the left column holds the badge
-/// (fixed, ≤10) with the SCOPE absorbing the column's remaining height,
-/// and the MATHs|MIX row absorbs the right side's slack (their modelines
-/// pin to the pane bottom). Small windows scale down proportionally.
+/// Content-aware split sizes for the house layout: `(row1, seq, left_col,
+/// badge)` in cells, given the window size. SEQ snaps to its content
+/// (≤15: header + 8 tracks + detail strip + modeline); the rest splits
+/// roughly evenly between row 1 (badge+scope column | voices) and row 2
+/// (MATHs | MIX) — the badge is fixed and the scope takes the column's
+/// remainder, so badge + scope always equal the voices' height. Pinned
+/// modelines keep the breathing room inside each pane tidy.
 fn house_dims(w: usize, h: usize) -> (usize, usize, usize, usize) {
-    let row = ((h * 23) / 100).clamp(4, 14);
     let seq = ((h * 28) / 100).clamp(5, 15);
+    let top = h.saturating_sub(seq + 1);
+    let row1 = ((top * 48) / 100).clamp(8.min(top.max(1)), 24);
     let col = (w / 4).clamp(20.min(w / 2), 48);
-    let badge = ((h * 16) / 100).clamp(5, 10);
-    (row, seq, col, badge)
+    let badge = ((h * 16) / 100).clamp(4, 10);
+    (row1, seq, col, badge)
 }
 
 fn build_house_layout(exe: &str) -> Result<()> {
@@ -404,29 +405,28 @@ fn build_house_layout(exe: &str) -> Result<()> {
         &format!("{} sequencer 0", exe),
     ])?;
     let seq = seq.trim().to_string();
-    // left column spans the whole top block: badge fixed on top, SCOPE
-    // soaking up the column's remaining height
-    let badge = tmux_cmd(&[
-        "split-window", "-t", &base, "-h", "-b", "-l", &col.to_string(), "-P", "-F",
-        "#{pane_id}",
-        &format!("{} badge 0", exe),
-    ])?;
-    let badge = badge.trim().to_string();
-    let top = h.saturating_sub(seq_h + 1);
-    let scope_h = top.saturating_sub(badge_h + 1).max(3);
-    let scope = tmux_cmd(&[
-        "split-window", "-t", &badge, "-v", "-l", &scope_h.to_string(), "-P", "-F",
-        "#{pane_id}",
-        &format!("{} scope 0", exe),
-    ])?;
-    // right block: voices row (content-sized) over MATHs | MIX (absorbs
-    // the right side's slack — modelines pin to the pane bottoms)
+    // row 1 above the MATHs|MIX row: badge+scope column and the voices,
+    // all one height
     let row1 = tmux_cmd(&[
         "split-window", "-t", &base, "-v", "-b", "-l", &row.to_string(), "-P", "-F",
         "#{pane_id}",
         &format!("{} voice 0", exe),
     ])?;
     let row1 = row1.trim().to_string();
+    // left column inside row 1: badge fixed on top, scope the remainder —
+    // together they are exactly as tall as the voices
+    let badge = tmux_cmd(&[
+        "split-window", "-t", &row1, "-h", "-b", "-l", &col.to_string(), "-P", "-F",
+        "#{pane_id}",
+        &format!("{} badge 0", exe),
+    ])?;
+    let badge = badge.trim().to_string();
+    let scope_h = row.saturating_sub(badge_h + 1).max(2);
+    let scope = tmux_cmd(&[
+        "split-window", "-t", &badge, "-v", "-l", &scope_h.to_string(), "-P", "-F",
+        "#{pane_id}",
+        &format!("{} scope 0", exe),
+    ])?;
     // halve what remains of the row AFTER the badge column is carved, so
     // both voices come out the same width
     let voice1 = tmux_cmd(&[
@@ -469,14 +469,15 @@ pub fn create_session() -> Result<()> {
     }
     
     // Spawn module panes (each with instance 0 by default)
-    // The house layout (the SCOPE column and the MATHs|MIX row are the
-    // elastic ones; badge, voices, and SEQ are content-sized):
+    // The house layout (SEQ content-sized; rows 1 and 2 share the rest;
+    // badge + scope stack to exactly the voices' height):
     //   ┌───────┬─────────┬─────────┐
     //   │ los   │ VOICE 0 │ VOICE 1 │
-    //   ├───────┼─────┬───┴─────────┤
-    //   │       │MATHs│     MIX     │
-    //   │ SCOPE │     │             │
-    //   ├───────┴─────┴─────────────┤
+    //   ├───────┤         │         │
+    //   │ SCOPE │         │         │
+    //   ├───────┴────┬────┴─────────┤
+    //   │   MATHs    │     MIX      │
+    //   ├────────────┴──────────────┤
     //   │            SEQ            │
     //   └───────────────────────────┘
     build_house_layout(&exe)?;
@@ -1222,29 +1223,31 @@ mod tests {
 
     #[test]
     fn house_dims_adapt_to_window() {
-        // tall window: voices row + SEQ + badge cap at content height;
-        // the scope column gets the rest of the left side
-        let (row, seq, _, badge) = house_dims(180, 80);
-        assert_eq!(row, 14, "voices row caps at content height");
+        // tall window: SEQ snaps to content; rows 1 and 2 share the rest
+        // about evenly; badge + scope stack to the voices' height
+        let (row1, seq, _, badge) = house_dims(180, 80);
         assert_eq!(seq, 15, "SEQ snaps to its content");
+        assert_eq!(row1, 24, "voices row takes a real share");
         assert_eq!(badge, 10, "badge caps at content height");
-        let scope_col = 80 - seq - 1 - badge - 1;
-        assert!(scope_col >= 15, "tall windows feed the waveform");
+        let scope_h = row1 - badge - 1;
+        assert!(scope_h >= 8, "scope still gets a usable window");
+        let row2 = 80 - seq - 1 - row1 - 1;
+        assert!(row2 >= 14, "MATHs|MIX keep content height plus slack");
         // mid window (the gif terminal): proportional
-        let (row, seq, col, badge) = house_dims(140, 40);
-        assert_eq!(row, 9);
+        let (row1, seq, col, badge) = house_dims(140, 40);
         assert_eq!(seq, 11);
+        assert_eq!(row1, 13);
         assert_eq!(col, 35);
         assert_eq!(badge, 6);
         // small window: everything stays usable, nothing collapses
-        let (row, seq, col, badge) = house_dims(60, 20);
-        assert!((4..10).contains(&row));
+        let (row1, seq, col, badge) = house_dims(60, 20);
+        assert!((6..12).contains(&row1));
         assert!((5..10).contains(&seq));
         assert!((15..=30).contains(&col));
-        assert!(badge >= 5);
+        assert!(badge >= 4);
         // degenerate sizes never panic or go to zero
-        let (row, seq, col, badge) = house_dims(4, 4);
-        assert!(row >= 1 && seq >= 1 && col >= 1 && badge >= 1);
+        let (row1, seq, col, badge) = house_dims(4, 4);
+        assert!(row1 >= 1 && seq >= 1 && col >= 1 && badge >= 1);
     }
 
     #[test]
