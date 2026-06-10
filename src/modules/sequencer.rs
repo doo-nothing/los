@@ -3793,8 +3793,11 @@ pub fn run(instance: usize) -> Result<()> {
     let mut pending_angle: Option<char> = None;
     // `'` pressed: next key (n/v/p/m) picks the value layer
     let mut pending_layer = false;
-    // `"` pressed: next key (a-h / A-H) switches / saves a pattern slot
+    // `"` pressed: next key (a-h / A-H) switches / saves a pattern slot.
+    // From V-line, the slot switch applies to the whole span (a scene
+    // change in two keys: V-select, "b)
     let mut pending_quote = false;
+    let mut quote_span: Option<(usize, usize)> = None;
     // `q` pressed with no recording active: next key (a-z) starts one
     let mut pending_record = false;
     // after gc/gC, bare c/C keeps cycling through playhead modes for a
@@ -4941,6 +4944,7 @@ pub fn run(instance: usize) -> Result<()> {
                 // `"` slot prefix: "a-"h switch pattern, "A-"H save into slot
                 if pending_quote {
                     pending_quote = false;
+                    let span = quote_span.take();
                     let action = match key.code {
                         KeyCode::Char(c @ 'a'..='h') => {
                             Some(Action::SwitchSlot((c as u8 - b'a') as usize))
@@ -4951,15 +4955,30 @@ pub fn run(instance: usize) -> Result<()> {
                         _ => None,
                     };
                     if let Some(action) = action {
-                        undo_msg = exec_action(&state, &mut history, &action);
+                        {
+                            let mut s = state.lock().unwrap();
+                            undo_msg = apply_selected(&mut s, &mut history, &action, span);
+                            if span.is_some() {
+                                s.visual_track_anchor = None;
+                            }
+                        }
+                        if span.is_some() && mode == "visual_line" {
+                            mode = String::from("normal");
+                        }
                         undo_time = Some(Instant::now());
                         last_change = Some(action);
                     }
                     continue;
                 }
-                if key.code == KeyCode::Char('"') && mode == "normal" {
+                if key.code == KeyCode::Char('"') && (mode == "normal" || mode == "visual_line")
+                {
                     pending_count = None;
                     pending_quote = true;
+                    quote_span = (mode == "visual_line").then(|| {
+                        let s = state.lock().unwrap();
+                        let a = s.visual_track_anchor.unwrap_or(s.current_track);
+                        (a.min(s.current_track), a.max(s.current_track))
+                    });
                     continue;
                 }
 

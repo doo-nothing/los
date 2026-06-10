@@ -685,15 +685,19 @@ fn env_thread(
 
         // Note events + manual TRIGGER events
         let mut triggers = [false; MAX_CHANNELS];
-        let mut track_trigger: Option<u8> = None;
-        let mut release_track: Option<u8> = None;
+        // Per-track bitmaps: with several note tracks firing in the same
+        // block, a single last-event-wins slot shadowed every channel
+        // whose track wasn't the final writer (three note tracks = a
+        // silent voice).
+        let mut note_trigs: u64 = 0;
+        let mut note_offs: u64 = 0;
         let mut event_count = 0u32;
         if let Some(ref mut ev) = events {
             while let Some(event) = ev.read_event() {
                 event_count += 1;
                 match event.event_type {
-                    0 => track_trigger = Some(event.source),
-                    1 => release_track = Some(event.source),
+                    0 => note_trigs |= 1 << (event.source & 63),
+                    1 => note_offs |= 1 << (event.source & 63),
                     4 => {
                         let ch = (event.target as usize).min(MAX_CHANNELS - 1);
                         triggers[ch] = true;
@@ -734,19 +738,21 @@ fn env_thread(
             let ch = &mut s.channels[i];
 
             let should_trigger = match r.trig {
-                Some(RTrig::AnyNote) | None => track_trigger.is_some() || triggers[i],
+                Some(RTrig::AnyNote) | None => note_trigs != 0 || triggers[i],
                 Some(RTrig::Off) | Some(RTrig::Edge(_)) => triggers[i],
-                Some(RTrig::Note(want)) => track_trigger == Some(want) || triggers[i],
+                Some(RTrig::Note(want)) => {
+                    note_trigs & (1 << (want & 63)) != 0 || triggers[i]
+                }
             };
             // note_off only matters to a gate; a trig ignores it entirely.
             // Edge sources release on their falling edge — without this a
             // gate-mode channel on an edge trigger sustains forever.
             let should_release = params.gate_mode
                 && match r.trig {
-                    Some(RTrig::AnyNote) | None => release_track.is_some(),
+                    Some(RTrig::AnyNote) | None => note_offs != 0,
                     Some(RTrig::Off) => false,
                     Some(RTrig::Edge(_)) => edge_falls[i],
-                    Some(RTrig::Note(want)) => release_track == Some(want),
+                    Some(RTrig::Note(want)) => note_offs & (1 << (want & 63)) != 0,
                 };
 
             if should_release && ch.stage != Stage::Off && ch.stage != Stage::Fall {
