@@ -204,6 +204,23 @@ mod tests {
     }
 
     #[test]
+    fn cable_color_resolves_live_and_falls_back() {
+        let entries = vec![entry("sequencer", 0, Some(0), 8)];
+        let t3 = SourceAddr::parse("sequencer/0/t3").unwrap();
+        assert_eq!(
+            format!("{:?}", cable_color(&entries, &t3)),
+            format!("{:?}", crate::theme::channel_color(2)),
+            "live source uses its channel slot"
+        );
+        let ghost = SourceAddr::parse("envelope/9/ch1").unwrap();
+        // not running: stable hash fallback, same answer twice
+        assert_eq!(
+            format!("{:?}", cable_color(&entries, &ghost)),
+            format!("{:?}", cable_color(&entries, &ghost))
+        );
+    }
+
+    #[test]
     fn note_source_track_from_address() {
         let t5 = SourceAddr::parse("sequencer/0/t5").unwrap();
         assert_eq!(note_source_track(&t5), Some(4));

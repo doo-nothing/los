@@ -51,6 +51,7 @@ fn usage() {
     eprintln!("  los <state-file.toml>         Same as 'load'");
     eprintln!("  los ctl [play|stop|toggle|status]  Control the global transport");
     eprintln!("  los add <module> [instance]   Spawn a module in the running session");
+    eprintln!("  los ps                        Inspect the live session (manifest, ring, clock)");
     eprintln!("  los --help                    Show this help");
     eprintln!();
     eprintln!("Modules:");
