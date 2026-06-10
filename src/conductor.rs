@@ -307,7 +307,7 @@ fn build_house_layout(exe: &str) -> Result<()> {
     ])?;
     // row 1 left column: badge over scope
     let badge = tmux_cmd(&[
-        "split-window", "-t", &row1, "-h", "-b", "-l", "24", "-P", "-F", "#{pane_id}",
+        "split-window", "-t", &row1, "-h", "-b", "-l", "48", "-P", "-F", "#{pane_id}",
         &format!("{} badge 0", exe),
     ])?;
     let badge = badge.trim().to_string();

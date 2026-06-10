@@ -105,25 +105,23 @@ pub fn meter_char(level: f32) -> char {
     METER[idx.min(7)]
 }
 
-/// A fader `width` cells wide: an airy dim dot track, a chunky bone block
-/// thumb (1-bit soul), and the teal ghost `▴` riding the live (modulated)
-/// position — the §5 mod-feedback rule.
+/// A fader `width` cells wide drawn in braille: a smooth fine-grained fill
+/// (2 sub-steps per cell) over a faint dot rail, with the teal ghost `▴`
+/// riding the live (modulated) position — the §5 mod-feedback rule.
 pub fn fader(set: f32, live: Option<f32>, width: usize) -> Vec<Span<'static>> {
     let width = width.max(3);
-    let pos = |v: f32| ((v.clamp(0.0, 1.0)) * (width - 1) as f32).round() as usize;
-    let thumb = pos(set);
-    let ghost = live.map(pos);
+    let sub = (set.clamp(0.0, 1.0) * (width * 2) as f32).round() as usize;
+    let ghost = live.map(|v| ((v.clamp(0.0, 1.0)) * (width - 1) as f32).round() as usize);
     (0..width)
         .map(|i| {
-            if ghost == Some(i) && i != thumb {
-                Span::styled(GHOST.to_string(), signal(cv()))
-            } else if i == thumb {
-                Span::styled("█".to_string(), value())
-            } else {
-                Span::styled(
-                    if i % 2 == 0 { "·" } else { " " }.to_string(),
-                    dim(),
-                )
+            if ghost == Some(i) {
+                return Span::styled(GHOST.to_string(), signal(cv()));
+            }
+            let lit = sub.saturating_sub(i * 2).min(2);
+            match lit {
+                2 => Span::styled("⣿".to_string(), value()),
+                1 => Span::styled("⡇".to_string(), value()),
+                _ => Span::styled("⠄".to_string(), dim()),
             }
         })
         .collect()
@@ -191,14 +189,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fader_renders_thumb_and_ghost() {
-        let g = fader_str(0.5, None, 9);
-        assert_eq!(g, "· · █ · ·");
-        let g = fader_str(0.0, Some(1.0), 5);
-        assert_eq!(g, "█ · ▴", "thumb at zero, ghost riding high");
-        let g = fader_str(1.0, Some(1.0), 5);
-        assert_eq!(g, "· · █", "ghost under the thumb yields to it");
-        assert_eq!(fader_str(0.5, Some(0.75), 8).chars().count(), 8);
+    fn fader_fills_smoothly_with_ghost() {
+        assert_eq!(fader_str(0.5, None, 8), "⣿⣿⣿⣿⠄⠄⠄⠄");
+        assert_eq!(fader_str(0.0, None, 4), "⠄⠄⠄⠄", "empty rail stays faint");
+        assert_eq!(fader_str(1.0, None, 4), "⣿⣿⣿⣿");
+        assert_eq!(
+            fader_str(0.31, None, 8).chars().nth(2),
+            Some('⡇'),
+            "half-cell resolution: 0.31*16 ≈ 5 sub-steps"
+        );
+        let g = fader_str(0.25, Some(1.0), 8);
+        assert_eq!(g.chars().last(), Some(GHOST), "ghost rides the live position");
+        assert_eq!(g.chars().count(), 8);
     }
 
     #[test]
