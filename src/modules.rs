@@ -1,0 +1,25 @@
+//! The runnable modules — each one is a separate process living in its own
+//! tmux pane, launched via `los <module> [instance]`.
+//!
+//! To contribute a new module, start from an existing one ([`tone`] is the
+//! smallest, [`scope`] a mid-size TUI example) and wire it up in three
+//! places:
+//!
+//! 1. Declare it here and re-export it from `lib.rs`.
+//! 2. Add it to `dispatch_module` in `main.rs`.
+//! 3. Register it in `conductor` (`canonical_module`, and
+//!    `ADDABLE_MODULES` if it can be spawned at runtime with `los add`).
+//!
+//! Modules talk to the rest of the rig exclusively through [`crate::ipc`]
+//! (audio rings, event ring, modbus, transport clock) and draw with the
+//! shared components in [`crate::ui`]. The editing contract every
+//! instrument module follows lives in docs/keybindings.md.
+
+pub mod badge;
+pub mod conductor;
+pub mod envelope;
+pub mod mixer;
+pub mod scope;
+pub mod sequencer;
+pub mod tone;
+pub mod voice;

@@ -244,10 +244,10 @@ needed — everything keyboard-driven.
    - Use atomic write pattern (write `.tmp`, fsync, rename)
 3. **Add `--patch` / `--state` CLI flag** to each module for loading params
    - Module startup checks for state file, applies if present
-4. **Implement state file parser** (shared module in `src/state.rs`)
+4. **Implement state file parser** (shared module in `src/session/state.rs`)
    - Serde deserialize from TOML
    - Each module type has its own param struct
-5. **Implement state file writer** (shared module in `src/state.rs`)
+5. **Implement state file writer** (shared module in `src/session/state.rs`)
    - Serde serialize to TOML string
 6. **Build conductor TUI** (ratatui, simple file list)
 7. **Implement assembly logic** in conductor:
@@ -262,7 +262,7 @@ needed — everything keyboard-driven.
 9. **Test end-to-end**: save → kill session → load → verify everything restored
 10. **Update `los.toml`** to support patch file references
 
-### `src/state.rs` Module Structure
+### `src/session/state.rs` Module Structure
 
 ```rust
 // Shared state representation (serialized to/from TOML)
@@ -579,7 +579,8 @@ EventRingbuf (/los_events_v2):
 
 - `README.md` — ✅ Updated with current status
 - `DESIGN.md` — ✅ Updated phase table
-- `TUI_MIGRATION.md` — ✅ Updated with envelope module
+- `TUI_MIGRATION.md` — ✅ Updated with envelope module (since removed —
+  early prototyping notes, superseded by DESIGN.md)
 - `docs/plans/roadmap.md` — ✅ Updated progress
 
 ---

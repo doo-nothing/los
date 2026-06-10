@@ -162,7 +162,7 @@ SequencerState
 ### Undo/Redo System
 
 Every state-modifying user action in the sequencer is undoable via a command
-pattern. The system is defined entirely within `src/sequencer.rs`:
+pattern. The system is defined entirely within `src/modules/sequencer.rs`:
 
 **`Command` enum** — one variant per undoable action type:
 | Variant | Action |
@@ -189,7 +189,7 @@ status bar for 2 seconds.
 
 To add a new undoable action:
 
-1. Add a variant to the `Command` enum (in `src/sequencer.rs`)
+1. Add a variant to the `Command` enum (in `src/modules/sequencer.rs`)
 2. Implement `undo()` and `redo()` for it (matching the existing pattern)
 3. Add its description to `Command::description()`
 4. Call `history.push(Command::YourVariant { ... })` at the action site
@@ -344,7 +344,7 @@ Total size: 64 bytes
 > Modules claim a channel range at registration (`Manifest::register` with a
 > channel count; a monotonic allocator in the manifest header hands out
 > bases). Inputs reference outputs by **source address**
-> (`module/instance/output`, see `src/routing.rs`) and resolve to live
+> (`module/instance/output`, see `src/ipc/routing.rs`) and resolve to live
 > channels through the manifest — a restarted module claims a fresh range and
 > bindings re-resolve. Output labels per module: sequencer `t1`–`t8`,
 > envelope `ch1`–`ch6`,`sum`,`or`,`and`,`inv`,`eor`,`eoc` (12 claimed).
@@ -651,14 +651,14 @@ The conductor (session orchestrator) expects:
 
 ### 10.3 Per-Module Params Structs
 
-Each module defines its own Params struct in `src/state.rs`. All fields are
+Each module defines its own Params struct in `src/session/state.rs`. All fields are
 `Option<T>` to support partial updates — an incoming state file may not include
 every field, and only present fields should be applied. The module merges loaded
 params into its runtime state, keeping current values for any field not present
 in the TOML.
 
 ```rust
-// Example: VoiceParams in src/state.rs
+// Example: VoiceParams in src/session/state.rs
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VoiceParams {
     pub shape: Option<f32>,
@@ -683,7 +683,7 @@ pub struct VoiceParams {
 To add a new module to los today (e.g., a delay or reverb module), follow these
 steps:
 
-**1. Create the module file:** `src/delay.rs`
+**1. Create the module file:** `src/modules/delay.rs`
 
 **2. Add the entry point** — a `pub fn run(instance: usize) -> Result<()>`
 function following the startup sequence from Section 9.
@@ -697,7 +697,7 @@ struct DelayState {
     mix: f32,
 }
 
-// Add to src/state.rs:
+// Add to src/session/state.rs:
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DelayParams {
     pub time: Option<f32>,
@@ -707,9 +707,10 @@ pub struct DelayParams {
 ```
 
 **4. Register in the module registry:**
-- Add `pub mod delay;` to `src/lib.rs`
+- Add `pub mod delay;` to `src/modules.rs` and re-export it from `src/lib.rs`
+  (`pub use modules::{..., delay, ...}`)
 - Add `"delay" => delay::run(instance)` to the match in
-  `src/main.rs::dispatch_module()` (line 49)
+  `src/main.rs::dispatch_module()`
 
 **5. Determine SHM role:**
 - If the module produces audio: create an AudioRingbuf named
@@ -718,7 +719,7 @@ pub struct DelayParams {
 - If the module reads/writes modulation: open ModulationBus, claim unused
   channels (document them in Section 7.4)
 
-**6. Add to conductor's layout defaults** (in `src/layout.rs`) if it should
+**6. Add to conductor's layout defaults** (in `src/session/layout.rs`) if it should
 auto-spawn in new sessions.
 
 **7. Add to `los.toml`** as a default module entry.
@@ -764,7 +765,7 @@ adaptive for free:
    loses a line, fix the constant's arithmetic — the layout and its tests
    follow.
 
-**House-layout rules (`src/conductor.rs`):**
+**House-layout rules (`src/modules/conductor.rs`):**
 
 - `house_dims(w, h) -> (row1, seq, col, badge)` is the single sizing
   function, used by both `build_house_layout` (fresh sessions) and

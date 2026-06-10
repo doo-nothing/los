@@ -76,7 +76,7 @@ A future phase can serialize commands alongside `SequencerParams`.
 
 ## Test Plan
 
-Implemented in `#[cfg(test)] mod tests` at the bottom of `src/sequencer.rs`
+Implemented in `#[cfg(test)] mod tests` at the bottom of `src/modules/sequencer.rs`
 (24 tests), plus extras: history cap, no-op filtering, redo clamps the
 selected step after a length change, undo focuses the changed location,
 count-prefixed undo/redo (runs N times, stops at history end).

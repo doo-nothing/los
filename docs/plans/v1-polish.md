@@ -120,7 +120,7 @@ the param value.
 ### 5. Undo/redo everywhere
 
 - Extract the sequencer's `History`/`Command` machinery into a shared module
-  (`src/undo.rs`), genericized over a module's state.
+  (`src/ui/undo.rs`), genericized over a module's state.
 - voice, envelope, mixer, scope record param edits and binding changes;
   u / Ctrl-r / `#u` / `#Ctrl-r` as in the sequencer.
 - **Coalescing**: consecutive adjustments of the same param merge into one
