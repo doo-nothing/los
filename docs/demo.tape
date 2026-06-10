@@ -15,7 +15,7 @@ Output docs/demo-raw.mp4
 
 Set FontSize 14
 Set Width 1300
-Set Height 840
+Set Height 1060
 Set Padding 4
 Set Framerate 20
 Set TypingSpeed 1ms
