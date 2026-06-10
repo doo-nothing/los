@@ -120,10 +120,6 @@ struct Track {
     /// Parked pattern slots; `slots[active_slot]` is `None` (its data is
     /// inline above). Untouched slots are `None` and read as empty.
     slots: [Option<PatternData>; NUM_SLOTS],
-    /// The track's OUTPUT identity for life: its note-event source byte
-    /// and modbus channel (base + out). Rows are lines and shift freely;
-    /// the music keeps its voice because `out` travels with the track.
-    out: usize,
 }
 
 impl Track {
@@ -150,7 +146,6 @@ impl Track {
             root: 60,
             active_slot: 0,
             slots: Default::default(),
-            out: 0,
         }
     }
 
@@ -171,11 +166,8 @@ impl Track {
 /// (wired by default into maths ch1/ch3 -> voice 0/1 amps); t2 and t4 are
 /// modulation tracks left empty for patching; the rest are blank slates.
 fn default_tracks(count: usize) -> Vec<Track> {
-    let mut tracks: Vec<Track> = (0..count)
-        .map(|i| Track { out: i, ..Track::empty() })
-        .collect();
+    let mut tracks: Vec<Track> = (0..count).map(|_| Track::empty()).collect();
     if let Some(t) = tracks.get_mut(0) {
-        let out = t.out;
         // A minor lead: arpeggio up, answer down
         *t = Track::with_melody(&[
             (0, 69),  // A4
@@ -187,13 +179,10 @@ fn default_tracks(count: usize) -> Vec<Track> {
             (12, 69), // A4
             (14, 71), // B4
         ]);
-        t.out = out;
     }
     if let Some(t) = tracks.get_mut(2) {
         // bass roots: Am . . . | F . G .
-        let out = t.out;
         *t = Track::with_melody(&[(0, 45), (4, 45), (8, 41), (12, 43)]);
-        t.out = out;
     }
     for i in [1usize, 3] {
         if let Some(t) = tracks.get_mut(i) {
@@ -868,9 +857,7 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
                 if s.tracks.len() <= 1 {
                     return Some(String::from("Can't delete the last track"));
                 }
-                if let Some(n) = s.last_notes.get_mut(tidx).and_then(Option::take) {
-                    s.pending_offs.push((n, s.tracks[tidx].out as u8));
-                }
+                flush_held_notes(s);
                 let track = s.tracks.remove(tidx);
                 s.current_steps.remove(tidx);
                 s.last_notes.remove(tidx);
@@ -1280,36 +1267,22 @@ fn switch_slot(track: &mut Track, to: usize) {
 fn flush_held_notes(state: &mut SequencerState) {
     for t in 0..state.last_notes.len() {
         if let Some(n) = state.last_notes[t].take() {
-            let out = state.tracks.get(t).map_or(t, |trk| trk.out);
-            state.pending_offs.push((n, out as u8));
+            state.pending_offs.push((n, t as u8));
         }
     }
-}
-
-/// The lowest output slot no live track owns (the cap guarantees one
-/// exists whenever insertion is allowed).
-fn free_out(tracks: &[Track]) -> usize {
-    (0..crate::NUM_TRACKS)
-        .find(|o| !tracks.iter().any(|t| t.out == *o))
-        .unwrap_or(0)
 }
 
 /// Insert a track at `at`, keeping the per-track bookkeeping vectors in
 /// sync. Refuses beyond the modbus channel claim (the rig registers
 /// exactly [`crate::NUM_TRACKS`] outputs; a 9th track would stomp the
-/// next module's channels). The incoming track gets a FRESH output slot —
-/// pasting never steals another track's voice.
-fn insert_track(state: &mut SequencerState, at: usize, mut track: Track) {
+/// next module's channels). ROUTING IS POSITIONAL: t-numbers are the
+/// rig's jacks, so shifting rows re-wires by design — held notes flush
+/// first because note-offs match by source byte (= row).
+fn insert_track(state: &mut SequencerState, at: usize, track: Track) {
     if state.tracks.len() >= crate::NUM_TRACKS {
         return;
     }
-    // keep the incoming identity when its slot is free (undo of a delete
-    // restores the original voice); collisions get the lowest free slot
-    if track.out >= crate::NUM_TRACKS
-        || state.tracks.iter().any(|t| t.out == track.out)
-    {
-        track.out = free_out(&state.tracks);
-    }
+    flush_held_notes(state);
     let at = at.min(state.tracks.len());
     state.tracks.insert(at, track);
     state.current_steps.insert(at, 0);
@@ -1323,9 +1296,7 @@ fn insert_track(state: &mut SequencerState, at: usize, mut track: Track) {
 /// sync. Never removes the last remaining track.
 fn remove_track(state: &mut SequencerState, at: usize) {
     if state.tracks.len() > 1 && at < state.tracks.len() {
-        if let Some(n) = state.last_notes.get_mut(at).and_then(Option::take) {
-            state.pending_offs.push((n, state.tracks[at].out as u8));
-        }
+        flush_held_notes(state);
         state.tracks.remove(at);
         state.current_steps.remove(at);
         state.last_notes.remove(at);
@@ -2461,11 +2432,10 @@ fn sequencer_thread(
             // switched out of note mode. Without this the voice keeps its
             // gate and gate-mode envelope channels sustain into a drone.
             for (t, n) in stuck_notes(&s.tracks, &s.last_notes, playing) {
-                let out = s.tracks[t].out;
-                let _ = events.write_event(&AudioEvent::note_off_source(n, out as u8, s.current_steps[t] as u32));
+                let _ = events.write_event(&AudioEvent::note_off_source(n, t as u8, s.current_steps[t] as u32));
                 s.last_notes[t] = None;
                 if let (Some(ref mut bus), Some(base)) = (modbus.as_mut(), s.mod_base) {
-                    bus.set(base + out, 0.0);
+                    bus.set(base + t, 0.0);
                 }
             }
 
@@ -2473,9 +2443,9 @@ fn sequencer_thread(
             // channel at 0.0 (modulation-mode tracks otherwise freeze the
             // bus at their last value — the mute-audit bug).
             if let (Some(ref mut bus), Some(base)) = (modbus.as_mut(), s.mod_base) {
-                for trk in s.tracks.iter() {
-                    if trk.muted && trk.out < crate::NUM_TRACKS {
-                        bus.set(base + trk.out, 0.0);
+                for (t, trk) in s.tracks.iter().enumerate() {
+                    if trk.muted {
+                        bus.set(base + t, 0.0);
                     }
                 }
             }
@@ -2572,7 +2542,6 @@ fn sequencer_thread(
                     });
 
                     let track = &s.tracks[t];
-                    let out = track.out;
                     let step = &track.steps[pos];
                     let off = bind_offsets(step.bind.as_ref(), bind_value);
                     let prob = (i32::from(step.prob) + off.prob).clamp(0, 100) as u8;
@@ -2587,18 +2556,18 @@ fn sequencer_thread(
                             let mod_val =
                                 if fires { f32::from(velocity) / 127.0 } else { 0.0 };
                             if let (Some(ref mut bus), Some(base)) = (modbus.as_mut(), s.mod_base) {
-                                bus.set(base + out, mod_val);
+                                bus.set(base + t, mod_val);
                             }
                             let hz = step_hz(track, step.note, off.degrees) as f32;
                             let note_id = step.note;
                             if let Some(n) = s.last_notes[t] {
                                 let _ = events.write_event(&AudioEvent::note_off_source(
-                                    n, out as u8, prev_pos as u32,
+                                    n, t as u8, prev_pos as u32,
                                 ));
                             }
                             if fires {
                                 let _ = events.write_event(&AudioEvent::note_on_hz(
-                                    hz, velocity, out as u8, pos as u32,
+                                    hz, velocity, t as u8, pos as u32,
                                 ));
                                 s.last_notes[t] = Some(note_id);
                             } else {
@@ -2614,7 +2583,7 @@ fn sequencer_thread(
                                 if let (Some(ref mut bus), Some(base)) =
                                     (modbus.as_mut(), s.mod_base)
                                 {
-                                    bus.set(base + out, v);
+                                    bus.set(base + t, v);
                                 }
                             }
                         }
@@ -2942,8 +2911,8 @@ fn draw_ui(
             // the track label wears its channel-slot identity color — the
             // exact hue any param bound to this track shows on its bar
             let cable = match state.mod_base {
-                Some(base) => theme::channel_color(base + trk.out),
-                None => theme::source_color(&format!("sequencer/0/t{}", trk.out + 1)),
+                Some(base) => theme::channel_color(base + ti),
+                None => theme::source_color(&format!("sequencer/0/t{}", ti + 1)),
             };
             spans.push(Span::styled(
                 format!("{}", if is_cur { theme::PLAYHEAD } else { ' ' }),
@@ -2955,9 +2924,9 @@ fn draw_ui(
             // listened position and you can see why it went quiet
             let marked = state.marks.get(ti).copied().unwrap_or(false);
             let listened = entries.iter().any(|e| {
-                e.consumes_notes & (1u8 << trk.out.min(7)) != 0 && trk.out < 8
+                e.consumes_notes & (1u8 << ti.min(7)) != 0 && ti < 8
                     || state.mod_base.is_some_and(|base| {
-                        let ch = base + trk.out;
+                        let ch = base + ti;
                         ch < 64 && e.consumes_channels & (1u64 << ch) != 0
                     })
             });
@@ -3594,7 +3563,6 @@ fn snapshot_params(s: &SequencerState) -> state::SequencerParams {
             scale_cents: trk.scale.as_ref().map(|sc| sc.degrees.clone()).unwrap_or_default(),
             scale_period: trk.scale.as_ref().map(|sc| sc.period),
             root: Some(trk.root),
-            out: Some(trk.out),
             active_slot: trk.active_slot,
             slots: trk
                 .slots
@@ -3700,19 +3668,7 @@ fn apply_tracks(s: &mut SequencerState, params: &state::SequencerParams) {
         }
         let active_slot = tp.active_slot.min(NUM_SLOTS - 1);
         slots[active_slot] = None; // the active slot's data lives inline
-        // output identity: saved value when sane and unclaimed, else the
-        // lowest free slot (covers pre-identity saves and hand-edits)
-        let row = s.tracks.len();
-        let out = tp
-            .out
-            .filter(|o| *o < crate::NUM_TRACKS && !s.tracks.iter().any(|t| t.out == *o))
-            .or_else(|| {
-                (row < crate::NUM_TRACKS && !s.tracks.iter().any(|t| t.out == row))
-                    .then_some(row)
-            })
-            .unwrap_or_else(|| free_out(&s.tracks));
         s.tracks.push(Track {
-            out,
             steps: steps_from_params(&tp.steps),
             length: tp.length.unwrap_or(16).clamp(1, NUM_STEPS),
             pulses: tp.pulses.unwrap_or(5),
@@ -5854,7 +5810,7 @@ mod tests {
         // plain euclid-starter tracks: tests want predictable steps, not
         // the curated fresh-session melody defaults
         let mut s = SequencerState {
-            tracks: (0..n).map(|i| Track { out: i, ..Track::new() }).collect(),
+            tracks: (0..n).map(|_| Track::new()).collect(),
             ..Default::default()
         };
         s.current_steps.truncate(n);
@@ -6593,12 +6549,6 @@ mod tests {
         for t in &s.tracks[4..] {
             assert!(t.steps.iter().all(|st| !st.active));
         }
-        // OUTPUT IDENTITIES ARE UNIQUE FROM BOOT — the bass being born
-        // on the melody's channel scrambled every voice in the rig
-        let mut outs: Vec<usize> = s.tracks.iter().map(|t| t.out).collect();
-        outs.sort_unstable();
-        outs.dedup();
-        assert_eq!(outs.len(), s.tracks.len(), "fresh outs collide");
         // bass sits well below the lead
         let lead_min = s.tracks[0].steps[..16].iter().filter(|st| st.active).map(|st| st.note).min();
         let bass_max = s.tracks[2].steps[..16].iter().filter(|st| st.active).map(|st| st.note).max();
@@ -7287,48 +7237,38 @@ mod tests {
         s.current_track = 0;
         apply_action(&mut s, &mut h, &Action::OpTrack(Operator::Delete));
         assert_eq!(s.marks, vec![false, true], "mark followed its track");
-        // ONLY the deleted track owes a note-off (under its own output);
-        // the survivors keep their identity and keep ringing
-        assert_eq!(s.pending_offs, vec![(60, 0)]);
-        assert_eq!(s.last_notes, vec![Some(64), Some(67)]);
+        // rows ARE the source bytes, so every held note flushes under its
+        // pre-shift row before the re-wire
+        assert_eq!(s.pending_offs, vec![(60, 0), (64, 1), (67, 2)]);
+        assert!(s.last_notes.iter().all(Option::is_none));
     }
 
     #[test]
-    fn pasting_a_track_never_steals_a_voice() {
-        // THE scenario: t1 melody (out 0 → lead), t3 bass (out 2 → bass
-        // voice). yy on t1, cursor t2, gp. The bassline slides to row 4
-        // and KEEPS its output identity — its voice follows the music.
+    fn routing_is_positional_and_paste_carries_no_routing() {
+        // THE contract, settled after much blood: t-numbers are the rig's
+        // jacks. A yanked track carries steps + settings, never routing;
+        // whatever lands on a row sounds through that row's listeners,
+        // and a track that slides to row 4 inherits t4's routing (in the
+        // default patch: silence). Pure position, no hidden identity.
         let mut s = state_with_tracks(4);
         let mut h = History::new();
-        s.tracks[2].steps[0].note = 41; // the bassline
+        s.tracks[2].steps[0].note = 41; // the bassline at t3
         s.current_track = 0;
         apply_action(&mut s, &mut h, &Action::OpTrack(Operator::Yank));
         s.current_track = 1;
         apply_action(&mut s, &mut h, &Action::PasteAsTrack { before: false, times: 1 });
         assert_eq!(s.tracks.len(), 5);
-        // the copy sits at row 3 with a FRESH output (4 = lowest free)
-        assert_eq!(s.tracks[2].out, 4, "the copy got its own output");
-        // the bassline is row 4 now but still broadcasts on out 2 — the
-        // bass voice (bound to t3 = source 2) keeps playing it
-        assert_eq!(s.tracks[3].steps[0].note, 41);
-        assert_eq!(s.tracks[3].out, 2, "the bassline kept its voice");
-        // undo: the copy vanishes, identities intact
+        // the copy SITS at row 3 (= broadcasts as t3: row is the routing);
+        // the bassline slid to row 4 (= broadcasts as t4 now)
+        assert_eq!(s.tracks[2].steps[0].note, 60, "row 3 holds the copy");
+        assert_eq!(s.tracks[3].steps[0].note, 41, "row 4 holds the bassline");
+        // shifting flushed every held note under its pre-shift row so no
+        // gate hangs across the re-wire
+        assert!(s.last_notes.iter().all(Option::is_none));
+        // undo restores the board exactly
         assert!(h.undo(&mut s).is_some());
         assert_eq!(s.tracks.len(), 4);
-        assert_eq!(s.tracks[2].out, 2);
-        // delete + undo restores the ORIGINAL identity too
-        s.current_track = 2;
-        apply_action(&mut s, &mut h, &Action::OpTrack(Operator::Delete));
-        assert!(h.undo(&mut s).is_some());
-        assert_eq!(s.tracks[2].out, 2, "undo of dd restores the voice");
-        // and outputs persist through save/load
-        let params = snapshot_params(&s);
-        let mut s2 = SequencerState::default();
-        apply_tracks(&mut s2, &params);
-        assert_eq!(
-            s2.tracks.iter().map(|t| t.out).collect::<Vec<_>>(),
-            s.tracks.iter().map(|t| t.out).collect::<Vec<_>>()
-        );
+        assert_eq!(s.tracks[2].steps[0].note, 41);
     }
 
     #[test]

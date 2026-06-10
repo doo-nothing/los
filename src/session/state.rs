@@ -257,10 +257,6 @@ pub struct TrackParam {
     /// Inactive non-empty pattern slots.
     #[serde(default)]
     pub slots: Vec<SlotParam>,
-    /// The track's output slot (note source byte + modbus channel offset).
-    /// Pre-identity saves omit it: rows fall back to their position.
-    #[serde(default)]
-    pub out: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
