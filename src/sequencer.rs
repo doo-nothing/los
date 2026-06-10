@@ -23,6 +23,13 @@ use crate::state::{self, TrackMode};
 /// `:set length 128` for the long game — the UI scrolls, nothing clips.
 const NUM_STEPS: usize = 128;
 
+/// The pane height at which this module renders with zero waste:
+/// header + track rows + rule + detail strip (3) + rule + modeline.
+/// `conductor::house_dims` snaps the SEQ pane to this — if the draw
+/// gains or loses a line, update the arithmetic here and the layout
+/// follows (the geometry tests pin the relationship).
+pub const CONTENT_LINES: usize = crate::NUM_TRACKS + 7;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Step {
     active: bool,

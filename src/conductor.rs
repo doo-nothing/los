@@ -222,8 +222,9 @@ pub fn relayout() -> Result<()> {
         .lines()
         .filter_map(|l| l.split_once('\t').map(|(id, t)| (t, id)))
         .collect();
-    let expected = ["SEQ", "MIX", "VOICE 0", "VOICE 1", "MATHs", "los", "SCOPE"];
-    if by_title.len() != expected.len() || !expected.iter().all(|t| by_title.contains_key(t)) {
+    if by_title.len() != HOUSE_TITLES.len()
+        || !HOUSE_TITLES.iter().all(|t| by_title.contains_key(t))
+    {
         return Ok(()); // not the house anymore — leave it be
     }
     let dims = tmux_cmd(&["display-message", "-p", "-t", win, "#{window_width} #{window_height}"])?;
@@ -362,6 +363,13 @@ fn install_shell_theme() {
 ///   ├─────────┴────────────┤
 ///   │         SEQ          │
 ///   └──────────────────────┘
+/// The house pane set. One source of truth: build_house_layout titles its
+/// panes from this set, relayout() recognizes the untouched house by it,
+/// and the save round-trip test walks it. Add a pane here when the house
+/// grows.
+pub const HOUSE_TITLES: [&str; 7] =
+    ["SEQ", "VOICE 0", "VOICE 1", "MATHs", "MIX", "los", "SCOPE"];
+
 /// Content-aware split sizes for the house layout: `(row1, seq, left_col,
 /// badge)` in cells, given the window size. SEQ snaps to its content
 /// (≤15: header + 8 tracks + detail strip + modeline); the rest splits
@@ -370,7 +378,7 @@ fn install_shell_theme() {
 /// remainder, so badge + scope always equal the voices' height. Pinned
 /// modelines keep the breathing room inside each pane tidy.
 fn house_dims(w: usize, h: usize) -> (usize, usize, usize, usize) {
-    let seq = ((h * 28) / 100).clamp(5, 15);
+    let seq = ((h * 28) / 100).clamp(5, crate::sequencer::CONTENT_LINES);
     let top = h.saturating_sub(seq + 1);
     let row1 = ((top * 48) / 100).clamp(8.min(top.max(1)), 24);
     let col = (w / 4).clamp(20.min(w / 2), 48);
@@ -439,6 +447,8 @@ fn build_house_layout(exe: &str) -> Result<()> {
     ])?;
     tmux_cmd(&["respawn-pane", "-k", "-t", &base, &format!("{} envelope 0", exe)])?;
 
+    // titles must stay in sync with HOUSE_TITLES (relayout and the save
+    // round-trip recognize the house by them)
     for (id, title) in [
         (seq.as_str(), "SEQ"),
         (row1.as_str(), "VOICE 0"),
@@ -1209,7 +1219,7 @@ mod tests {
     fn house_titles_round_trip_to_spawnable_modules() {
         // every house pane title must canonicalize to a real module, or
         // save/load silently spawns dead panes
-        for title in ["SEQ", "MIX", "VOICE 0", "VOICE 1", "MATHs", "los", "SCOPE"] {
+        for title in HOUSE_TITLES {
             let word = title.split_whitespace().next().unwrap_or(title);
             let m = canonical_module(word);
             assert!(m.is_some(), "house title {title} must map to a module");
@@ -1219,6 +1229,28 @@ mod tests {
         assert_eq!(canonical_module("envelope"), Some("envelope"));
         assert_eq!(canonical_module("maths"), Some("envelope"));
         assert_eq!(canonical_module("nonsense"), None);
+    }
+
+    #[test]
+    fn house_geometry_invariants_across_sizes() {
+        // the net for layout fragility: every reasonable window size must
+        // produce a workable house — no zero panes, badge + scope fit
+        // inside row 1, SEQ never exceeds its content, row 2 exists
+        for h in 12..150 {
+            for w in (30..260).step_by(7) {
+                let (row1, seq, col, badge) = house_dims(w, h);
+                assert!(seq <= crate::sequencer::CONTENT_LINES, "{w}x{h}");
+                assert!(row1 >= 1 && seq >= 1 && col >= 1 && badge >= 1, "{w}x{h}");
+                assert!(col <= w / 2 + 1, "column never eats half the window: {w}x{h}");
+                if h >= 30 {
+                    assert!(badge + 2 <= row1, "scope keeps a window at {w}x{h}");
+                    assert!(row1 + seq + 2 < h, "MATHs|MIX row exists at {w}x{h}");
+                }
+            }
+        }
+        // and the SEQ snap is DERIVED from the sequencer's real content:
+        // 8 default tracks + header + detail strip + rules + modeline
+        assert_eq!(crate::sequencer::CONTENT_LINES, crate::NUM_TRACKS + 7);
     }
 
     #[test]
