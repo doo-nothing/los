@@ -532,6 +532,12 @@ fn advance_stage(ch: &mut EnvelopeChannel, p: &StageParams, dt: f32) -> bool {
         }
         Stage::Sustain => {
             ch.output = 1.0;
+            if !p.gate_mode {
+                // gate flipped to trig mid-sustain: no note_off will ever
+                // release this stage now — fall instead of holding forever
+                ch.stage = Stage::Fall;
+                ch.phase = 0.0;
+            }
         }
         Stage::Fall => {
             let done = if p.pluck > 0.0 {
@@ -666,12 +672,18 @@ fn env_thread(
         s.events_received += event_count as u64;
         let n = s.params.len();
 
-        // Edge-triggered bindings fire on a 0.5 upward crossing
+        // Edge-triggered bindings fire on a 0.5 upward crossing; the
+        // falling edge releases gate-mode channels (a high source sustains,
+        // like holding a gate against the hardware's signal input)
+        let mut edge_falls = [false; MAX_CHANNELS];
         for i in 0..n {
             if let Some(RTrig::Edge(chan)) = resolved[i].trig {
                 let val = modbus.as_ref().map(|m| m.get(chan)).unwrap_or(0.0);
                 if edge_prev[i] <= 0.5 && val > 0.5 {
                     triggers[i] = true;
+                }
+                if edge_prev[i] > 0.5 && val <= 0.5 {
+                    edge_falls[i] = true;
                 }
                 edge_prev[i] = val;
             }
@@ -691,11 +703,14 @@ fn env_thread(
                 Some(RTrig::Off) | Some(RTrig::Edge(_)) => triggers[i],
                 Some(RTrig::Note(want)) => track_trigger == Some(want) || triggers[i],
             };
-            // note_off only matters to a gate; a trig ignores it entirely
+            // note_off only matters to a gate; a trig ignores it entirely.
+            // Edge sources release on their falling edge — without this a
+            // gate-mode channel on an edge trigger sustains forever.
             let should_release = params.gate_mode
                 && match r.trig {
                     Some(RTrig::AnyNote) | None => release_track.is_some(),
-                    Some(RTrig::Off) | Some(RTrig::Edge(_)) => false,
+                    Some(RTrig::Off) => false,
+                    Some(RTrig::Edge(_)) => edge_falls[i],
                     Some(RTrig::Note(want)) => release_track == Some(want),
                 };
 
@@ -717,7 +732,15 @@ fn env_thread(
 
             let rise_time = param_to_time(rp);
             let fall_time = param_to_time(fp);
-            let signal_target = r.signal.and_then(|c| modbus.as_ref().map(|m| m.get(c)));
+            // Signal input: live value while the source runs; 0V when the
+            // source dies (a pulled cable) so the channel slews down through
+            // its fall time instead of snapping silent. Only unbinding
+            // returns the channel to generator mode.
+            let signal_target = if params.signal_src.is_some() {
+                Some(r.signal.and_then(|c| modbus.as_ref().map(|m| m.get(c))).unwrap_or(0.0))
+            } else {
+                None
+            };
 
             let stage_params = StageParams {
                 rise_time,
@@ -1872,6 +1895,24 @@ mod tests {
         }
         assert_eq!(ch.stage, Stage::Sustain, "gate holds until note off");
         assert_eq!(ch.output, 1.0);
+    }
+
+    #[test]
+    fn sustain_releases_when_gate_mode_flips_to_trig() {
+        let dt = 1.0 / 48000.0;
+        let mut ch = EnvelopeChannel { stage: Stage::Sustain, output: 1.0, ..Default::default() };
+        // still a gate: sustain holds
+        advance_stage(&mut ch, &sp(0.001, 0.005, true, 0.0), dt);
+        assert_eq!(ch.stage, Stage::Sustain);
+        // user flips the channel to trig mid-sustain: must fall, not hang
+        let p = sp(0.001, 0.005, false, 0.0);
+        advance_stage(&mut ch, &p, dt);
+        assert_eq!(ch.stage, Stage::Fall, "sustain with no possible release falls");
+        for _ in 0..480 {
+            advance_stage(&mut ch, &p, dt);
+        }
+        assert_eq!(ch.stage, Stage::Off, "and reaches silence");
+        assert_eq!(ch.output, 0.0);
     }
 
     #[test]
