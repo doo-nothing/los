@@ -171,11 +171,22 @@ fn main() -> Result<()> {
                             kind, ev.source, ev.value, ev.param, ev.step
                         );
                     }
-                    if let (Some(ref bus), Some(base)) = (&bus, seq_base) {
-                        let row: Vec<String> = (0..los::NUM_TRACKS)
-                            .map(|t| format!("t{}={:+.2}", t + 1, bus.get(base + t)))
-                            .collect();
-                        let row = row.join(" ");
+                    if let Some(ref bus) = bus {
+                        // every claimed module range, labeled
+                        let mut parts: Vec<String> = Vec::new();
+                        for e in m.entries() {
+                            if let Some(base) = e.mod_base {
+                                for c in 0..e.mod_count.min(16) {
+                                    parts.push(format!(
+                                        "{}{}={:+.2}",
+                                        &e.module_name[..3.min(e.module_name.len())],
+                                        c + 1,
+                                        bus.get(base + c)
+                                    ));
+                                }
+                            }
+                        }
+                        let row = parts.join(" ");
                         if row != last_bus {
                             println!("modbus: {row}");
                             last_bus = row;

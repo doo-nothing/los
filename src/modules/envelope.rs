@@ -556,12 +556,22 @@ fn advance_stage(ch: &mut EnvelopeChannel, p: &StageParams, dt: f32) -> bool {
                     ch.pluck_slow = ch.output;
                     ch.phase = 0.5; // initialized marker
                 }
+                // a cycle clock rides alongside the tail: phase walks
+                // 0.5 → 1.5 over one fall_time
+                ch.phase += dt / p.fall_time.max(TIME_MIN);
                 let (f2, s2, out) =
                     pluck_decay(ch.pluck_fast, ch.pluck_slow, dt, p.fall_time, p.pluck);
                 ch.pluck_fast = f2;
                 ch.pluck_slow = s2;
                 ch.output = out;
-                out < 0.001
+                if p.loop_mode {
+                    // cycling restarts on TIME (the EOC), not at -60dB of
+                    // vactrol tail — with pluck up, waiting for the tail
+                    // made one "cycle" take ~10 seconds and read as frozen
+                    out < 0.001 || ch.phase >= 1.5
+                } else {
+                    out < 0.001
+                }
             } else if p.fall_time <= 0.0 {
                 true
             } else {
@@ -1996,6 +2006,38 @@ mod tests {
         }
         assert!(above_tenth_at_100ms, "the ring is still audible at 100ms");
         assert!(t > 0.15, "tail outlives the nominal fall time");
+    }
+
+    #[test]
+    fn cycling_with_pluck_restarts_on_time_not_tail() {
+        let dt = 1.0 / 48000.0;
+        // rise 50ms, fall 200ms, pluck well up: a cycle should take about
+        // rise+fall, NOT the ~10s the -60dB vactrol tail needs
+        let p = StageParams {
+            rise_time: 0.05,
+            fall_time: 0.2,
+            shape: 0.5,
+            loop_mode: true,
+            gate_mode: false,
+            pluck: 0.8,
+        };
+        let mut ch = EnvelopeChannel { stage: Stage::Rise, ..Default::default() };
+        let mut cycles = 0;
+        for _ in 0..(48000 * 5) {
+            if advance_stage(&mut ch, &p, dt) {
+                cycles += 1;
+            }
+        }
+        assert!(cycles >= 12, "5s at ~250ms/cycle should loop plenty: {cycles}");
+        // and WITHOUT cycling, the tail still rings long (unchanged)
+        let p2 = StageParams { loop_mode: false, ..p };
+        let mut ch2 = EnvelopeChannel { stage: Stage::Fall, output: 1.0, ..Default::default() };
+        let mut t = 0.0f32;
+        while ch2.stage == Stage::Fall && t < 20.0 {
+            advance_stage(&mut ch2, &p2, dt);
+            t += dt;
+        }
+        assert!(t > 0.4, "non-cycling pluck tail outlives the fall time: {t}");
     }
 
     #[test]

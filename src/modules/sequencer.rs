@@ -248,7 +248,10 @@ struct SequencerState {
 
 impl Default for SequencerState {
     fn default() -> Self {
-        let track_count = crate::NUM_TRACKS;
+        // a fresh session uses HALF the track budget: the default patch
+        // only wires four rows, and a board born full made o/gp dead keys
+        // (the modbus claim caps tracks at NUM_TRACKS)
+        let track_count = crate::NUM_TRACKS.min(4);
         Self {
             tracks: default_tracks(track_count),
             current_track: 0,
@@ -3213,7 +3216,10 @@ fn draw_ui(
         // the cursor's cable, spelled out
         if !state.on_lane {
             if let Some(b) = state.track().steps.get(state.selected).and_then(|st| st.bind.as_ref()) {
-                msg_parts.push(format!("← {} ×{:.2}", b.source, b.amount));
+                match live_binds.get(&state.selected) {
+                    Some(v) => msg_parts.push(format!("← {} ×{:.2} = {:+.2}", b.source, b.amount, v)),
+                    None => msg_parts.push(format!("← {} ×{:.2} (source silent?)", b.source, b.amount)),
+                }
             }
         }
         // performance state first: recording + macros waiting on the clock
@@ -3791,6 +3797,9 @@ pub fn run(instance: usize) -> Result<()> {
     let mut pending_quote = false;
     // `q` pressed with no recording active: next key (a-z) starts one
     let mut pending_record = false;
+    // after gc/gC, bare c/C keeps cycling through playhead modes for a
+    // second — tap through all eight without re-prefixing
+    let mut cycle_window: Option<Instant> = None;
     // `@` pressed: next key (a-z) fires a macro (assigns, on the lane)
     let mut pending_at = false;
     // last fill, for `F` (re-run with a fresh seed) — the seed counter
@@ -3810,7 +3819,7 @@ pub fn run(instance: usize) -> Result<()> {
     let mut ui_manifest = Manifest::open().ok();
     let mut ui_entries: Vec<crate::shm::ManifestEntry> = Vec::new();
     let mut ui_entries_at: Option<Instant> = None;
-    let ui_modbus = ModulationBus::open().ok();
+    let mut ui_modbus = ModulationBus::open().ok();
     let mut ex = crate::excmd::ExLine::default();
     // command-bar audition: the previewed change lives in a scratch
     // history — arrows apply it live, Esc/typing reverts, Enter commits
@@ -3964,6 +3973,12 @@ pub fn run(instance: usize) -> Result<()> {
             }
             if let Some(m) = &ui_manifest {
                 ui_entries = m.entries();
+            }
+            // the bus may not have existed when this pane spawned (panes
+            // start in parallel) — keep retrying or the live cable values
+            // stay frozen forever
+            if ui_modbus.is_none() {
+                ui_modbus = ModulationBus::open().ok();
             }
             ui_entries_at = Some(Instant::now());
         }
@@ -4602,7 +4617,33 @@ pub fn run(instance: usize) -> Result<()> {
                     pending_quote = false;
                     pending_record = false;
                     pending_at = false;
+                    cycle_window = None;
                     continue;
+                }
+
+                // the gc repeat window: bare c/C keeps cycling for 1s
+                if let Some(t0) = cycle_window {
+                    if t0.elapsed() > Duration::from_secs(1) {
+                        cycle_window = None;
+                    } else if mode == "normal" {
+                        if let KeyCode::Char(c @ ('c' | 'C')) = key.code {
+                            let cur = state.lock().unwrap().track().cycle;
+                            let all = state::CycleMode::ALL;
+                            let i = all.iter().position(|m| *m == cur).unwrap_or(0);
+                            let next = if c == 'c' {
+                                all[(i + 1) % all.len()]
+                            } else {
+                                all[(i + all.len() - 1) % all.len()]
+                            };
+                            let action = Action::SetCycle(next);
+                            undo_msg = exec_action(&state, &mut history, &action);
+                            undo_time = Some(Instant::now());
+                            last_change = Some(action);
+                            cycle_window = Some(Instant::now());
+                            continue;
+                        }
+                        cycle_window = None;
+                    }
                 }
 
                 // a half-typed >>/<< chord dies on any other key — `>h>`
@@ -4955,6 +4996,8 @@ pub fn run(instance: usize) -> Result<()> {
                             undo_msg = exec_action(&state, &mut history, &action);
                             undo_time = Some(Instant::now());
                             last_change = Some(action);
+                            // keep tapping c to keep cycling
+                            cycle_window = Some(Instant::now());
                             continue;
                         }
                         KeyCode::Char(c @ ('p' | 'P')) => {
