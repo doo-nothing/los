@@ -92,7 +92,8 @@ sets directly. Shown as a glyph in the track info column
 New crate group `src/theory/`:
 
 - `theory::scales` — `Scale { name, degrees: Vec<f64> /* cents */, period }`
-  with `degree_to_hz(degree, root_hz)`. A built-in library of 200+ scales:
+  with `degree_to_hz(degree, root_hz)`. A built-in library of 137 scales
+  (as shipped; counted by the library invariant test):
   12-TET modes & exotica, Messiaen modes, 24-EDO maqamat, gamelan
   pelog/slendro from published measurements, Bohlen-Pierce, Carlos
   alpha/beta/gamma, EDOs 5–72, just intonation (Ptolemy, Pythagorean,

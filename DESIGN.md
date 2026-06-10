@@ -142,22 +142,40 @@ SequencerState
 ├── tracks: Vec<Track>         — 1-N tracks, each with its own step pattern
 │   ├── steps: Vec<Step>       — 128 slots per track (default length 16)
 │   │   ├── active: bool
-│   │   ├── note: u8
+│   │   ├── note: u8           — MIDI note, or scale degree biased at 60
 │   │   ├── velocity: u8
-│   │   └── mod_value: f32
+│   │   ├── mod_value: f32
+│   │   ├── prob: u8           — trigger probability 0-100
+│   │   └── bind: Option<StepBind> — per-step mod-in cable (target, source, amount)
 │   ├── length: usize          — Euclidean length (1-128)
 │   ├── pulses: usize          — Euclidean pulses (0-length)
 │   ├── rotation: usize
 │   ├── muted: bool
-│   └── mode: TrackMode        — Note | Modulation
+│   ├── mode: TrackMode        — Note | Modulation
+│   ├── cycle: CycleMode       — playhead direction (8 modes)
+│   ├── scale: Option<Scale>   — cents-based tuning (theory::scales)
+│   ├── root: u8               — MIDI root the scale hangs from
+│   ├── active_slot: usize     — pattern slot a-h, data inline
+│   └── slots: [Option<PatternData>; 8] — parked patterns
 ├── bpm: f64
 ├── playing: bool
 ├── current_steps: Vec<usize>  — playhead per track
 ├── last_notes: Vec<Option<u8>>— note-off tracking
 ├── selected: usize            — selected step index
-├── clipboard: Option<Step>    — per-step clipboard
-└── track_clipboard: Option<Track> — per-track clipboard
+├── register: Option<Register> — unified vi register (steps | track)
+├── marks: Vec<bool>           — X multi-select marks
+├── layer: BindTarget          — active value layer ('n 'v 'p 'm)
+├── macros: Vec<Option<Macro>> — 26 semantic-command macros (q/@)
+└── lane: Vec<Option<usize>>   — the macro lane (one slot per bar)
 ```
+
+Sequencer v2 (docs/plans/sequencer-v2.md, user tour in docs/sequencer.md)
+added value layers, probability, cycle modes, the cents-based scale engine
+in `src/theory/` (microtonal; Scala `.scl` import; voices receive raw Hz
+via `AudioEvent::note_on_hz`), per-step mod-IN bindings (the sequencer is
+now a modbus consumer too), pattern slots, macros with clock-quantized
+firing, and the macro lane. Thread-side macro firings emit undo groups
+into an outbox the UI loop drains — history itself stays UI-owned.
 
 ### Undo/Redo System
 

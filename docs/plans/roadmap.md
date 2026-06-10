@@ -598,6 +598,7 @@ Phase 7: Sequencer undo/redo         ✅ Complete
 v1 polish (8 PRs, see v1-polish.md)  ✅ Complete
 Maths build-out (see maths.md)       ✅ Complete
 Design pass (see design-language.md) ✅ Complete
+Sequencer v2 (see sequencer-v2.md)   ✅ Complete
 ```
 
 ### Design pass (2026-06, complete)
@@ -611,10 +612,26 @@ with active-pane theming, session-scoped transport prefix keys, mouse
 support session-wide, 128-step scrolling sequencer tracks, and the scope's
 auto-hiding param strip. Tag `design-m1` marks the first accepted revision.
 
+### Sequencer v2 (2026-06, complete)
+
+The pre-release feature pass (docs/plans/sequencer-v2.md, user tour in
+docs/sequencer.md): value layers ('n/'v/'p/'m) so one vi grammar edits
+note/velocity/probability/mod lanes; per-step probability with
+deterministic rolls; eight per-track cycle modes; a cents-based scale
+engine (137 built-ins incl. maqamat, gamelan, Bohlen-Pierce, Partch 43,
+EDOs 5-72) with Scala .scl import — true microtonal, voices take Hz;
+per-step mod-IN bindings (B picker, the sequencer now consumes
+modulation); pattern slots "a-"h per track; semantic-command macros on
+q/@ with clock quantize and a bar-resolution macro lane; multi-select
+(V-line + X marks) with single-entry group undo; the paste split
+(p=into, gp=new track); Y/D/C; generative fills (:fill / F). A full
+keybinding survey fixed dead gt# and removed unreachable submodes.
+
 ## Post-v1 (next)
 
 - New voices (additional synthesis models) and FX modules
-- Sequencer depth (orca-inspired): per-step chance, ratcheting,
-  per-track clock division, swing — see docs/keybindings.md "Future"
+- Sequencer depth, round 2: ratcheting (substep repeats), per-track
+  clock division, swing, a dedicated macro-sequencer pane (the lane's
+  engine is already UI-independent)
 - Routing overview graph rendering, patch morphing, MIDI I/O
 

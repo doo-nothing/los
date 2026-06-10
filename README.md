@@ -12,7 +12,11 @@ plugins, no mouse required (but the mouse works too).
 **[🔊 ten seconds with sound →](docs/demo.mp4)**
 
 - **vi grammar, on sequences** — `3x`, `yw`, `ct4`, visual mode, registers,
-  `.` repeat, `u` undo. Everywhere.
+  `.` repeat, `u` undo. Everywhere. Macros too: `qa…q` records a
+  performance gesture, `@a` fires it on the next bar.
+- **Weird on purpose** — per-step probability, eight playhead cycle modes
+  (pingpong, drunk, prime-jump…), generative fills, and a 137-scale
+  microtonal library with Scala `.scl` import.
 - **Cable-colored patching** — bind any parameter to any output with `@`;
   the connection wears one color at both ends.
 - **MATHs** — a [Make Noise Maths](https://www.makenoisemusic.com/synthesizers/maths)
@@ -35,13 +39,14 @@ moves and adjusts, counts and `Shift` go coarse, `@` patches, `u`/`Ctrl-r`
 undoes, `:` for ex commands, `?` for help. Wheel, click, drag work too.
 
 First five minutes: [docs/tour.md](docs/tour.md) · every key:
-[docs/keybindings.md](docs/keybindings.md)
+[docs/keybindings.md](docs/keybindings.md) · the sequencer, in depth:
+[docs/sequencer.md](docs/sequencer.md)
 
 ## The rig
 
 | Module | What it does |
 |--------|--------------|
-| **sequencer** | 8 tracks × up to 128 steps, Euclidean rhythms, note + modulation modes, full vi grammar |
+| **sequencer** | 8 tracks × up to 128 steps × 8 pattern slots, Euclidean rhythms, probability, cycle modes, scales (microtonal, `.scl` import), per-step mod cables, macros + a macro lane — [the full tour](docs/sequencer.md) |
 | **voice** (`sto`) | STO-style osc: waveshaping, sub, FM, vactrol-ish low-pass gate |
 | **envelope** (`maths`) | 6 function generators: trig/gate/cycle, slew, pluck, SUM/OR/INV, EOR/EOC, audio-rate out |
 | **mixer** | Auto-discovers sources, per-track meters, clip warning, tape out (`los record`) |
