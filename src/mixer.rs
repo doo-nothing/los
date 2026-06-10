@@ -325,7 +325,7 @@ fn draw_ui(
         let _ = (bpm, playing);
         lines.push(theme::header("MIX", &format!("{}ch", tracks.len()), "", w));
 
-        let bar_w = (w.saturating_sub(28)).clamp(8, 22);
+        let bar_w = theme::bar_width(w, 28);
         // channel strips as dense rows: name · meter · level gauge · pan · M/S
         for (i, t) in tracks.iter().enumerate() {
             let sel = i == selected;
@@ -556,7 +556,7 @@ pub fn run() -> Result<()> {
                     MouseEventKind::Drag(MouseButton::Left) => {
                         if let Some(strip) = strip_at(m.row) {
                             let w = terminal.size().map(|r| r.width as usize).unwrap_or(60);
-                            let bar_w = (w.saturating_sub(28)).clamp(8, 22);
+                            let bar_w = crate::theme::bar_width(w, 28);
                             let x = (m.column as usize).saturating_sub(12);
                             let v = (x as f32 / bar_w.saturating_sub(1).max(1) as f32).clamp(0.0, 1.0);
                             let mut s = inner.lock().unwrap();
