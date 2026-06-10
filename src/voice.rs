@@ -48,6 +48,26 @@ struct VoiceState {
     lpg: f32,
 }
 
+impl VoiceState {
+    /// Fresh-session wiring for voice `i`: it plays sequencer track 2i+1
+    /// and breathes through maths channel 2i+1 — odd tracks carry the
+    /// default melodies and odd envelope channels their plucks, while the
+    /// even ones stay free for patching. Instances past the wired range
+    /// start unpatched (amp unbound = audible, notes = all tracks).
+    fn default_for_instance(instance: usize) -> Self {
+        let n = 2 * instance + 1;
+        Self {
+            amp_src: (n <= 6)
+                .then(|| SourceAddr::parse(&format!("envelope/0/ch{n}")))
+                .flatten(),
+            notes_src: (n <= 8)
+                .then(|| SourceAddr::parse(&format!("sequencer/0/t{n}")))
+                .flatten(),
+            ..Default::default()
+        }
+    }
+}
+
 impl Default for VoiceState {
     fn default() -> Self {
         Self {
@@ -600,7 +620,7 @@ pub fn run(instance: usize) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let state = Arc::new(Mutex::new(VoiceState::default()));
+    let state = Arc::new(Mutex::new(VoiceState::default_for_instance(instance)));
     
     // Load saved state if available
     if let Ok(params) = state::load_module_state::<state::VoiceParams>("voice", instance) {
@@ -994,5 +1014,19 @@ mod tests {
         assert_eq!(amp_level(true, Some(0.0)), 0.0);
         // bound + orphaned: SILENT — a dead envelope is not a drone
         assert_eq!(amp_level(true, None), 0.0);
+    }
+
+    #[test]
+    fn per_instance_default_wiring() {
+        let v0 = VoiceState::default_for_instance(0);
+        assert_eq!(v0.amp_src.as_ref().map(|a| a.to_string()), Some("envelope/0/ch1".into()));
+        assert_eq!(v0.notes_src.as_ref().map(|a| a.to_string()), Some("sequencer/0/t1".into()));
+        let v1 = VoiceState::default_for_instance(1);
+        assert_eq!(v1.amp_src.as_ref().map(|a| a.to_string()), Some("envelope/0/ch3".into()));
+        assert_eq!(v1.notes_src.as_ref().map(|a| a.to_string()), Some("sequencer/0/t3".into()));
+        // beyond the wired range: unpatched, never panics
+        let v3 = VoiceState::default_for_instance(3);
+        assert!(v3.amp_src.is_none(), "ch7 does not exist — amp unbound");
+        assert_eq!(v3.notes_src.as_ref().map(|a| a.to_string()), Some("sequencer/0/t7".into()));
     }
 }

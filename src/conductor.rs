@@ -222,7 +222,7 @@ pub fn relayout() -> Result<()> {
         .lines()
         .filter_map(|l| l.split_once('\t').map(|(id, t)| (t, id)))
         .collect();
-    let expected = ["SEQ", "MIX", "VOICE", "MATHs", "los", "SCOPE"];
+    let expected = ["SEQ", "MIX", "VOICE 0", "VOICE 1", "MATHs", "los", "SCOPE"];
     if by_title.len() != expected.len() || !expected.iter().all(|t| by_title.contains_key(t)) {
         return Ok(()); // not the house anymore — leave it be
     }
@@ -233,7 +233,7 @@ pub fn relayout() -> Result<()> {
     // order matters: SEQ pins the top block, then the row split, then the
     // column widths (the divider between vertical splits costs one line)
     tmux_cmd_ok(&["resize-pane", "-t", by_title["SEQ"], "-y", &h.saturating_sub(top + 1).to_string()]);
-    tmux_cmd_ok(&["resize-pane", "-t", by_title["VOICE"], "-y", &row2.to_string()]);
+    tmux_cmd_ok(&["resize-pane", "-t", by_title["MATHs"], "-y", &row2.to_string()]);
     tmux_cmd_ok(&["resize-pane", "-t", by_title["los"], "-x", &col.to_string()]);
     tmux_cmd_ok(&["resize-pane", "-t", by_title["SCOPE"], "-y", &(top.saturating_sub(1) / 2).to_string()]);
     Ok(())
@@ -369,8 +369,8 @@ fn install_shell_theme() {
 /// elastic panes (SEQ, and the badge/scope column). Small windows fall
 /// back to proportional splits so nothing collapses.
 fn house_dims(w: usize, h: usize) -> (usize, usize, usize) {
-    let top = ((h * 3) / 5).clamp(6, 26);
-    let row2 = ((top * 3) / 5).clamp(3, 15);
+    let top = ((h * 3) / 5).clamp(6, 28);
+    let row2 = (top / 2).clamp(3, 14);
     let col = (w / 4).clamp(20.min(w / 2), 48);
     (top, row2, col)
 }
@@ -394,23 +394,28 @@ fn build_house_layout(exe: &str) -> Result<()> {
         .next()
         .unwrap_or_default()
         .to_string();
-    // top block (rows 1+2) above SEQ, content-sized; row 1 = mixer
+    // top block (rows 1+2) above SEQ, content-sized; row 1 = the voices
     let row1 = tmux_cmd(&[
         "split-window", "-t", &seq, "-v", "-b", "-l", &top.to_string(), "-P", "-F",
         "#{pane_id}",
-        &format!("{} mixer 0", exe),
-    ])?;
-    let row1 = row1.trim().to_string();
-    // row 2 under row 1: voice | maths
-    let voice = tmux_cmd(&[
-        "split-window", "-t", &row1, "-v", "-l", &row2.to_string(), "-P", "-F",
-        "#{pane_id}",
         &format!("{} voice 0", exe),
     ])?;
-    let voice = voice.trim().to_string();
+    let row1 = row1.trim().to_string();
+    // row 2 under row 1: MATHs | MIX
     let maths = tmux_cmd(&[
-        "split-window", "-t", &voice, "-h", "-l", "50%", "-P", "-F", "#{pane_id}",
+        "split-window", "-t", &row1, "-v", "-l", &row2.to_string(), "-P", "-F",
+        "#{pane_id}",
         &format!("{} envelope 0", exe),
+    ])?;
+    let maths = maths.trim().to_string();
+    let mix = tmux_cmd(&[
+        "split-window", "-t", &maths, "-h", "-l", "50%", "-P", "-F", "#{pane_id}",
+        &format!("{} mixer 0", exe),
+    ])?;
+    // row 1 splits into the two default voices
+    let voice1 = tmux_cmd(&[
+        "split-window", "-t", &row1, "-h", "-l", "50%", "-P", "-F", "#{pane_id}",
+        &format!("{} voice 1", exe),
     ])?;
     // row 1 left column: badge over scope
     let badge = tmux_cmd(&[
@@ -427,9 +432,10 @@ fn build_house_layout(exe: &str) -> Result<()> {
 
     for (id, title) in [
         (seq.as_str(), "SEQ"),
-        (row1.as_str(), "MIX"),
-        (voice.as_str(), "VOICE"),
-        (maths.trim(), "MATHs"),
+        (row1.as_str(), "VOICE 0"),
+        (voice1.trim(), "VOICE 1"),
+        (maths.as_str(), "MATHs"),
+        (mix.trim(), "MIX"),
         (badge.as_str(), "los"),
         (scope.trim(), "SCOPE"),
     ] {
@@ -455,13 +461,15 @@ pub fn create_session() -> Result<()> {
     
     // Spawn module panes (each with instance 0 by default)
     // The house layout:
-    //   ┌───────┬─────────┬─────────┬───────┐
-    //   │ los   │         │         │       │
-    //   ├───────┤  VOICE  │  MATHs  │  MIX  │
-    //   │ SCOPE │         │         │       │
-    //   ├───────┴─────────┴─────────┴───────┤
-    //   │               SEQ                 │
-    //   └───────────────────────────────────┘
+    //   ┌───────┬─────────┬─────────┐
+    //   │ los   │         │         │
+    //   ├───────┤ VOICE 0 │ VOICE 1 │
+    //   │ SCOPE │         │         │
+    //   ├───────┴────┬────┴─────────┤
+    //   │   MATHs    │     MIX      │
+    //   ├────────────┴──────────────┤
+    //   │            SEQ            │
+    //   └───────────────────────────┘
     build_house_layout(&exe)?;
 
     install_transport_keys(&exe);
@@ -1191,8 +1199,9 @@ mod tests {
     fn house_titles_round_trip_to_spawnable_modules() {
         // every house pane title must canonicalize to a real module, or
         // save/load silently spawns dead panes
-        for title in ["SEQ", "MIX", "VOICE", "MATHs", "los", "SCOPE"] {
-            let m = canonical_module(title);
+        for title in ["SEQ", "MIX", "VOICE 0", "VOICE 1", "MATHs", "los", "SCOPE"] {
+            let word = title.split_whitespace().next().unwrap_or(title);
+            let m = canonical_module(word);
             assert!(m.is_some(), "house title {title} must map to a module");
         }
         // labels from add_module ("Voice 1") and plain names work too
@@ -1206,12 +1215,12 @@ mod tests {
     fn house_dims_adapt_to_window() {
         // tall window: rows stay content-sized, slack flows to SEQ
         let (top, row2, _) = house_dims(180, 80);
-        assert_eq!(top, 26, "top block caps at content height");
-        assert_eq!(row2, 15, "voice/maths row caps at content height");
+        assert_eq!(top, 28, "top block caps at content height");
+        assert_eq!(row2, 14, "MATHs/MIX row caps at content height");
         // mid window (the gif terminal): proportional
         let (top, row2, col) = house_dims(140, 40);
         assert_eq!(top, 24);
-        assert_eq!(row2, 14);
+        assert_eq!(row2, 12);
         assert_eq!(col, 35);
         // small window: everything stays usable, nothing collapses
         let (top, row2, col) = house_dims(60, 20);

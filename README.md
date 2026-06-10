@@ -52,16 +52,21 @@ los new    # fresh session, default patch
 You land in a tmux session with the full rig laid out. `Ctrl-b` + arrows
 moves between panes; each pane is one module, focused and keyboard-driven.
 
+A fresh session comes pre-patched: track 1 carries a melody and track 3 a
+bass line, each triggering a spikey vactrol-pluck envelope (MATHs ch1/ch3)
+that gates its own voice. Tracks 2 and 4 are modulation tracks and MATHs
+ch2/ch4 are unwired — patch points waiting for you.
+
 First five minutes:
 
-1. Press `Space` — the transport starts everywhere at once.
+1. Press `Space` — the rig opens paused; this is the noise button.
 2. In the **sequencer**, hit `i` for insert mode and tap steps in with
    `Space`; `k`/`j` nudge pitch, `x` deletes, `u` undoes.
 3. Try the grammar: `v` select a few steps, `y` yank, move, `p` paste.
-4. In **MATHs**, scroll a rise/fall slider with the mouse wheel, or flip a
-   channel to cycle (`c`) and you've got an LFO.
-5. Bind it: on any voice slider press `@`, pick `envelope/0/ch1`, and watch
-   the slider take the cable's color and start breathing.
+4. In **MATHs**, stretch a fall slider with the mouse wheel and hear the
+   plucks bloom, or flip a channel to cycle (`c`) and you've got an LFO.
+5. Patch it: on any slider press `@`, pick `envelope/0/ch2`, and watch the
+   slider take the cable's color and start breathing.
 6. `:w mypatch` saves. `:q` from the conductor tears it all down. `los`
    brings it back.
 

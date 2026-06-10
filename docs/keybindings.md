@@ -145,9 +145,11 @@ gate — amplitude and brightness fall together).
 `j/k` select param · `h/l` adjust · `H/L` coarse · counts · `gg/G` (✅) ·
 `1/2/3` output shortcuts removed — digits are counts ·
 `@` source picker on bindable rows · new rows: `notes` (which seq track's
-notes to play; unbound = all) and `amp` (amplitude source, default
-`envelope/0/ch1`; unbound = 1.0 — a drone by choice; bound but offline =
-silent, with a `✗ offline` marker on the row) · `:` · undo (all ✅)
+notes to play; unbound = all) and `amp` (amplitude source; unbound = 1.0 —
+a drone by choice; bound but offline = silent, with a `✗ offline` marker
+on the row) · voice `i` defaults to playing seq track `2i+1` through maths
+channel `2i+1` (voice 0: t1/ch1, voice 1: t3/ch3 — even tracks/channels
+stay free for patching) · `:` · undo (all ✅)
 
 ### Envelope / Maths
 Maths-style panel: one column per channel + a logic column (SUM/OR/AND/INV,
