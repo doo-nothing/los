@@ -24,11 +24,11 @@ use crate::state::{self, TrackMode};
 const NUM_STEPS: usize = 128;
 
 /// The pane height at which this module renders with zero waste:
-/// header + track rows + rule + detail strip (3) + rule + modeline.
-/// `conductor::house_dims` snaps the SEQ pane to this — if the draw
-/// gains or loses a line, update the arithmetic here and the layout
+/// header + macro lane + track rows + rule + detail strip (3) + rule +
+/// modeline. `conductor::house_dims` snaps the SEQ pane to this — if the
+/// draw gains or loses a line, update the arithmetic here and the layout
 /// follows (the geometry tests pin the relationship).
-pub const CONTENT_LINES: usize = crate::NUM_TRACKS + 7;
+pub const CONTENT_LINES: usize = crate::NUM_TRACKS + 8;
 
 /// Per-step mod-in binding: `source`'s live modbus value offsets `target`
 /// at trigger time, scaled by `amount` (docs/plans/sequencer-v2.md §5).
@@ -2298,9 +2298,67 @@ fn draw_ui(
         let ctx = format!("t{}/{}", state.current_track + 1, state.tracks.len());
         let mut lines: Vec<Line> = vec![theme::header("SEQ", &ctx, &echo, w)];
 
+        // ── macro lane: one slot per bar, the sequencer of sequencers ───
+        {
+            let lane_len = state.lane.len();
+            let info = format!("  {:>3} lane", lane_len);
+            let visible = row_visible(w, info.chars().count(), lane_len);
+            let anchor = if state.on_lane { state.lane_selected } else { state.lane_pos };
+            let start = row_window_start(lane_len, anchor, visible);
+            let on_lane = state.on_lane;
+            let mut spans: Vec<Span> = Vec::with_capacity(visible + 8);
+            spans.push(Span::styled(
+                format!("{}", if on_lane { theme::PLAYHEAD } else { ' ' }),
+                if on_lane { theme::chrome_hi() } else { theme::chrome() },
+            ));
+            spans.push(Span::styled(
+                String::from(" @ "),
+                if on_lane { theme::chrome_hi() } else { theme::chrome() },
+            ));
+            spans.push(Span::styled(
+                if start > 0 { "‹" } else { " " }.to_string(),
+                theme::dim(),
+            ));
+            for i in start..start + visible {
+                if i > start && (i - start).is_multiple_of(4) {
+                    spans.push(Span::raw(" "));
+                }
+                let glyph = match state.lane[i] {
+                    Some(idx) => (b'a' + idx as u8) as char,
+                    None => '·',
+                };
+                let style = if on_lane && i == state.lane_selected {
+                    theme::selected()
+                } else if state.playing && i == state.lane_pos {
+                    theme::flash(theme::clock())
+                } else if i == state.lane_pos {
+                    theme::signal(theme::clock())
+                } else if let Some(idx) = state.lane[i] {
+                    theme::signal(theme::channel_color(idx))
+                } else {
+                    theme::dim()
+                };
+                spans.push(Span::styled(glyph.to_string(), style));
+            }
+            spans.push(Span::styled(
+                if start + visible < lane_len { "›" } else { " " }.to_string(),
+                theme::dim(),
+            ));
+            spans.push(Span::styled(info, if on_lane { theme::value() } else { theme::dim() }));
+            lines.push(Line::from(spans));
+        }
+
+        // V-line selection: which track rows are inside the span
+        let vline_span = (mode == "visual_line")
+            .then(|| {
+                let a = state.visual_track_anchor.unwrap_or(state.current_track);
+                (a.min(state.current_track), a.max(state.current_track))
+            });
+        let in_vline = |ti: usize| vline_span.is_some_and(|(a, b)| ti >= a && ti <= b);
+
         // ── track rows ──────────────────────────────────────────────────
         for (ti, trk) in state.tracks.iter().enumerate() {
-            let is_cur = ti == state.current_track;
+            let is_cur = ti == state.current_track && !state.on_lane;
             let tstep = state.current_steps[ti];
             let hue = match trk.mode {
                 TrackMode::Note => theme::note(),
@@ -2325,9 +2383,17 @@ fn draw_ui(
                 format!("{}", if is_cur { theme::PLAYHEAD } else { ' ' }),
                 if is_cur { theme::chrome_hi() } else { theme::chrome() },
             ));
+            // marked tracks (X) wear a star; V-line spans light up
+            let marked = state.marks.get(ti).copied().unwrap_or(false);
             spans.push(Span::styled(
-                format!("t{} ", ti + 1),
-                if trk.muted { theme::dim() } else { theme::signal(cable) },
+                format!("t{}{}", ti + 1, if marked { '*' } else { ' ' }),
+                if in_vline(ti) {
+                    theme::selected()
+                } else if trk.muted {
+                    theme::dim()
+                } else {
+                    theme::signal(cable)
+                },
             ));
             spans.push(Span::styled(
                 if start > 0 { "‹" } else { " " }.to_string(),
@@ -2339,16 +2405,15 @@ fn draw_ui(
                 }
                 let step = &trk.steps[i];
                 let on = step.active;
-                let glyph = match (trk.mode, on) {
-                    (TrackMode::Note, true) => theme::STEP_ON,
-                    (TrackMode::Note, false) => theme::STEP_OFF,
-                    (TrackMode::Modulation, true) => theme::MOD_ON,
-                    (TrackMode::Modulation, false) => theme::MOD_OFF,
-                };
+                // the active value layer picks the glyph and base color:
+                // one grammar, many lanes (docs/plans/sequencer-v2.md §1)
+                let (glyph, value_color) = layer_cell(state.layer, trk, step);
                 // playhead + wake (CLOCK hue), trigger flash on the live cell
                 let style = if is_cur && i == state.selected {
                     // your edit cursor, visible in the overview too
                     theme::selected()
+                } else if in_vline(ti) {
+                    theme::flash(theme::cv())
                 } else if state.playing && i == tstep && !trk.muted {
                     if on {
                         theme::flash(hue)
@@ -2363,13 +2428,15 @@ fn draw_ui(
                 } else if trk.muted {
                     theme::dim()
                 } else if on {
-                    match trk.mode {
-                        // pitch-class wheel: see the melody from across the room
-                        TrackMode::Note => theme::signal(theme::pitch_color(step.note)),
-                        TrackMode::Modulation => theme::signal(theme::cv_ramp(step.mod_value)),
-                    }
+                    theme::signal(value_color)
                 } else {
                     theme::dim()
+                };
+                // a patched-in mod binding wears an underline
+                let style = if step.bind.is_some() {
+                    style.add_modifier(ratatui::style::Modifier::UNDERLINED)
+                } else {
+                    style
                 };
                 let shown = if state.playing && !trk.muted {
                     match wake_offset(i, tstep, trk.length) {
@@ -2429,14 +2496,19 @@ fn draw_ui(
             let val = match trk.mode {
                 TrackMode::Note => {
                     if step.active {
-                        midi_note_name(step.note)
+                        // scaled tracks read in degrees from the root
+                        match i32::from(step.note) - 60 {
+                            _ if trk.scale.is_none() => midi_note_name(step.note),
+                            0 => String::from("r"),
+                            d => format!("r{:+}", d),
+                        }
                     } else {
                         String::from("·")
                     }
                 }
                 TrackMode::Modulation => format!("{:+.2}", step.mod_value),
             };
-            let val_style = if sel {
+            let mut val_style = if sel {
                 theme::selected()
             } else if in_visual(i) {
                 theme::flash(theme::cv())
@@ -2448,17 +2520,42 @@ fn draw_ui(
             } else {
                 theme::dim()
             };
+            if step.bind.is_some() {
+                val_style = val_style.add_modifier(ratatui::style::Modifier::UNDERLINED);
+            }
             vals.push(Span::styled(format!("{:^cell$}", val), val_style));
 
-            let vel = if step.active && trk.mode == TrackMode::Note {
-                theme::meter_char(step.velocity as f32 / 127.0).to_string()
-            } else {
-                String::from("·")
+            // third row: the active layer's value, numeric
+            let (text, color) = match state.layer {
+                state::BindTarget::Note | state::BindTarget::Velocity => (
+                    if step.active && trk.mode == TrackMode::Note {
+                        if state.layer == state::BindTarget::Velocity {
+                            format!("{}", step.velocity)
+                        } else {
+                            theme::meter_char(f32::from(step.velocity) / 127.0).to_string()
+                        }
+                    } else {
+                        String::from("·")
+                    },
+                    theme::pitch_color(step.note),
+                ),
+                state::BindTarget::Prob => (
+                    if step.active {
+                        format!("{}%", step.prob)
+                    } else {
+                        String::from("·")
+                    },
+                    if step.prob < 100 { theme::clock() } else { theme::note() },
+                ),
+                state::BindTarget::Mod => (
+                    format!("{:+.2}", step.mod_value),
+                    theme::cv_ramp(step.mod_value),
+                ),
             };
             vels.push(Span::styled(
-                format!("{:^cell$}", vel),
-                if step.active {
-                    theme::signal(theme::pitch_color(step.note))
+                format!("{:^cell$}", text),
+                if step.active || state.layer == state::BindTarget::Mod {
+                    theme::signal(color)
                 } else {
                     theme::dim()
                 },
@@ -2488,6 +2585,13 @@ fn draw_ui(
             mode_label.push_str(tag);
         }
         let mut msg_parts: Vec<String> = Vec::new();
+        // performance state first: recording + macros waiting on the clock
+        if let Some((idx, cmds)) = &state.recording {
+            msg_parts.push(format!("rec @{} [{}]", (b'a' + *idx as u8) as char, cmds.len()));
+        }
+        for p in &state.pending_macros {
+            msg_parts.push(format!("…@{}", (b'a' + p.idx as u8) as char));
+        }
         if let Some(c) = pending_count {
             msg_parts.push(format!("{}…", c));
         }
@@ -2523,29 +2627,31 @@ fn draw_ui(
 
 fn sequencer_help() -> Vec<Line<'static>> {
     vec![
-        Line::from("━━━ SEQ ━━━"),
+        Line::from("━━━ SEQ ━━━  (docs/sequencer.md has the full tour)"),
         Line::from(""),
         Line::from("Motions (word = run of active steps):"),
-        Line::from("  h/l        Step left/right (counts: 5l)"),
-        Line::from("  w / b / e  Word fwd / back / end"),
-        Line::from("  0 / $      First / last step"),
-        Line::from("  f# / t#    To / till step #"),
-        Line::from("  j/k, [/]   Track down/up (counts)"),
-        Line::from("  gg/G, gt#  First / last / go to track"),
+        Line::from("  h/l w/b/e 0/$ f#/t#   steps (counts: 5l, yt8)"),
+        Line::from("  j/k [/] gg/G gt#      tracks · k from t1 = macro lane"),
         Line::from(""),
-        Line::from("Operators (normal/visual): y d c"),
-        Line::from("  y/d/c{motion}; yy/dd/cc whole track"),
+        Line::from("Operators: y/d/c{motion} · yy/dd/cc track · Y/D/C to $"),
+        Line::from("  p/P paste INTO track · gp/gP paste as new track"),
         Line::from(""),
-        Line::from("Normal: Enter/i insert · v/V visual"),
-        Line::from("  x cut  ~ toggle  p/P paste (#p ×N)"),
-        Line::from("  . repeat · o/O new track · >>/<< rotate"),
-        Line::from("  m mute · @ track mode · space/s transport"),
-        Line::from("  u/^r undo/redo (counts)"),
-        Line::from("  :w/:e/:q patches · :set bpm/pulses/…"),
+        Line::from("Normal: Enter/i insert · v visual · V track-line"),
+        Line::from("  x cut · ~ toggle · . repeat · o/O new track"),
+        Line::from("  X mark track (multi-edit) · gX clear marks"),
+        Line::from("  m mute · M note/mod mode · >>/<< rotate"),
+        Line::from("  'n 'v 'p 'm value layer · \"a-\"h pattern slot (\"A save)"),
+        Line::from("  gc/gC cycle mode · F refill · u/^r undo/redo"),
         Line::from(""),
-        Line::from("Insert: Enter/space toggle · x/y/p step"),
-        Line::from("  k/K j/J note ±st/oct · N<n> set note"),
+        Line::from("Macros: qa…q record · @a fire (quantized) · @@ again"),
+        Line::from("  lane: @a assign · x clear · y/p · #L length · D wipe"),
+        Line::from(""),
+        Line::from("Insert: Enter/space toggle · k/K j/J value ±fine/coarse"),
+        Line::from("  N set value · prob layer: 1-9,0 = 10-100%"),
         Line::from("  #P/#L/#R euclid · P/L/R re-apply/rotate"),
+        Line::from(""),
+        Line::from("Ex: :w/:e/:q · :set bpm/pulses/length/rotation/cycle/root"),
+        Line::from("  :scale <name>|off|<file.scl> · :fill <kind> · :macro a = …"),
         Line::from(""),
         Line::from("  ? closes help"),
     ]
@@ -2579,13 +2685,98 @@ fn row_visible(w: usize, info_len: usize, len: usize) -> usize {
     ((budget * 4) / 5).clamp(4, len.max(4)).min(len)
 }
 
+/// Grid cell (glyph + base color) for a step under the active value layer.
+/// The note layer is the classic view; the others show their value as a
+/// meter so a whole lane reads at a glance.
+fn layer_cell(
+    layer: state::BindTarget,
+    trk: &Track,
+    step: &Step,
+) -> (char, ratatui::style::Color) {
+    use crate::theme;
+    let off_glyph = match trk.mode {
+        TrackMode::Note => theme::STEP_OFF,
+        TrackMode::Modulation => theme::MOD_OFF,
+    };
+    match layer {
+        state::BindTarget::Note => {
+            let glyph = match (trk.mode, step.active) {
+                (TrackMode::Note, true) => theme::STEP_ON,
+                (TrackMode::Note, false) => theme::STEP_OFF,
+                (TrackMode::Modulation, true) => theme::MOD_ON,
+                (TrackMode::Modulation, false) => theme::MOD_OFF,
+            };
+            let color = match trk.mode {
+                // pitch-class wheel: see the melody from across the room
+                TrackMode::Note => theme::pitch_color(step.note),
+                TrackMode::Modulation => theme::cv_ramp(step.mod_value),
+            };
+            (glyph, color)
+        }
+        state::BindTarget::Velocity => {
+            if step.active {
+                (theme::meter_char(f32::from(step.velocity) / 127.0), theme::note())
+            } else {
+                (off_glyph, theme::note())
+            }
+        }
+        state::BindTarget::Prob => {
+            if step.active {
+                let c = theme::meter_char(f32::from(step.prob) / 100.0);
+                // anything under 100% wears the clock hue: dice are in play
+                let color = if step.prob < 100 { theme::clock() } else { theme::note() };
+                (c, color)
+            } else {
+                (off_glyph, theme::note())
+            }
+        }
+        state::BindTarget::Mod => (
+            if step.active || trk.mode == TrackMode::Modulation {
+                theme::meter_char((step.mod_value + 1.0) / 2.0)
+            } else {
+                off_glyph
+            },
+            theme::cv_ramp(step.mod_value),
+        ),
+    }
+}
+
+/// One-glyph cycle-mode tag for the info column ("" = forward, the default).
+fn cycle_glyph(cycle: state::CycleMode) -> &'static str {
+    match cycle {
+        state::CycleMode::Forward => "",
+        state::CycleMode::Reverse => " ←",
+        state::CycleMode::PingPong => " ↔",
+        state::CycleMode::Random => " ?",
+        state::CycleMode::Drunk => " ~",
+        state::CycleMode::EveryOther => " ½",
+        state::CycleMode::Spiral => " ◎",
+        state::CycleMode::PrimeJump => " #",
+    }
+}
+
 /// The info column text for a track row (drawn and measured identically).
 fn row_info(trk: &Track) -> String {
+    let slot = if trk.active_slot > 0 {
+        format!(" \"{}", slot_letter(trk.active_slot))
+    } else {
+        String::new()
+    };
+    let scale = match &trk.scale {
+        Some(sc) => {
+            let tag: String = sc.name.chars().take(4).collect();
+            format!(" ♪{}", tag)
+        }
+        None => String::new(),
+    };
     format!(
-        "  {:>3} P{} R{}{}{}",
+        "  {:>3} P{} R{}{}{}{}{}{}",
         trk.length,
         trk.pulses,
         trk.rotation,
+        slot,
+        cycle_glyph(trk.cycle),
+        scale,
         if trk.mode == TrackMode::Modulation { " ⌁" } else { "" },
         if trk.muted { " M" } else { "" },
     )
@@ -3046,9 +3237,24 @@ pub fn run(instance: usize) -> Result<()> {
                         let mut s = state.lock().unwrap();
                         let n = s.tracks.len();
                         let y = m.row as usize;
-                        // track rows live at y = 1..=n
-                        if (1..=n).contains(&y) {
-                            s.current_track = y - 1;
+                        let w = terminal.size().map(|r| r.width as usize).unwrap_or(60);
+                        // the macro lane sits at y = 1, track rows at 2..=n+1
+                        if y == 1 {
+                            s.on_lane = true;
+                            let lane_len = s.lane.len();
+                            if lane_len > 0 {
+                                let rel = (m.column as usize).saturating_sub(5);
+                                let idx_in_window = rel - rel / 5;
+                                let info_len =
+                                    format!("  {:>3} lane", lane_len).chars().count();
+                                let visible = row_visible(w, info_len, lane_len);
+                                let start =
+                                    row_window_start(lane_len, s.lane_selected, visible);
+                                s.lane_selected = (start + idx_in_window).min(lane_len - 1);
+                            }
+                        } else if (2..=n + 1).contains(&y) {
+                            s.on_lane = false;
+                            s.current_track = y - 2;
                             // map column back to a step: label(4) + ‹(1),
                             // then 4 cells + 1 space repeating, window
                             // starts where the draw started it
@@ -3056,7 +3262,6 @@ pub fn run(instance: usize) -> Result<()> {
                             let rel = (m.column as usize).saturating_sub(5);
                             let idx_in_window = rel - rel / 5;
                             // identical geometry to the renderer
-                            let w = terminal.size().map(|r| r.width as usize).unwrap_or(60);
                             let info_len = row_info(s.track()).chars().count();
                             let visible = row_visible(w, info_len, trk_len);
                             let start = row_window_start(trk_len, s.selected, visible);
