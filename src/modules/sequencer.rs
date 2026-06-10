@@ -284,6 +284,34 @@ enum Command {
         old_bpm: f64,
         new_bpm: f64,
     },
+    SetCycle {
+        track: usize,
+        old: state::CycleMode,
+        new: state::CycleMode,
+    },
+    SwitchSlot {
+        track: usize,
+        from: usize,
+        to: usize,
+    },
+    SaveSlot {
+        track: usize,
+        slot: usize,
+        old: Option<PatternData>,
+        new: PatternData,
+    },
+    /// `:scale` — stores the whole track because retuning rewrites every
+    /// step's pitch representation (inline pattern AND parked slots).
+    SetScale {
+        track: usize,
+        old: Box<Track>,
+        new: Box<Track>,
+    },
+    /// A multi-track edit (marks / V-line): one `u` reverts all of it.
+    Group {
+        cmds: Vec<Command>,
+        desc: &'static str,
+    },
 }
 
 /// Snapshot of a track's Euclidean params + step pattern, captured before and
@@ -480,16 +508,31 @@ enum Action {
     ToggleSpan(usize),
     CutStep,
     YankStep,
+    /// paste register contents *into* the track at the cursor (a yanked
+    /// track overwrites steps here; `gp` makes new tracks instead)
     Paste { before: bool, times: usize },
-    Transpose { note: i32, mod_value: f32 },
-    SetNote(u8),
+    /// k/j/K/J on the active value layer (note/velocity/prob/mod);
+    /// the note layer keeps the legacy modulation-track behavior
+    Adjust { layer: state::BindTarget, steps: i32, coarse: bool },
+    /// the `N` prompt: set the active layer's value outright
+    SetStepValue { layer: state::BindTarget, value: f32 },
     Op { op: Operator, motion: Motion, count: usize },
     OpTrack(Operator),
     ToggleMute,
     ToggleMode,
     NewTrack { before: bool },
+    /// `gp`/`gP`: materialize the register as a new track
+    PasteAsTrack { before: bool, times: usize },
     Rotate { steps: i32 },
     Euclid(EuclidOp),
+    /// `gc`/`gC`, `:set cycle` — absolute so dot-repeat is predictable
+    SetCycle(state::CycleMode),
+    /// `"a`–`"h`: bring a pattern slot to the front
+    SwitchSlot(usize),
+    /// `"A`–`"H`: copy the active pattern into a slot
+    SaveSlot(usize),
+    /// `:fill`, `F` — auto-fill the pattern with a generator
+    Fill { kind: state::FillKind, arg: f32, seed: u64 },
 }
 
 impl Action {
@@ -544,7 +587,17 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
         }
         Action::Paste { before, times } => match s.register.clone() {
             None => Some(String::from("Nothing in register")),
-            Some(Register::Steps(slice)) => {
+            Some(reg) => {
+                // both register kinds paste INTO the track at the cursor —
+                // a yanked track contributes its pattern's steps (gp/gP
+                // materialize registers as new tracks instead)
+                let slice: Vec<Step> = match reg {
+                    Register::Steps(v) => v,
+                    Register::Track(t) => t.steps[..t.length].to_vec(),
+                };
+                if slice.is_empty() {
+                    return Some(String::from("Nothing in register"));
+                }
                 let len = s.tracks[tidx].length;
                 let total = (slice.len() * times.max(&1)).min(len);
                 let start = if *before {
@@ -563,33 +616,85 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
                 s.selected = start;
                 None
             }
-            Some(Register::Track(trk)) => {
-                for i in 0..*times.max(&1) {
+        },
+        Action::PasteAsTrack { before, times } => match s.register.clone() {
+            None => Some(String::from("Nothing in register")),
+            Some(reg) => {
+                let trk = match reg {
+                    Register::Track(t) => (*t).clone(),
+                    // a steps register becomes a track of exactly that
+                    // length — yank 3 steps, gp a 3-step polymeter
+                    Register::Steps(v) => {
+                        let mut t = Track::empty();
+                        let n = v.len().clamp(1, NUM_STEPS);
+                        for (i, st) in v.into_iter().take(NUM_STEPS).enumerate() {
+                            t.steps[i] = st;
+                        }
+                        t.length = n;
+                        t.pulses = t.steps[..n].iter().filter(|st| st.active).count();
+                        t
+                    }
+                };
+                let times = (*times).max(1);
+                if times > 1 {
+                    h.begin_group();
+                }
+                for i in 0..times {
                     let at = if *before { tidx } else { tidx + 1 + i };
-                    insert_track(s, at, (*trk).clone());
-                    h.push(Command::PasteTrack { at, track: (*trk).clone() });
+                    insert_track(s, at, trk.clone());
+                    h.push(Command::PasteTrack { at, track: trk.clone() });
+                }
+                if times > 1 {
+                    h.end_group("Paste tracks");
                 }
                 None
             }
         },
-        Action::Transpose { note, mod_value } => {
+        Action::Adjust { layer, steps, coarse } => {
             let sel = s.selected;
             let old_step = s.tracks[tidx].steps[sel].clone();
-            if s.tracks[tidx].mode == TrackMode::Modulation {
-                let v = old_step.mod_value + mod_value;
-                s.tracks[tidx].steps[sel].mod_value = v.clamp(-1.0, 1.0);
-            } else {
-                let n = (old_step.note as i32 + note).clamp(0, 127);
-                s.tracks[tidx].steps[sel].note = n as u8;
+            let mode = s.tracks[tidx].mode;
+            // coarse note jumps move a whole period: an octave unscaled,
+            // the scale's degree count when tuned
+            let period = s.tracks[tidx].scale.as_ref().map_or(12, |sc| sc.len() as i32);
+            let st = &mut s.tracks[tidx].steps[sel];
+            let n = *steps;
+            match layer {
+                state::BindTarget::Note if mode == TrackMode::Modulation => {
+                    let d = n as f32 * if *coarse { 0.1 } else { 0.01 };
+                    st.mod_value = (st.mod_value + d).clamp(-1.0, 1.0);
+                }
+                state::BindTarget::Note => {
+                    let d = n * if *coarse { period } else { 1 };
+                    st.note = (i32::from(st.note) + d).clamp(0, 127) as u8;
+                }
+                state::BindTarget::Velocity => {
+                    let d = n * if *coarse { 16 } else { 4 };
+                    st.velocity = (i32::from(st.velocity) + d).clamp(1, 127) as u8;
+                }
+                state::BindTarget::Prob => {
+                    let d = n * if *coarse { 25 } else { 5 };
+                    st.prob = (i32::from(st.prob) + d).clamp(0, 100) as u8;
+                }
+                state::BindTarget::Mod => {
+                    let d = n as f32 * if *coarse { 0.1 } else { 0.01 };
+                    st.mod_value = (st.mod_value + d).clamp(-1.0, 1.0);
+                }
             }
             let new_step = s.tracks[tidx].steps[sel].clone();
             push_step_edit(h, tidx, sel, old_step, new_step);
             None
         }
-        Action::SetNote(n) => {
+        Action::SetStepValue { layer, value } => {
             let sel = s.selected;
             let old_step = s.tracks[tidx].steps[sel].clone();
-            s.tracks[tidx].steps[sel].note = (*n).min(127);
+            let st = &mut s.tracks[tidx].steps[sel];
+            match layer {
+                state::BindTarget::Note => st.note = (*value as i32).clamp(0, 127) as u8,
+                state::BindTarget::Velocity => st.velocity = (*value as i32).clamp(1, 127) as u8,
+                state::BindTarget::Prob => st.prob = (*value as i32).clamp(0, 100) as u8,
+                state::BindTarget::Mod => st.mod_value = value.clamp(-1.0, 1.0),
+            }
             let new_step = s.tracks[tidx].steps[sel].clone();
             push_step_edit(h, tidx, sel, old_step, new_step);
             None
@@ -711,7 +816,135 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
             push_track_params(h, tidx, old, new);
             None
         }
+        Action::SetCycle(mode) => {
+            let old = s.tracks[tidx].cycle;
+            if old == *mode {
+                return None;
+            }
+            s.tracks[tidx].cycle = *mode;
+            h.push(Command::SetCycle { track: tidx, old, new: *mode });
+            Some(format!("cycle = {}", mode.name()))
+        }
+        Action::SwitchSlot(slot) => {
+            let to = (*slot).min(NUM_SLOTS - 1);
+            let from = s.tracks[tidx].active_slot;
+            if from == to {
+                return Some(format!("Already on pattern {}", slot_letter(to)));
+            }
+            switch_slot(&mut s.tracks[tidx], to);
+            s.selected = s.selected.min(s.tracks[tidx].length - 1);
+            h.push(Command::SwitchSlot { track: tidx, from, to });
+            Some(format!("Pattern {}", slot_letter(to)))
+        }
+        Action::SaveSlot(slot) => {
+            let slot = (*slot).min(NUM_SLOTS - 1);
+            if slot == s.tracks[tidx].active_slot {
+                return Some(format!("{} is the active pattern", slot_letter(slot)));
+            }
+            let trk = &s.tracks[tidx];
+            let copy = PatternData {
+                steps: trk.steps.clone(),
+                length: trk.length,
+                pulses: trk.pulses,
+                rotation: trk.rotation,
+            };
+            let old = trk.slots[slot].clone();
+            if old.as_ref() == Some(&copy) {
+                return None;
+            }
+            s.tracks[tidx].slots[slot] = Some(copy.clone());
+            h.push(Command::SaveSlot { track: tidx, slot, old, new: copy });
+            Some(format!("Saved → {}", slot_letter(slot)))
+        }
+        Action::Fill { kind, arg, seed } => {
+            use crate::theory::gen;
+            let len = s.tracks[tidx].length;
+            let old: Vec<Step> = s.tracks[tidx].steps[..len].to_vec();
+            let mut g: Vec<gen::GenStep> = old
+                .iter()
+                .map(|st| gen::GenStep {
+                    active: st.active,
+                    note: st.note,
+                    velocity: st.velocity,
+                    prob: st.prob,
+                })
+                .collect();
+            match kind {
+                state::FillKind::Mutate => gen::mutate(&mut g, *arg, 12, *seed),
+                state::FillKind::Density => gen::density_fill(&mut g, *arg, *seed),
+                state::FillKind::Markov => {
+                    // learn from every OTHER track's pattern
+                    let sources: Vec<Vec<gen::GenStep>> = s
+                        .tracks
+                        .iter()
+                        .enumerate()
+                        .filter(|&(t, _)| t != tidx)
+                        .map(|(_, trk)| {
+                            trk.steps[..trk.length]
+                                .iter()
+                                .map(|st| gen::GenStep {
+                                    active: st.active,
+                                    note: st.note,
+                                    velocity: st.velocity,
+                                    prob: st.prob,
+                                })
+                                .collect()
+                        })
+                        .collect();
+                    gen::markov(&mut g, &sources, *seed);
+                }
+                state::FillKind::Cantor => gen::lsystem(&mut g, gen::LRule::Cantor, *seed),
+                state::FillKind::ThueMorse => gen::lsystem(&mut g, gen::LRule::ThueMorse, *seed),
+                state::FillKind::Fibonacci => gen::lsystem(&mut g, gen::LRule::Fibonacci, *seed),
+                state::FillKind::Sierpinski => gen::lsystem(&mut g, gen::LRule::Sierpinski, *seed),
+            }
+            let new: Vec<Step> = old
+                .iter()
+                .zip(g)
+                .map(|(st, gs)| Step {
+                    active: gs.active,
+                    note: gs.note,
+                    velocity: gs.velocity,
+                    prob: gs.prob,
+                    mod_value: st.mod_value,
+                    bind: st.bind.clone(),
+                })
+                .collect();
+            if old == new {
+                return Some(format!("fill {}: no change", kind.name()));
+            }
+            s.tracks[tidx].steps[..len].clone_from_slice(&new);
+            h.push(Command::EditSteps { track: tidx, start: 0, old, new });
+            Some(format!("fill {}", kind.name()))
+        }
     }
+}
+
+/// `a`–`h` for pattern slots 0–7.
+fn slot_letter(slot: usize) -> char {
+    (b'a' + (slot as u8).min(7)) as char
+}
+
+/// Swap pattern slot `to` to the front of the track (the active slot's
+/// data lives inline; the outgoing pattern parks in its slot).
+fn switch_slot(track: &mut Track, to: usize) {
+    let from = track.active_slot;
+    if from == to || to >= NUM_SLOTS {
+        return;
+    }
+    let parked = PatternData {
+        steps: std::mem::take(&mut track.steps),
+        length: track.length,
+        pulses: track.pulses,
+        rotation: track.rotation,
+    };
+    track.slots[from] = Some(parked);
+    let incoming = track.slots[to].take().unwrap_or_else(PatternData::empty);
+    track.steps = incoming.steps;
+    track.length = incoming.length;
+    track.pulses = incoming.pulses;
+    track.rotation = incoming.rotation;
+    track.active_slot = to;
 }
 
 /// Insert a track at `at`, keeping the per-track bookkeeping vectors in sync.
@@ -749,6 +982,11 @@ impl Command {
             Command::DeleteTrack { .. } => "Delete track",
             Command::PasteTrack { .. } => "Paste track",
             Command::SetBpm { .. } => "Set BPM",
+            Command::SetCycle { .. } => "Set cycle mode",
+            Command::SwitchSlot { .. } => "Switch pattern",
+            Command::SaveSlot { .. } => "Save pattern slot",
+            Command::SetScale { .. } => "Set scale",
+            Command::Group { desc, .. } => desc,
         }
     }
 
@@ -797,6 +1035,35 @@ impl Command {
             Command::PasteTrack { at, .. } => remove_track(state, *at),
             Command::SetBpm { old_bpm, .. } => {
                 state.bpm = *old_bpm;
+            }
+            Command::SetCycle { track, old, .. } => {
+                if *track < state.tracks.len() {
+                    state.tracks[*track].cycle = *old;
+                    state.focus(*track, None);
+                }
+            }
+            Command::SwitchSlot { track, from, to } => {
+                if *track < state.tracks.len() && state.tracks[*track].active_slot == *to {
+                    switch_slot(&mut state.tracks[*track], *from);
+                    state.focus(*track, None);
+                }
+            }
+            Command::SaveSlot { track, slot, old, .. } => {
+                if *track < state.tracks.len() && *slot < NUM_SLOTS {
+                    state.tracks[*track].slots[*slot] = old.clone();
+                    state.focus(*track, None);
+                }
+            }
+            Command::SetScale { track, old, .. } => {
+                if *track < state.tracks.len() {
+                    state.tracks[*track] = (**old).clone();
+                    state.focus(*track, None);
+                }
+            }
+            Command::Group { cmds, .. } => {
+                for cmd in cmds.iter().rev() {
+                    cmd.undo(state);
+                }
             }
         }
     }
@@ -848,6 +1115,35 @@ impl Command {
             Command::SetBpm { new_bpm, .. } => {
                 state.bpm = *new_bpm;
             }
+            Command::SetCycle { track, new, .. } => {
+                if *track < state.tracks.len() {
+                    state.tracks[*track].cycle = *new;
+                    state.focus(*track, None);
+                }
+            }
+            Command::SwitchSlot { track, from, to } => {
+                if *track < state.tracks.len() && state.tracks[*track].active_slot == *from {
+                    switch_slot(&mut state.tracks[*track], *to);
+                    state.focus(*track, None);
+                }
+            }
+            Command::SaveSlot { track, slot, new, .. } => {
+                if *track < state.tracks.len() && *slot < NUM_SLOTS {
+                    state.tracks[*track].slots[*slot] = Some(new.clone());
+                    state.focus(*track, None);
+                }
+            }
+            Command::SetScale { track, new, .. } => {
+                if *track < state.tracks.len() {
+                    state.tracks[*track] = (**new).clone();
+                    state.focus(*track, None);
+                }
+            }
+            Command::Group { cmds, .. } => {
+                for cmd in cmds {
+                    cmd.redo(state);
+                }
+            }
         }
     }
 }
@@ -857,14 +1153,45 @@ const HISTORY_CAP: usize = 100;
 struct History {
     commands: Vec<(Command, Instant)>,
     index: usize,
+    /// While `Some`, pushes collect here instead of the history — closed
+    /// by `end_group` into one undoable [`Command::Group`].
+    group: Option<Vec<Command>>,
 }
 
 impl History {
     fn new() -> Self {
-        Self { commands: vec![], index: 0 }
+        Self { commands: vec![], index: 0, group: None }
+    }
+
+    /// Start collecting commands for a single undo entry (multi-track edits).
+    fn begin_group(&mut self) {
+        self.group = Some(vec![]);
+    }
+
+    /// Close the group: zero commands vanish, one is pushed plain, more
+    /// become a [`Command::Group`] labeled `desc`.
+    fn end_group(&mut self, desc: &'static str) {
+        let Some(mut cmds) = self.group.take() else {
+            return;
+        };
+        match cmds.len() {
+            0 => {}
+            1 => {
+                if let Some(cmd) = cmds.pop() {
+                    self.push(cmd);
+                }
+            }
+            _ => self.push(Command::Group { cmds, desc }),
+        }
     }
 
     fn push(&mut self, cmd: Command) {
+        // Group collection bypasses coalescing — a multi-track sweep is
+        // already one entry.
+        if let Some(group) = self.group.as_mut() {
+            group.push(cmd);
+            return;
+        }
         // Sweep rule (docs/keybindings.md): consecutive edits of the same
         // step within the coalescing window merge into one undo entry, so a
         // held transpose key reverts with a single u.
@@ -929,6 +1256,218 @@ fn history_status(label: &str, count: usize, mut op: impl FnMut() -> Option<&'st
         1 => format!("{}: {}", label, last_desc),
         n => format!("{} ×{}: {}", label, n, last_desc),
     }
+}
+
+/// Which actions fan out across a multi-select (V-line span or marked
+/// tracks). Yanks and pastes stay single-track (one register, vi
+/// semantics); track lifecycle ops don't fan out either.
+fn is_multi_action(action: &Action) -> bool {
+    match action {
+        Action::ToggleStep
+        | Action::ToggleSpan(_)
+        | Action::CutStep
+        | Action::Adjust { .. }
+        | Action::SetStepValue { .. }
+        | Action::ToggleMute
+        | Action::ToggleMode
+        | Action::Rotate { .. }
+        | Action::Euclid(_)
+        | Action::SetCycle(_)
+        | Action::SwitchSlot(_)
+        | Action::SaveSlot(_)
+        | Action::Fill { .. } => true,
+        Action::Op { op, .. } => matches!(op, Operator::Delete | Operator::Change),
+        Action::OpTrack(op) => matches!(op, Operator::Delete | Operator::Change),
+        Action::YankStep
+        | Action::Paste { .. }
+        | Action::PasteAsTrack { .. }
+        | Action::NewTrack { .. } => false,
+    }
+}
+
+/// The marked tracks, or just the current one when nothing is marked.
+fn marked_targets(s: &SequencerState) -> Vec<usize> {
+    let marked: Vec<usize> = s
+        .marks
+        .iter()
+        .take(s.tracks.len())
+        .enumerate()
+        .filter_map(|(i, &m)| m.then_some(i))
+        .collect();
+    if marked.is_empty() {
+        vec![s.current_track]
+    } else {
+        marked
+    }
+}
+
+/// Apply an action honoring the multi-select doctrine: explicit V-line
+/// span beats marked tracks beats the current track. Multi-track edits
+/// land as ONE undo entry. Register-filling deletes that fan out leave
+/// the register holding the LAST target's steps (dired-style; documented
+/// in docs/sequencer.md).
+fn apply_selected(
+    s: &mut SequencerState,
+    h: &mut History,
+    action: &Action,
+    span: Option<(usize, usize)>,
+) -> Option<String> {
+    let targets: Vec<usize> = match span {
+        Some((a, b)) => {
+            let hi = b.min(s.tracks.len().saturating_sub(1));
+            (a.min(hi)..=hi).collect()
+        }
+        None if is_multi_action(action) => marked_targets(s),
+        None => vec![s.current_track],
+    };
+    if targets.len() <= 1 || !is_multi_action(action) {
+        return apply_action(s, h, action);
+    }
+    let cur = s.current_track;
+    let sel = s.selected;
+    // deleting tracks shifts indices — walk top-down so they stay valid
+    let mut targets = targets;
+    if matches!(action, Action::OpTrack(Operator::Delete)) {
+        targets.reverse();
+    }
+    h.begin_group();
+    let mut msg = None;
+    for &t in &targets {
+        if t >= s.tracks.len() {
+            continue;
+        }
+        s.current_track = t;
+        s.selected = sel.min(s.tracks[t].length.saturating_sub(1));
+        msg = apply_action(s, h, action);
+    }
+    h.end_group("Edit tracks");
+    s.current_track = cur.min(s.tracks.len().saturating_sub(1));
+    s.selected = sel.min(s.tracks[s.current_track].length.saturating_sub(1));
+    msg
+}
+
+/// A step's pitch in cents above the track root, under the track's current
+/// tuning (MIDI semitones when unscaled, scale degrees when tuned).
+fn step_pitch_cents(track: &Track, note: u8) -> f64 {
+    match &track.scale {
+        None => f64::from(i32::from(note) - i32::from(track.root)) * 100.0,
+        Some(sc) => sc.pitch_cents(i32::from(note) - 60),
+    }
+}
+
+/// Rebuild a track under a new tuning, converting every step's pitch to
+/// the nearest representable one — inline pattern AND parked slots (all
+/// of a track's patterns share its scale).
+fn retuned_track(
+    track: &Track,
+    new_scale: Option<crate::theory::scales::Scale>,
+    new_root: u8,
+) -> Track {
+    let convert = |steps: &[Step]| -> Vec<Step> {
+        steps
+            .iter()
+            .map(|st| {
+                let cents = step_pitch_cents(track, st.note);
+                let note = match &new_scale {
+                    // back to MIDI: nearest semitone from the new root
+                    None => (i32::from(new_root) + (cents / 100.0).round() as i32).clamp(0, 127),
+                    Some(sc) => (60 + sc.quantize_cents(cents)).clamp(0, 127),
+                };
+                Step { note: note as u8, ..st.clone() }
+            })
+            .collect()
+    };
+    let mut new = track.clone();
+    new.steps = convert(&track.steps);
+    for p in new.slots.iter_mut().flatten() {
+        p.steps = convert(&p.steps);
+    }
+    new.scale = new_scale;
+    new.root = new_root;
+    new
+}
+
+/// `:scale` executor: retune the target tracks (marks honored), one undo
+/// entry for the lot. `scale_change`: `None` keeps each track's own scale
+/// (root-only change), `Some(x)` sets it to `x` (`Some(None)` = chromatic).
+#[allow(clippy::option_option)] // keep-vs-set-vs-clear is exactly two layers
+fn set_scale(
+    s: &mut SequencerState,
+    h: &mut History,
+    scale_change: Option<Option<crate::theory::scales::Scale>>,
+    new_root: Option<u8>,
+) -> String {
+    let targets = marked_targets(s);
+    let multi = targets.len() > 1;
+    if multi {
+        h.begin_group();
+    }
+    let mut label = String::from("chromatic");
+    for &t in &targets {
+        if t >= s.tracks.len() {
+            continue;
+        }
+        let old = s.tracks[t].clone();
+        let scale = scale_change.clone().unwrap_or_else(|| old.scale.clone());
+        let root = new_root.unwrap_or(old.root);
+        let new = retuned_track(&old, scale, root);
+        label = new
+            .scale
+            .as_ref()
+            .map_or_else(|| String::from("chromatic"), |sc| sc.name.clone());
+        if new == old {
+            continue;
+        }
+        s.tracks[t] = new.clone();
+        h.push(Command::SetScale { track: t, old: Box::new(old), new: Box::new(new) });
+    }
+    if multi {
+        h.end_group("Set scale");
+    }
+    match new_root {
+        Some(r) => format!("scale = {} root {}", label, midi_note_name(r)),
+        None => format!("scale = {}", label),
+    }
+}
+
+/// Parse a root note: a MIDI number ("57") or a note name ("A3", "c#4",
+/// "eb2"). Octave -1 to 9, MIDI C4 = 60 convention.
+fn parse_root(input: &str) -> Option<u8> {
+    let t = input.trim();
+    if let Ok(n) = t.parse::<i32>() {
+        return (0..=127).contains(&n).then_some(n as u8);
+    }
+    let mut chars = t.chars();
+    let letter = chars.next()?.to_ascii_uppercase();
+    let base: i32 = match letter {
+        'C' => 0,
+        'D' => 2,
+        'E' => 4,
+        'F' => 5,
+        'G' => 7,
+        'A' => 9,
+        'B' => 11,
+        _ => return None,
+    };
+    let rest: String = chars.collect();
+    let (accidental, oct_str) = match rest.chars().next() {
+        Some('#') => (1, &rest[1..]),
+        Some('b') => (-1, &rest[1..]),
+        _ => (0, rest.as_str()),
+    };
+    let octave: i32 = oct_str.parse().ok()?;
+    let midi = (octave + 1) * 12 + base + accidental;
+    (0..=127).contains(&midi).then_some(midi as u8)
+}
+
+/// Lock + apply with multi-select honored — the key handlers' entry point.
+fn exec_action(
+    state: &Mutex<SequencerState>,
+    history: &mut History,
+    action: &Action,
+) -> Option<String> {
+    let mut s = state.lock().unwrap();
+    apply_selected(&mut s, history, action, None)
 }
 
 /// Record a step edit, skipping no-ops so `u` always reverts a visible change.
@@ -1886,6 +2425,14 @@ pub fn run(instance: usize) -> Result<()> {
     let mut pending_find: Option<(char, Option<Operator>, usize, String, Instant)> = None;
     // first half of a >> / << chord
     let mut pending_angle: Option<char> = None;
+    // `'` pressed: next key (n/v/p/m) picks the value layer
+    let mut pending_layer = false;
+    // `"` pressed: next key (a-h / A-H) switches / saves a pattern slot
+    let mut pending_quote = false;
+    // last fill, for `F` (re-run with a fresh seed) — the seed counter
+    // keeps repeats deterministic within a session
+    let mut last_fill: Option<(state::FillKind, f32)> = None;
+    let mut fill_seed: u64 = 0xF111_5EED;
     // last change, for dot-repeat
     let mut last_change: Option<Action> = None;
     let mut gt_target: Option<String> = None;
@@ -1971,7 +2518,7 @@ pub fn run(instance: usize) -> Result<()> {
                         }
                         Some(op) => {
                             let action = Action::Op { op, motion, count: fcount.max(1) };
-                            undo_msg = apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            undo_msg = exec_action(&state, &mut history, &action);
                             undo_time = Some(Instant::now());
                             if action.is_change() {
                                 last_change = Some(action);
@@ -2125,10 +2672,118 @@ pub fn run(instance: usize) -> Result<()> {
                                         }
                                         Err(_) => undo_msg = Some(format!("Invalid {}: {}", k, v)),
                                     },
+                                    "cycle" => match state::CycleMode::parse(&v) {
+                                        Some(mode) => {
+                                            drop(s);
+                                            let action = Action::SetCycle(mode);
+                                            undo_msg =
+                                                exec_action(&state, &mut history, &action);
+                                            last_change = Some(action);
+                                        }
+                                        None => {
+                                            undo_msg = Some(format!(
+                                                "Unknown cycle: {} (forward reverse pingpong random drunk everyother spiral primejump)",
+                                                v
+                                            ));
+                                        }
+                                    },
+                                    "root" => match parse_root(&v) {
+                                        Some(r) => {
+                                            undo_msg = Some(set_scale(
+                                                &mut s,
+                                                &mut history,
+                                                None,
+                                                Some(r),
+                                            ));
+                                        }
+                                        None => undo_msg = Some(format!("Invalid root: {}", v)),
+                                    },
                                     _ => undo_msg = Some(format!("Unknown setting: {}", k)),
                                 }
                             }
-                            ExCommand::Unknown(c) => undo_msg = Some(format!("Not a command: {}", c)),
+                            ExCommand::Unknown(c) => {
+                                let (head, rest) = match c.split_once(char::is_whitespace) {
+                                    Some((h2, r)) => (h2, r.trim().to_string()),
+                                    None => (c.as_str(), String::new()),
+                                };
+                                match head {
+                                    "scale" => {
+                                        let mut s = state.lock().unwrap();
+                                        if rest.is_empty() {
+                                            let trk = s.track();
+                                            undo_msg = Some(match &trk.scale {
+                                                Some(sc) => format!(
+                                                    "scale = {} root {} ({} degrees)",
+                                                    sc.name,
+                                                    midi_note_name(trk.root),
+                                                    sc.len()
+                                                ),
+                                                None => String::from("scale = chromatic (:scale <name>|off|root <note>|<file.scl>)"),
+                                            });
+                                        } else if rest == "off" {
+                                            undo_msg = Some(set_scale(&mut s, &mut history, Some(None), None));
+                                        } else if let Some(root) = rest.strip_prefix("root ") {
+                                            undo_msg = Some(match parse_root(root) {
+                                                Some(r) => set_scale(&mut s, &mut history, None, Some(r)),
+                                                None => format!("Invalid root: {}", root),
+                                            });
+                                        } else if rest.ends_with(".scl") {
+                                            undo_msg = Some(
+                                                match crate::theory::scl::load_scl(std::path::Path::new(&rest)) {
+                                                    Ok(sc) => set_scale(&mut s, &mut history, Some(Some(sc)), None),
+                                                    Err(e) => e.to_string(),
+                                                },
+                                            );
+                                        } else {
+                                            undo_msg = Some(match crate::theory::scales::lookup(&rest) {
+                                                Some(sc) => set_scale(&mut s, &mut history, Some(Some(sc)), None),
+                                                None => format!(
+                                                    "Unknown scale: {} ({} built-ins — docs/sequencer.md)",
+                                                    rest,
+                                                    crate::theory::scales::names().len()
+                                                ),
+                                            });
+                                        }
+                                    }
+                                    "fill" => {
+                                        let (kind_str, arg_str) =
+                                            match rest.split_once(char::is_whitespace) {
+                                                Some((a, b)) => (a, b.trim()),
+                                                None => (rest.as_str(), ""),
+                                            };
+                                        let parsed = if kind_str.is_empty() {
+                                            last_fill
+                                        } else {
+                                            state::FillKind::parse(kind_str).map(|kind| {
+                                                let default = match kind {
+                                                    state::FillKind::Mutate => 0.3,
+                                                    state::FillKind::Density => 0.5,
+                                                    _ => 0.0,
+                                                };
+                                                (kind, arg_str.parse::<f32>().unwrap_or(default))
+                                            })
+                                        };
+                                        match parsed {
+                                            Some((kind, arg)) => {
+                                                last_fill = Some((kind, arg));
+                                                fill_seed = fill_seed.wrapping_add(1);
+                                                let action =
+                                                    Action::Fill { kind, arg, seed: fill_seed };
+                                                undo_msg =
+                                                    exec_action(&state, &mut history, &action);
+                                                last_change = Some(action);
+                                            }
+                                            None => {
+                                                undo_msg = Some(format!(
+                                                    "Unknown fill: {} (mutate density markov cantor thuemorse fibonacci sierpinski)",
+                                                    kind_str
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    _ => undo_msg = Some(format!("Not a command: {}", c)),
+                                }
+                            }
                         }
                         undo_time = Some(Instant::now());
                     }
@@ -2230,38 +2885,29 @@ pub fn run(instance: usize) -> Result<()> {
                     }
                 }
 
-                // Input submode handling (mode-independent)
+                // Input submode handling: the N value prompt for the active
+                // layer (note 0-127, vel 1-127, prob 0-100, mod -1..1)
                 if !submode.is_empty() {
                     match key.code {
                         KeyCode::Enter => {
-                            let mut s = state.lock().unwrap();
-                            match submode.as_str() {
-                                "note" => {
-                                    if let Ok(note) = input_buffer.parse::<u8>() {
-                                        let action = Action::SetNote(note);
-                                        apply_action(&mut s, &mut history, &action);
-                                        last_change = Some(action);
-                                    }
-                                }
-                                "track" => {
-                                    if let Ok(tnum) = input_buffer.parse::<usize>() {
-                                        let tidx = tnum.saturating_sub(1).min(s.tracks.len().saturating_sub(1));
-                                        s.current_track = tidx;
-                                        s.selected = 0;
-                                    }
-                                }
-                                "step" => {
-                                    if let Ok(step) = input_buffer.parse::<usize>() {
-                                        let len = s.track_mut().length;
-                                        s.selected = step.min(len - 1);
-                                    }
-                                }
-                                _ => {}
+                            let layer = match submode.as_str() {
+                                "note" => Some(state::BindTarget::Note),
+                                "vel" => Some(state::BindTarget::Velocity),
+                                "prob" => Some(state::BindTarget::Prob),
+                                "mod" => Some(state::BindTarget::Mod),
+                                _ => None,
+                            };
+                            if let (Some(layer), Ok(value)) = (layer, input_buffer.parse::<f32>())
+                            {
+                                let action = Action::SetStepValue { layer, value };
+                                let mut s = state.lock().unwrap();
+                                apply_selected(&mut s, &mut history, &action, None);
+                                last_change = Some(action);
                             }
                             submode.clear();
                             input_buffer.clear();
                         }
-                        KeyCode::Char(c) if c.is_ascii_digit() || c == '.' => {
+                        KeyCode::Char(c) if c.is_ascii_digit() || c == '.' || c == '-' => {
                             input_buffer.push(c);
                         }
                         _ => {
@@ -2296,7 +2942,130 @@ pub fn run(instance: usize) -> Result<()> {
                     pending_find = None;
                     pending_angle = None;
                     pending_g = false;
+                    pending_layer = false;
+                    pending_quote = false;
                     continue;
+                }
+
+                // `'` layer prefix: 'n/'v/'p/'m pick the value layer
+                // (normal + insert; what the grid shows and k/j/N edit)
+                if pending_layer {
+                    pending_layer = false;
+                    let layer = match key.code {
+                        KeyCode::Char('n') => Some(state::BindTarget::Note),
+                        KeyCode::Char('v') => Some(state::BindTarget::Velocity),
+                        KeyCode::Char('p') => Some(state::BindTarget::Prob),
+                        KeyCode::Char('m') => Some(state::BindTarget::Mod),
+                        _ => None,
+                    };
+                    if let Some(layer) = layer {
+                        state.lock().unwrap().layer = layer;
+                        undo_msg = Some(format!(
+                            "layer: {}",
+                            match layer {
+                                state::BindTarget::Note => "note",
+                                state::BindTarget::Velocity => "velocity",
+                                state::BindTarget::Prob => "probability",
+                                state::BindTarget::Mod => "mod",
+                            }
+                        ));
+                        undo_time = Some(Instant::now());
+                    }
+                    continue;
+                }
+                if key.code == KeyCode::Char('\'')
+                    && (mode == "normal" || mode == "insert")
+                    && submode.is_empty()
+                {
+                    pending_count = None;
+                    pending_layer = true;
+                    continue;
+                }
+
+                // `"` slot prefix: "a-"h switch pattern, "A-"H save into slot
+                if pending_quote {
+                    pending_quote = false;
+                    let action = match key.code {
+                        KeyCode::Char(c @ 'a'..='h') => {
+                            Some(Action::SwitchSlot((c as u8 - b'a') as usize))
+                        }
+                        KeyCode::Char(c @ 'A'..='H') => {
+                            Some(Action::SaveSlot((c as u8 - b'A') as usize))
+                        }
+                        _ => None,
+                    };
+                    if let Some(action) = action {
+                        undo_msg = exec_action(&state, &mut history, &action);
+                        undo_time = Some(Instant::now());
+                        last_change = Some(action);
+                    }
+                    continue;
+                }
+                if key.code == KeyCode::Char('"') && mode == "normal" {
+                    pending_count = None;
+                    pending_quote = true;
+                    continue;
+                }
+
+                // g-prefix chords (normal mode): gg first track, gt# go to
+                // track, gc/gC cycle mode, gp/gP paste-as-track, gX clear marks
+                if mode == "normal" && pending_g {
+                    pending_g = false;
+                    match key.code {
+                        KeyCode::Char('g') => {
+                            pending_count = None;
+                            let mut s = state.lock().unwrap();
+                            s.current_track = 0;
+                            s.selected = 0;
+                            continue;
+                        }
+                        KeyCode::Char('t') => {
+                            pending_count = None;
+                            gt_target = Some(String::from("track"));
+                            gt_input.clear();
+                            gt_last_key = Some(Instant::now());
+                            continue;
+                        }
+                        KeyCode::Char(c @ ('c' | 'C')) => {
+                            pending_count = None;
+                            let cur = state.lock().unwrap().track().cycle;
+                            let all = state::CycleMode::ALL;
+                            let i = all.iter().position(|m| *m == cur).unwrap_or(0);
+                            let next = if c == 'c' {
+                                all[(i + 1) % all.len()]
+                            } else {
+                                all[(i + all.len() - 1) % all.len()]
+                            };
+                            let action = Action::SetCycle(next);
+                            undo_msg = exec_action(&state, &mut history, &action);
+                            undo_time = Some(Instant::now());
+                            last_change = Some(action);
+                            continue;
+                        }
+                        KeyCode::Char(c @ ('p' | 'P')) => {
+                            let times: usize =
+                                pending_count.take().and_then(|n| n.parse().ok()).unwrap_or(1);
+                            let action = Action::PasteAsTrack {
+                                before: c == 'P',
+                                times: times.max(1),
+                            };
+                            undo_msg = exec_action(&state, &mut history, &action);
+                            undo_time = Some(Instant::now());
+                            last_change = Some(action);
+                            continue;
+                        }
+                        KeyCode::Char('X') => {
+                            pending_count = None;
+                            let mut s = state.lock().unwrap();
+                            for m in s.marks.iter_mut() {
+                                *m = false;
+                            }
+                            undo_msg = Some(String::from("Marks cleared"));
+                            undo_time = Some(Instant::now());
+                            continue;
+                        }
+                        _ => {} // unrecognized chord: fall through plain
+                    }
                 }
 
                 // f#/t# target collection (digits, executed on Enter,
@@ -2330,7 +3099,7 @@ pub fn run(instance: usize) -> Result<()> {
                                     Some(op) => {
                                         let action = Action::Op { op, motion, count: fcount.max(1) };
                                         let mut s = state.lock().unwrap();
-                                        undo_msg = apply_action(&mut s, &mut history, &action);
+                                        undo_msg = apply_selected(&mut s, &mut history, &action, None);
                                         undo_time = Some(Instant::now());
                                         drop(s);
                                         if action.is_change() {
@@ -2375,7 +3144,7 @@ pub fn run(instance: usize) -> Result<()> {
                         // doubled operator = whole track (yy / dd / cc)
                         KeyCode::Char(c2) if Operator::from_char(c2) == Some(op) => {
                             let action = Action::OpTrack(op);
-                            undo_msg = apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            undo_msg = exec_action(&state, &mut history, &action);
                             undo_time = Some(Instant::now());
                             if action.is_change() {
                                 last_change = Some(action);
@@ -2390,7 +3159,7 @@ pub fn run(instance: usize) -> Result<()> {
                         _ => {
                             if let Some(m) = motion {
                                 let action = Action::Op { op, motion: m, count };
-                                undo_msg = apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                                undo_msg = exec_action(&state, &mut history, &action);
                                 undo_time = Some(Instant::now());
                                 if action.is_change() {
                                     last_change = Some(action);
@@ -2405,10 +3174,24 @@ pub fn run(instance: usize) -> Result<()> {
                     continue;
                 }
 
-                // Digits accumulate into pending_count (both modes)
+                // Digits accumulate into pending_count (both modes) — except
+                // on the prob layer in insert mode, where they set the value
+                // directly, Orca-style: 1-9 → 10-90%, 0 → 100%
                 if let KeyCode::Char(c) = key.code {
                     if c.is_ascii_digit() {
-                        if c == '0' && pending_count.is_none() {
+                        let prob_entry =
+                            mode == "insert" && state.lock().unwrap().layer == state::BindTarget::Prob;
+                        if prob_entry {
+                            let value = if c == '0' {
+                                100.0
+                            } else {
+                                f32::from(c as u8 - b'0') * 10.0
+                            };
+                            let action =
+                                Action::SetStepValue { layer: state::BindTarget::Prob, value };
+                            exec_action(&state, &mut history, &action);
+                            last_change = Some(action);
+                        } else if c == '0' && pending_count.is_none() {
                             let mut s = state.lock().unwrap();
                             s.selected = 0;
                         } else {
@@ -2480,15 +3263,93 @@ pub fn run(instance: usize) -> Result<()> {
                             _ => EuclidOp::Rotation(n),
                         };
                         let action = Action::Euclid(eop);
-                        apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                        exec_action(&state, &mut history, &action);
                         last_change = Some(action);
                         continue;
                     }
                 }
 
                 // Visual mode: motions extend the selection; operators act on it
-                if mode == "visual" || mode == "visual_line" {
-                    let linewise = mode == "visual_line";
+                // V-LINE: a selection of whole tracks; operators fan out
+                // over the span as one undo entry
+                if mode == "visual_line" {
+                    match key.code {
+                        KeyCode::Char('v') | KeyCode::Char('V') => {
+                            mode = String::from("normal");
+                            let mut s = state.lock().unwrap();
+                            s.visual_track_anchor = None;
+                        }
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            let n: usize =
+                                pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
+                            let mut s = state.lock().unwrap();
+                            s.current_track = (s.current_track + n).min(s.tracks.len() - 1);
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            let n: usize =
+                                pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
+                            let mut s = state.lock().unwrap();
+                            s.current_track = s.current_track.saturating_sub(n);
+                        }
+                        KeyCode::Char('o') => {
+                            let mut s = state.lock().unwrap();
+                            if let Some(a) = s.visual_track_anchor {
+                                let cur = s.current_track;
+                                s.visual_track_anchor = Some(cur);
+                                s.current_track = a.min(s.tracks.len().saturating_sub(1));
+                            }
+                        }
+                        KeyCode::Char(c @ ('y' | 'd' | 'c' | 'x' | '~' | 'm' | 'M')) => {
+                            let (span, action) = {
+                                let mut s = state.lock().unwrap();
+                                let anchor =
+                                    s.visual_track_anchor.take().unwrap_or(s.current_track);
+                                let span =
+                                    (anchor.min(s.current_track), anchor.max(s.current_track));
+                                let action = match c {
+                                    'y' => Action::OpTrack(Operator::Yank),
+                                    'c' => Action::OpTrack(Operator::Change),
+                                    'm' => Action::ToggleMute,
+                                    'M' => Action::ToggleMode,
+                                    '~' => {
+                                        s.selected = 0;
+                                        Action::ToggleSpan(NUM_STEPS)
+                                    }
+                                    _ => Action::OpTrack(Operator::Delete),
+                                };
+                                (span, action)
+                            };
+                            // yank takes one track (one register, vi rules)
+                            let span = if matches!(action, Action::OpTrack(Operator::Yank)) {
+                                None
+                            } else {
+                                Some(span)
+                            };
+                            {
+                                let mut s = state.lock().unwrap();
+                                undo_msg = apply_selected(&mut s, &mut history, &action, span);
+                            }
+                            undo_time = Some(Instant::now());
+                            let to_insert = matches!(action, Action::OpTrack(Operator::Change));
+                            if action.is_change() {
+                                last_change = Some(action);
+                            }
+                            mode = if to_insert {
+                                String::from("insert")
+                            } else {
+                                String::from("normal")
+                            };
+                        }
+                        _ => {
+                            pending_count = None;
+                        }
+                    }
+                    continue;
+                }
+
+                // VISUAL: motions extend the step selection (handled by the
+                // mode-independent navigation above); operators act on it
+                if mode == "visual" {
                     match key.code {
                         KeyCode::Char('v') | KeyCode::Char('V') => {
                             mode = String::from("normal");
@@ -2508,27 +3369,17 @@ pub fn run(instance: usize) -> Result<()> {
                                 let (a, b) = (anchor.min(s.selected), anchor.max(s.selected));
                                 s.selected = a;
                                 let span = b - a + 1;
-                                if linewise {
-                                    match c {
-                                        'y' => Action::OpTrack(Operator::Yank),
-                                        'c' => Action::OpTrack(Operator::Change),
-                                        _ => Action::OpTrack(Operator::Delete),
-                                    }
-                                } else {
-                                    match c {
-                                        '~' => Action::ToggleSpan(span),
-                                        'y' => Action::Op { op: Operator::Yank, motion: Motion::Span(span), count: 1 },
-                                        'c' => Action::Op { op: Operator::Change, motion: Motion::Span(span), count: 1 },
-                                        _ => Action::Op { op: Operator::Delete, motion: Motion::Span(span), count: 1 },
-                                    }
+                                match c {
+                                    '~' => Action::ToggleSpan(span),
+                                    'y' => Action::Op { op: Operator::Yank, motion: Motion::Span(span), count: 1 },
+                                    'c' => Action::Op { op: Operator::Change, motion: Motion::Span(span), count: 1 },
+                                    _ => Action::Op { op: Operator::Delete, motion: Motion::Span(span), count: 1 },
                                 }
                             };
-                            undo_msg = apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            undo_msg = exec_action(&state, &mut history, &action);
                             undo_time = Some(Instant::now());
-                            let to_insert = matches!(
-                                action,
-                                Action::Op { op: Operator::Change, .. } | Action::OpTrack(Operator::Change)
-                            );
+                            let to_insert =
+                                matches!(action, Action::Op { op: Operator::Change, .. });
                             if action.is_change() {
                                 last_change = Some(action);
                             }
@@ -2562,6 +3413,9 @@ pub fn run(instance: usize) -> Result<()> {
                         }
                         KeyCode::Char('V') => {
                             pending_count = None;
+                            let mut s = state.lock().unwrap();
+                            let cur = s.current_track;
+                            s.visual_track_anchor = Some(cur);
                             mode = String::from("visual_line");
                         }
 
@@ -2572,25 +3426,83 @@ pub fn run(instance: usize) -> Result<()> {
                             pending_op = Operator::from_char(c).map(|op| (op, opcount.max(1)));
                             pending_g = false;
                         }
+                        // Shorthands to end-of-pattern: Y=y$, D=d$, C=c$
+                        KeyCode::Char(c @ ('Y' | 'D')) => {
+                            pending_count = None;
+                            let op = if c == 'Y' { Operator::Yank } else { Operator::Delete };
+                            let action = Action::Op { op, motion: Motion::End, count: 1 };
+                            undo_msg = exec_action(&state, &mut history, &action);
+                            undo_time = Some(Instant::now());
+                            if action.is_change() {
+                                last_change = Some(action);
+                            }
+                        }
+                        KeyCode::Char('C') => {
+                            pending_count = None;
+                            let action =
+                                Action::Op { op: Operator::Change, motion: Motion::End, count: 1 };
+                            undo_msg = exec_action(&state, &mut history, &action);
+                            undo_time = Some(Instant::now());
+                            last_change = Some(action);
+                            mode = String::from("insert");
+                        }
+                        // Track marks: the non-consecutive multi-select.
+                        // Marked tracks receive every track-level edit.
+                        KeyCode::Char('X') => {
+                            pending_count = None;
+                            let mut s = state.lock().unwrap();
+                            let cur = s.current_track;
+                            if cur < s.marks.len() {
+                                s.marks[cur] = !s.marks[cur];
+                                let n = s.marks.iter().filter(|&&m| m).count();
+                                undo_msg = Some(format!(
+                                    "{} t{} ({} marked)",
+                                    if s.marks[cur] { "Marked" } else { "Unmarked" },
+                                    cur + 1,
+                                    n
+                                ));
+                                undo_time = Some(Instant::now());
+                            }
+                        }
+                        // F re-runs the last :fill with a fresh seed — the
+                        // spam-until-it-grooves gesture (. repeats exactly)
+                        KeyCode::Char('F') => {
+                            pending_count = None;
+                            match last_fill {
+                                Some((kind, arg)) => {
+                                    fill_seed = fill_seed.wrapping_add(1);
+                                    let action = Action::Fill { kind, arg, seed: fill_seed };
+                                    undo_msg = exec_action(&state, &mut history, &action);
+                                    undo_time = Some(Instant::now());
+                                    last_change = Some(action);
+                                }
+                                None => {
+                                    undo_msg = Some(String::from(
+                                        "No fill yet (:fill mutate|density|markov|…)",
+                                    ));
+                                    undo_time = Some(Instant::now());
+                                }
+                            }
+                        }
 
                         // Step edits
                         KeyCode::Char('x') => {
                             pending_count = None;
                             let action = Action::CutStep;
-                            apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            exec_action(&state, &mut history, &action);
                             last_change = Some(action);
                         }
                         KeyCode::Char('~') => {
                             pending_count = None;
                             let action = Action::ToggleStep;
-                            apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            exec_action(&state, &mut history, &action);
                             last_change = Some(action);
                         }
                         KeyCode::Char('p') => {
                             let times: usize =
                                 pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
                             let action = Action::Paste { before: false, times: times.max(1) };
-                            undo_msg = apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            undo_msg = exec_action(&state, &mut history, &action);
                             undo_time = Some(Instant::now());
                             last_change = Some(action);
                         }
@@ -2598,14 +3510,14 @@ pub fn run(instance: usize) -> Result<()> {
                             // bare P only — counted #P is the Euclidean pulses setter
                             pending_count = None;
                             let action = Action::Paste { before: true, times: 1 };
-                            undo_msg = apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            undo_msg = exec_action(&state, &mut history, &action);
                             undo_time = Some(Instant::now());
                             last_change = Some(action);
                         }
                         KeyCode::Char('.') => {
                             pending_count = None;
                             if let Some(action) = last_change.clone() {
-                                undo_msg = apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                                undo_msg = exec_action(&state, &mut history, &action);
                                 undo_time = Some(Instant::now());
                                 if matches!(
                                     action,
@@ -2624,27 +3536,29 @@ pub fn run(instance: usize) -> Result<()> {
                             pending_count = None;
                             pending_g = false;
                             let action = Action::NewTrack { before: false };
-                            apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            exec_action(&state, &mut history, &action);
                             last_change = Some(action);
                         }
                         KeyCode::Char('O') => {
                             pending_count = None;
                             let action = Action::NewTrack { before: true };
-                            apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            exec_action(&state, &mut history, &action);
                             last_change = Some(action);
                         }
                         KeyCode::Char('m') => {
                             pending_count = None;
                             pending_g = false;
                             let action = Action::ToggleMute;
-                            apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            exec_action(&state, &mut history, &action);
                             last_change = Some(action);
                         }
-                        KeyCode::Char('@') => {
+                        // M toggles note/modulation mode (@ is reserved for
+                        // macros; kept as a legacy alias until they land)
+                        KeyCode::Char('M') | KeyCode::Char('@') => {
                             pending_count = None;
                             pending_g = false;
                             let action = Action::ToggleMode;
-                            apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            exec_action(&state, &mut history, &action);
                             last_change = Some(action);
                         }
                         KeyCode::Char(c @ ('>' | '<')) => {
@@ -2655,7 +3569,7 @@ pub fn run(instance: usize) -> Result<()> {
                             if pending_angle == Some(c) {
                                 pending_angle = None;
                                 let action = Action::Rotate { steps: if c == '>' { n } else { -n } };
-                                apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                                exec_action(&state, &mut history, &action);
                                 last_change = Some(action);
                             } else {
                                 pending_angle = Some(c);
@@ -2700,15 +3614,9 @@ pub fn run(instance: usize) -> Result<()> {
                             s.selected = 0;
                         }
                         KeyCode::Char('g') => {
-                            pending_count = None;
-                            if pending_g {
-                                pending_g = false;
-                                let mut s = state.lock().unwrap();
-                                s.current_track = 0;
-                                s.selected = 0;
-                            } else {
-                                pending_g = true;
-                            }
+                            // chords (gg/gt/gc/gp/gX) resolve in the
+                            // g-prefix block above on the NEXT key
+                            pending_g = true;
                         }
                         KeyCode::Char('G') => {
                             pending_count = None;
@@ -2763,25 +3671,25 @@ pub fn run(instance: usize) -> Result<()> {
                         KeyCode::Enter | KeyCode::Char(' ') => {
                             pending_count = None;
                             let action = Action::ToggleStep;
-                            apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            exec_action(&state, &mut history, &action);
                             last_change = Some(action);
                         }
                         KeyCode::Char('x') => {
                             pending_count = None;
                             let action = Action::CutStep;
-                            apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            exec_action(&state, &mut history, &action);
                             last_change = Some(action);
                         }
                         KeyCode::Char('y') => {
                             pending_count = None;
-                            undo_msg = apply_action(&mut state.lock().unwrap(), &mut history, &Action::YankStep);
+                            undo_msg = exec_action(&state, &mut history, &Action::YankStep);
                             undo_time = Some(Instant::now());
                         }
                         KeyCode::Char('p') => {
                             let times: usize =
                                 pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
                             let action = Action::Paste { before: false, times: times.max(1) };
-                            undo_msg = apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            undo_msg = exec_action(&state, &mut history, &action);
                             undo_time = Some(Instant::now());
                             last_change = Some(action);
                         }
@@ -2795,20 +3703,23 @@ pub fn run(instance: usize) -> Result<()> {
                         KeyCode::Char('.') => {
                             pending_count = None;
                             if let Some(action) = last_change.clone() {
-                                undo_msg = apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                                undo_msg = exec_action(&state, &mut history, &action);
                                 undo_time = Some(Instant::now());
                             }
                         }
+                        // k/j fine, K/J coarse — edits whatever the active
+                        // layer shows (note keeps the legacy mod-track feel)
                         KeyCode::Char(c @ ('k' | 'j' | 'K' | 'J')) => {
                             let n: i32 = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
-                            let (note, mod_value) = match c {
-                                'k' => (1, 0.01),
-                                'j' => (-1, -0.01),
-                                'K' => (12, 0.1),
-                                _ => (-12, -0.1),
+                            let (steps, coarse) = match c {
+                                'k' => (n, false),
+                                'j' => (-n, false),
+                                'K' => (n, true),
+                                _ => (-n, true),
                             };
-                            let action = Action::Transpose { note: note * n, mod_value: mod_value * n as f32 };
-                            apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            let layer = state.lock().unwrap().layer;
+                            let action = Action::Adjust { layer, steps, coarse };
+                            exec_action(&state, &mut history, &action);
                             last_change = Some(action);
                         }
                         KeyCode::Char('g') => {
@@ -2822,22 +3733,28 @@ pub fn run(instance: usize) -> Result<()> {
                                 pending_g = true;
                             }
                         }
+                        // N prompts a literal value for the active layer
                         KeyCode::Char('N') => {
                             pending_count = None;
-                            submode = String::from("note");
+                            submode = String::from(match state.lock().unwrap().layer {
+                                state::BindTarget::Note => "note",
+                                state::BindTarget::Velocity => "vel",
+                                state::BindTarget::Prob => "prob",
+                                state::BindTarget::Mod => "mod",
+                            });
                             input_buffer.clear();
                         }
                         // Euclidean re-apply (no count)
                         KeyCode::Char('P') | KeyCode::Char('L') => {
                             pending_count = None;
                             let action = Action::Euclid(EuclidOp::Reapply);
-                            apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            exec_action(&state, &mut history, &action);
                             last_change = Some(action);
                         }
                         KeyCode::Char('R') => {
                             pending_count = None;
                             let action = Action::Euclid(EuclidOp::RotatePlus(1));
-                            apply_action(&mut state.lock().unwrap(), &mut history, &action);
+                            exec_action(&state, &mut history, &action);
                             last_change = Some(action);
                         }
                         _ => {
@@ -2889,7 +3806,7 @@ mod tests {
     }
 
     fn transpose_up(s: &mut SequencerState, h: &mut History) {
-        apply_action(s, h, &Action::Transpose { note: 1, mod_value: 0.01 });
+        apply_action(s, h, &Action::Adjust { layer: state::BindTarget::Note, steps: 1, coarse: false });
     }
 
     fn new_track(s: &mut SequencerState, h: &mut History) {
@@ -3312,15 +4229,46 @@ mod tests {
     }
 
     #[test]
-    fn track_register_roundtrip() {
+    fn track_register_pastes_into_the_row() {
+        // p with a yanked track overwrites steps in place — no new track
         let mut s = state_with_tracks(2);
         let mut h = History::new();
         s.tracks[0].steps[7].note = 99;
         apply_action(&mut s, &mut h, &Action::OpTrack(Operator::Yank));
         s.current_track = 1;
+        s.selected = 0;
         apply_action(&mut s, &mut h, &Action::Paste { before: false, times: 1 });
+        assert_eq!(s.tracks.len(), 2, "p never creates tracks anymore");
+        assert_eq!(s.tracks[1].steps[7].note, 99, "steps landed in the row");
+        assert!(h.undo(&mut s).is_some());
+        assert_ne!(s.tracks[1].steps[7].note, 99, "undo reverts the overwrite");
+    }
+
+    #[test]
+    fn gp_materializes_register_as_track() {
+        let mut s = state_with_tracks(2);
+        let mut h = History::new();
+        s.tracks[0].steps[7].note = 99;
+        // a yanked TRACK inserts wholesale
+        apply_action(&mut s, &mut h, &Action::OpTrack(Operator::Yank));
+        s.current_track = 1;
+        apply_action(&mut s, &mut h, &Action::PasteAsTrack { before: false, times: 1 });
         assert_eq!(s.tracks.len(), 3);
         assert_eq!(s.tracks[2].steps[7].note, 99, "track pasted after current");
+        assert!(h.undo(&mut s).is_some());
+        assert_eq!(s.tracks.len(), 2);
+        // a yanked steps register becomes a track of exactly that length
+        s.register = Some(Register::Steps(vec![
+            Step { active: true, note: 71, ..Step::default() },
+            Step::default(),
+            Step { active: true, note: 67, ..Step::default() },
+        ]));
+        s.current_track = 0;
+        apply_action(&mut s, &mut h, &Action::PasteAsTrack { before: false, times: 1 });
+        assert_eq!(s.tracks.len(), 3);
+        assert_eq!(s.tracks[1].length, 3, "polymeter: track is yank-sized");
+        assert_eq!(s.tracks[1].steps[0].note, 71);
+        assert_eq!(s.tracks[1].pulses, 2);
         assert!(h.undo(&mut s).is_some());
         assert_eq!(s.tracks.len(), 2);
     }
@@ -3438,7 +4386,7 @@ mod tests {
         let mut s = state_with_tracks(1);
         let mut h = History::new();
         for _ in 0..5 {
-            apply_action(&mut s, &mut h, &Action::Transpose { note: 1, mod_value: 0.01 });
+            apply_action(&mut s, &mut h, &Action::Adjust { layer: state::BindTarget::Note, steps: 1, coarse: false });
         }
         assert_eq!(s.tracks[0].steps[0].note, 65);
         assert_eq!(h.commands.len(), 1, "sweep is one undo entry");
@@ -3450,8 +4398,8 @@ mod tests {
     fn round_trip_sweep_leaves_no_history() {
         let mut s = state_with_tracks(1);
         let mut h = History::new();
-        apply_action(&mut s, &mut h, &Action::Transpose { note: 3, mod_value: 0.0 });
-        apply_action(&mut s, &mut h, &Action::Transpose { note: -3, mod_value: 0.0 });
+        apply_action(&mut s, &mut h, &Action::Adjust { layer: state::BindTarget::Note, steps: 3, coarse: false });
+        apply_action(&mut s, &mut h, &Action::Adjust { layer: state::BindTarget::Note, steps: -3, coarse: false });
         assert_eq!(s.tracks[0].steps[0].note, 60);
         assert_eq!(h.undo(&mut s), None, "no-op sweep records nothing");
     }
@@ -3755,6 +4703,196 @@ mod tests {
         assert_eq!(s2.tracks[1].active_slot, 2);
         assert_eq!(s2.tracks[1].slots[5], Some(alt));
         assert!(s2.tracks[1].slots[2].is_none(), "active slot stays inline");
+    }
+
+    // ── vi grammar v2: multi-select, slots, layers, scales, fills ───────
+
+    #[test]
+    fn marked_tracks_fan_out_as_one_undo() {
+        let mut s = state_with_tracks(3);
+        let mut h = History::new();
+        s.marks = vec![true, false, true];
+        s.current_track = 1;
+        let msg = apply_selected(&mut s, &mut h, &Action::ToggleMute, None);
+        let _ = msg;
+        assert!(s.tracks[0].muted && s.tracks[2].muted, "marked tracks muted");
+        assert!(!s.tracks[1].muted, "unmarked current track untouched");
+        assert!(h.undo(&mut s).is_some());
+        assert!(!s.tracks[0].muted && !s.tracks[2].muted, "one u reverts both");
+        assert_eq!(h.undo(&mut s), None, "it was a single entry");
+    }
+
+    #[test]
+    fn vline_span_deletes_tracks_safely() {
+        let mut s = state_with_tracks(4);
+        let mut h = History::new();
+        for (i, t) in s.tracks.iter_mut().enumerate() {
+            t.steps[0].note = 40 + i as u8;
+        }
+        s.current_track = 1;
+        apply_selected(&mut s, &mut h, &Action::OpTrack(Operator::Delete), Some((1, 2)));
+        assert_eq!(s.tracks.len(), 2);
+        assert_eq!(s.tracks[0].steps[0].note, 40);
+        assert_eq!(s.tracks[1].steps[0].note, 43, "outer tracks survive");
+        assert!(h.undo(&mut s).is_some());
+        assert_eq!(s.tracks.len(), 4, "one u restores the span");
+        assert_eq!(s.tracks[1].steps[0].note, 41);
+        assert_eq!(s.tracks[2].steps[0].note, 42);
+    }
+
+    #[test]
+    fn yank_never_fans_out() {
+        let mut s = state_with_tracks(3);
+        let mut h = History::new();
+        s.marks = vec![true, true, true];
+        s.current_track = 0;
+        apply_selected(&mut s, &mut h, &Action::YankStep, None);
+        assert!(matches!(s.register, Some(Register::Steps(ref v)) if v.len() == 1));
+        assert_eq!(h.undo(&mut s), None, "yank is not a change");
+    }
+
+    #[test]
+    fn switch_slot_swaps_patterns_and_undoes() {
+        let mut s = state_with_tracks(1);
+        let mut h = History::new();
+        s.tracks[0].steps[0].note = 99;
+        let original = s.tracks[0].steps[0].clone();
+        apply_action(&mut s, &mut h, &Action::SwitchSlot(1));
+        assert_eq!(s.tracks[0].active_slot, 1);
+        assert!(s.tracks[0].slots[1].is_none(), "active slot data is inline");
+        assert!(s.tracks[0].slots[0].is_some(), "old pattern parked in a");
+        assert_ne!(s.tracks[0].steps[0], original, "slot b starts empty");
+        // edit b, switch back, both survive
+        s.tracks[0].steps[2].active = true;
+        apply_action(&mut s, &mut h, &Action::SwitchSlot(0));
+        assert_eq!(s.tracks[0].steps[0], original, "pattern a intact");
+        assert!(s.tracks[0].slots[1].as_ref().is_some_and(|p| p.steps[2].active));
+        // undo walks back through both switches
+        assert_eq!(h.undo(&mut s), Some("Switch pattern"));
+        assert_eq!(s.tracks[0].active_slot, 1);
+        assert_eq!(h.undo(&mut s), Some("Switch pattern"));
+        assert_eq!(s.tracks[0].active_slot, 0);
+        assert_eq!(s.tracks[0].steps[0], original);
+    }
+
+    #[test]
+    fn save_slot_copies_and_undoes() {
+        let mut s = state_with_tracks(1);
+        let mut h = History::new();
+        s.tracks[0].steps[0].note = 77;
+        apply_action(&mut s, &mut h, &Action::SaveSlot(3));
+        let saved = s.tracks[0].slots[3].as_ref().expect("slot d filled");
+        assert_eq!(saved.steps[0].note, 77);
+        assert_eq!(s.tracks[0].active_slot, 0, "saving doesn't switch");
+        assert!(h.undo(&mut s).is_some());
+        assert!(s.tracks[0].slots[3].is_none());
+        // saving onto the active slot refuses
+        let msg = apply_action(&mut s, &mut h, &Action::SaveSlot(0));
+        assert_eq!(msg.as_deref(), Some("a is the active pattern"));
+    }
+
+    #[test]
+    fn scale_assignment_converts_and_undoes() {
+        let mut s = state_with_tracks(1);
+        let mut h = History::new();
+        // C major triad in MIDI on a chromatic track, root C4
+        s.tracks[0].steps[0].note = 60;
+        s.tracks[0].steps[1].note = 64;
+        s.tracks[0].steps[2].note = 67;
+        let major = crate::theory::scales::lookup("major").expect("major exists");
+        set_scale(&mut s, &mut h, Some(Some(major)), None);
+        // degrees biased at 60: root, 3rd (degree 2), 5th (degree 4)
+        assert_eq!(s.tracks[0].steps[0].note, 60);
+        assert_eq!(s.tracks[0].steps[1].note, 62);
+        assert_eq!(s.tracks[0].steps[2].note, 64);
+        // back to chromatic: notes return
+        set_scale(&mut s, &mut h, Some(None), None);
+        assert_eq!(s.tracks[0].steps[1].note, 64);
+        assert_eq!(s.tracks[0].steps[2].note, 67);
+        assert!(h.undo(&mut s).is_some() && h.undo(&mut s).is_some());
+        assert!(s.tracks[0].scale.is_none());
+        assert_eq!(s.tracks[0].steps[1].note, 64, "full round trip");
+    }
+
+    #[test]
+    fn adjust_edits_the_active_layer_with_clamps() {
+        let mut s = state_with_tracks(1);
+        let mut h = History::new();
+        apply_action(&mut s, &mut h, &Action::Adjust { layer: state::BindTarget::Velocity, steps: 2, coarse: false });
+        assert_eq!(s.tracks[0].steps[0].velocity, 108);
+        apply_action(&mut s, &mut h, &Action::Adjust { layer: state::BindTarget::Velocity, steps: 10, coarse: true });
+        assert_eq!(s.tracks[0].steps[0].velocity, 127, "velocity clamps high");
+        apply_action(&mut s, &mut h, &Action::Adjust { layer: state::BindTarget::Prob, steps: -3, coarse: true });
+        assert_eq!(s.tracks[0].steps[0].prob, 25);
+        apply_action(&mut s, &mut h, &Action::Adjust { layer: state::BindTarget::Prob, steps: -3, coarse: true });
+        assert_eq!(s.tracks[0].steps[0].prob, 0, "prob clamps at zero");
+        apply_action(&mut s, &mut h, &Action::Adjust { layer: state::BindTarget::Mod, steps: 5, coarse: true });
+        assert!((s.tracks[0].steps[0].mod_value - 0.5).abs() < 1e-6);
+        // coarse note jump on a scaled track moves one period
+        s.tracks[0].scale = crate::theory::scales::lookup("major pentatonic");
+        apply_action(&mut s, &mut h, &Action::Adjust { layer: state::BindTarget::Note, steps: 1, coarse: true });
+        assert_eq!(s.tracks[0].steps[0].note, 65, "+1 period = +5 degrees");
+    }
+
+    #[test]
+    fn set_step_value_clamps_per_layer() {
+        let mut s = state_with_tracks(1);
+        let mut h = History::new();
+        apply_action(&mut s, &mut h, &Action::SetStepValue { layer: state::BindTarget::Prob, value: 250.0 });
+        assert_eq!(s.tracks[0].steps[0].prob, 100);
+        apply_action(&mut s, &mut h, &Action::SetStepValue { layer: state::BindTarget::Note, value: -5.0 });
+        assert_eq!(s.tracks[0].steps[0].note, 0);
+        apply_action(&mut s, &mut h, &Action::SetStepValue { layer: state::BindTarget::Mod, value: 0.25 });
+        assert!((s.tracks[0].steps[0].mod_value - 0.25).abs() < 1e-6);
+        assert!(h.undo(&mut s).is_some());
+        assert_eq!(s.tracks[0].steps[0].mod_value, 0.0);
+    }
+
+    #[test]
+    fn fill_density_hits_target_and_undoes() {
+        let mut s = state_with_tracks(1);
+        let mut h = History::new();
+        let before: Vec<Step> = s.tracks[0].steps[..16].to_vec();
+        apply_action(&mut s, &mut h, &Action::Fill { kind: state::FillKind::Density, arg: 0.5, seed: 7 });
+        let active = s.tracks[0].steps[..16].iter().filter(|st| st.active).count();
+        assert_eq!(active, 8, "density 0.5 over 16 = 8 triggers");
+        assert!(h.undo(&mut s).is_some());
+        assert_eq!(s.tracks[0].steps[..16].to_vec(), before);
+    }
+
+    #[test]
+    fn fill_markov_survives_a_lonely_track() {
+        let mut s = state_with_tracks(1);
+        let mut h = History::new();
+        // no other tracks to learn from — must not panic
+        apply_action(&mut s, &mut h, &Action::Fill { kind: state::FillKind::Markov, arg: 0.0, seed: 3 });
+        assert!(s.tracks[0].steps[..16].iter().all(|st| st.note > 0));
+    }
+
+    #[test]
+    fn fill_same_seed_repeats_exactly() {
+        let mut a = state_with_tracks(1);
+        let mut b = state_with_tracks(1);
+        let mut h = History::new();
+        let act = Action::Fill { kind: state::FillKind::Mutate, arg: 0.8, seed: 42 };
+        apply_action(&mut a, &mut h, &act);
+        apply_action(&mut b, &mut h, &act);
+        assert_eq!(a.tracks[0].steps, b.tracks[0].steps, "dot-repeat is exact");
+    }
+
+    #[test]
+    fn parse_root_accepts_numbers_and_names() {
+        assert_eq!(parse_root("60"), Some(60));
+        assert_eq!(parse_root("0"), Some(0));
+        assert_eq!(parse_root("127"), Some(127));
+        assert_eq!(parse_root("128"), None);
+        assert_eq!(parse_root("C4"), Some(60));
+        assert_eq!(parse_root("a3"), Some(57));
+        assert_eq!(parse_root("C#4"), Some(61));
+        assert_eq!(parse_root("eb2"), Some(39));
+        assert_eq!(parse_root("C-1"), Some(0));
+        assert_eq!(parse_root("H4"), None);
+        assert_eq!(parse_root(""), None);
     }
 
     #[test]
