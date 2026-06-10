@@ -61,6 +61,30 @@ impl Default for Step {
 /// Number of pattern slots per track (`a`–`h`).
 const NUM_SLOTS: usize = 8;
 
+/// Global steps per beat and per bar (16th-note steps, 4/4) — the macro
+/// quantize grid and the macro lane's slot duration.
+const STEPS_PER_BEAT: u64 = 4;
+const STEPS_PER_BAR: u64 = 16;
+
+/// Default macro lane length in slots (one bar each).
+const DEFAULT_LANE_LEN: usize = 8;
+
+/// A recorded macro: semantic commands (`q{a-z}` records, `:macro` edits)
+/// plus when a live `@` firing takes effect.
+#[derive(Debug, Clone, PartialEq, Default)]
+struct Macro {
+    cmds: Vec<state::MacroCmd>,
+    quant: state::Quant,
+}
+
+/// A live `@{a-z}` firing waiting for its quantize boundary. `at` is
+/// computed by the playback thread on first sight (it owns the clock).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PendingMacro {
+    idx: usize,
+    at: Option<u64>,
+}
+
 /// One pattern: what `"a`–`"h` switch between. The active slot's data
 /// lives inline in [`Track`]; inactive slots are parked here.
 #[derive(Debug, Clone, PartialEq)]
@@ -188,6 +212,27 @@ struct SequencerState {
     visual_track_anchor: Option<usize>,
     /// Active value layer: what the grid shows and what k/j/N edit.
     layer: state::BindTarget,
+    /// The 26 macro registers a–z.
+    macros: Vec<Option<Macro>>,
+    /// `q{a-z}` in progress: (macro index, commands recorded so far).
+    recording: Option<(usize, Vec<state::MacroCmd>)>,
+    /// Last fired macro (`@@` refires it).
+    last_macro: Option<usize>,
+    /// The macro lane: one slot per bar, each optionally firing a macro.
+    lane: Vec<Option<usize>>,
+    /// Lane playhead (bar index, wrapped), kept by the playback thread.
+    lane_pos: usize,
+    /// Lane cursor (`k` from track 1 reaches the lane).
+    lane_selected: usize,
+    /// Whether the cursor sits on the lane instead of a track.
+    on_lane: bool,
+    /// The lane's own yank register.
+    lane_register: Option<Vec<Option<usize>>>,
+    /// Live firings waiting for their quantize boundary.
+    pending_macros: Vec<PendingMacro>,
+    /// Undo entries produced by thread-side macro firings, drained into
+    /// the UI loop's history each frame.
+    macro_outbox: Vec<Command>,
 }
 
 impl Default for SequencerState {
@@ -208,6 +253,16 @@ impl Default for SequencerState {
             marks: vec![false; track_count],
             visual_track_anchor: None,
             layer: state::BindTarget::Note,
+            macros: vec![None; 26],
+            recording: None,
+            last_macro: None,
+            lane: vec![None; DEFAULT_LANE_LEN],
+            lane_pos: 0,
+            lane_selected: 0,
+            on_lane: false,
+            lane_register: None,
+            pending_macros: Vec::new(),
+            macro_outbox: Vec::new(),
         }
     }
 }
@@ -306,6 +361,11 @@ enum Command {
         track: usize,
         old: Box<Track>,
         new: Box<Track>,
+    },
+    /// Macro lane edits (assign/clear/paste/length) — whole-lane snapshot.
+    SetLane {
+        old: Vec<Option<usize>>,
+        new: Vec<Option<usize>>,
     },
     /// A multi-track edit (marks / V-line): one `u` reverts all of it.
     Group {
@@ -762,6 +822,7 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
             let was_muted = s.tracks[tidx].muted;
             s.tracks[tidx].muted = !was_muted;
             h.push(Command::ToggleMute { track: tidx, was_muted });
+            record_macro(s, state::MacroCmd::SetMute { track: tidx, muted: !was_muted });
             None
         }
         Action::ToggleMode => {
@@ -790,6 +851,7 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
             }
             s.tracks[tidx].steps[..len].clone_from_slice(&new);
             h.push(Command::EditSteps { track: tidx, start: 0, old, new });
+            record_macro(s, state::MacroCmd::RotateTrack { track: tidx, by: *n });
             None
         }
         Action::Euclid(op) => {
@@ -823,6 +885,7 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
             }
             s.tracks[tidx].cycle = *mode;
             h.push(Command::SetCycle { track: tidx, old, new: *mode });
+            record_macro(s, state::MacroCmd::SetCycle { track: tidx, mode: *mode });
             Some(format!("cycle = {}", mode.name()))
         }
         Action::SwitchSlot(slot) => {
@@ -834,6 +897,7 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
             switch_slot(&mut s.tracks[tidx], to);
             s.selected = s.selected.min(s.tracks[tidx].length - 1);
             h.push(Command::SwitchSlot { track: tidx, from, to });
+            record_macro(s, state::MacroCmd::SwitchPattern { track: tidx, slot: to });
             Some(format!("Pattern {}", slot_letter(to)))
         }
         Action::SaveSlot(slot) => {
@@ -915,6 +979,7 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
             }
             s.tracks[tidx].steps[..len].clone_from_slice(&new);
             h.push(Command::EditSteps { track: tidx, start: 0, old, new });
+            record_macro(s, state::MacroCmd::Fill { track: tidx, kind: *kind, arg: *arg });
             Some(format!("fill {}", kind.name()))
         }
     }
@@ -923,6 +988,107 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
 /// `a`–`h` for pattern slots 0–7.
 fn slot_letter(slot: usize) -> char {
     (b'a' + (slot as u8).min(7)) as char
+}
+
+/// One macro command in the `:macro` text syntax.
+fn fmt_macro_cmd(cmd: &state::MacroCmd) -> String {
+    match cmd {
+        state::MacroCmd::SwitchPattern { track, slot } => {
+            format!("pat {} {}", track + 1, slot_letter(*slot))
+        }
+        state::MacroCmd::SetMute { track, muted: true } => format!("mute {}", track + 1),
+        state::MacroCmd::SetMute { track, muted: false } => format!("unmute {}", track + 1),
+        state::MacroCmd::SetCycle { track, mode } => {
+            format!("cycle {} {}", track + 1, mode.name())
+        }
+        state::MacroCmd::TransposeTrack { track, by } => {
+            format!("xpose {} {:+}", track + 1, by)
+        }
+        state::MacroCmd::RotateTrack { track, by } => format!("rot {} {:+}", track + 1, by),
+        state::MacroCmd::SetScale { track, scale } if scale.is_empty() => {
+            format!("scale {} off", track + 1)
+        }
+        state::MacroCmd::SetScale { track, scale } => format!("scale {} {}", track + 1, scale),
+        state::MacroCmd::Fill { track, kind, arg } => {
+            format!("fill {} {} {}", track + 1, kind.name(), arg)
+        }
+        state::MacroCmd::SetBpm { bpm } => format!("bpm {}", bpm),
+    }
+}
+
+/// Parse the `:macro x = …` text syntax: commands separated by `|`,
+/// 1-based track numbers, plus an optional `quant <q>` segment.
+/// `pat 2 b | mute 3 | xpose 1 +7 | quant beat`
+fn parse_macro_dsl(input: &str) -> Result<(Vec<state::MacroCmd>, Option<state::Quant>), String> {
+    let mut cmds = Vec::new();
+    let mut quant = None;
+    for seg in input.split('|') {
+        let words: Vec<&str> = seg.split_whitespace().collect();
+        let parse_track = |w: &str| -> Result<usize, String> {
+            w.parse::<usize>()
+                .ok()
+                .and_then(|n| n.checked_sub(1))
+                .ok_or_else(|| format!("bad track: {w}"))
+        };
+        match words.as_slice() {
+            [] => {}
+            ["pat", t, slot] => {
+                let slot = slot
+                    .chars()
+                    .next()
+                    .filter(|c| ('a'..='h').contains(c))
+                    .map(|c| (c as u8 - b'a') as usize)
+                    .ok_or_else(|| format!("bad slot: {slot} (a-h)"))?;
+                cmds.push(state::MacroCmd::SwitchPattern { track: parse_track(t)?, slot });
+            }
+            ["mute", t] => cmds.push(state::MacroCmd::SetMute { track: parse_track(t)?, muted: true }),
+            ["unmute", t] => {
+                cmds.push(state::MacroCmd::SetMute { track: parse_track(t)?, muted: false })
+            }
+            ["cycle", t, m] => {
+                let mode = state::CycleMode::parse(m).ok_or_else(|| format!("bad cycle: {m}"))?;
+                cmds.push(state::MacroCmd::SetCycle { track: parse_track(t)?, mode });
+            }
+            ["xpose", t, n] => {
+                let by: i32 = n.parse().map_err(|_| format!("bad amount: {n}"))?;
+                cmds.push(state::MacroCmd::TransposeTrack { track: parse_track(t)?, by });
+            }
+            ["rot", t, n] => {
+                let by: i32 = n.parse().map_err(|_| format!("bad amount: {n}"))?;
+                cmds.push(state::MacroCmd::RotateTrack { track: parse_track(t)?, by });
+            }
+            ["scale", t, rest @ ..] if !rest.is_empty() => {
+                let name = rest.join(" ");
+                let scale = if name == "off" { String::new() } else { name };
+                if !scale.is_empty() && crate::theory::scales::lookup(&scale).is_none() {
+                    return Err(format!("unknown scale: {scale}"));
+                }
+                cmds.push(state::MacroCmd::SetScale { track: parse_track(t)?, scale });
+            }
+            ["fill", t, kind] | ["fill", t, kind, _] => {
+                let k = state::FillKind::parse(kind).ok_or_else(|| format!("bad fill: {kind}"))?;
+                let arg = words
+                    .get(3)
+                    .and_then(|w| w.parse().ok())
+                    .unwrap_or(match k {
+                        state::FillKind::Mutate => 0.3,
+                        state::FillKind::Density => 0.5,
+                        _ => 0.0,
+                    });
+                cmds.push(state::MacroCmd::Fill { track: parse_track(t)?, kind: k, arg });
+            }
+            ["bpm", n] => {
+                let bpm: f64 = n.parse().map_err(|_| format!("bad bpm: {n}"))?;
+                cmds.push(state::MacroCmd::SetBpm { bpm });
+            }
+            ["quant", q] => {
+                quant =
+                    Some(state::Quant::parse(q).ok_or_else(|| format!("bad quant: {q}"))?);
+            }
+            other => return Err(format!("bad command: {}", other.join(" "))),
+        }
+    }
+    Ok((cmds, quant))
 }
 
 /// Swap pattern slot `to` to the front of the track (the active slot's
@@ -986,6 +1152,7 @@ impl Command {
             Command::SwitchSlot { .. } => "Switch pattern",
             Command::SaveSlot { .. } => "Save pattern slot",
             Command::SetScale { .. } => "Set scale",
+            Command::SetLane { .. } => "Edit macro lane",
             Command::Group { desc, .. } => desc,
         }
     }
@@ -1059,6 +1226,11 @@ impl Command {
                     state.tracks[*track] = (**old).clone();
                     state.focus(*track, None);
                 }
+            }
+            Command::SetLane { old, .. } => {
+                state.lane = old.clone();
+                state.lane_selected = state.lane_selected.min(state.lane.len().saturating_sub(1));
+                state.lane_pos = state.lane_pos.min(state.lane.len().saturating_sub(1));
             }
             Command::Group { cmds, .. } => {
                 for cmd in cmds.iter().rev() {
@@ -1138,6 +1310,11 @@ impl Command {
                     state.tracks[*track] = (**new).clone();
                     state.focus(*track, None);
                 }
+            }
+            Command::SetLane { new, .. } => {
+                state.lane = new.clone();
+                state.lane_selected = state.lane_selected.min(state.lane.len().saturating_sub(1));
+                state.lane_pos = state.lane_pos.min(state.lane.len().saturating_sub(1));
             }
             Command::Group { cmds, .. } => {
                 for cmd in cmds {
@@ -1346,6 +1523,185 @@ fn apply_selected(
     msg
 }
 
+/// Append a command to the macro being recorded, if any. Called from the
+/// action arms whose semantics are macro-recordable (performance gestures,
+/// not step edits — those have dot-repeat).
+fn record_macro(s: &mut SequencerState, cmd: state::MacroCmd) {
+    if let Some((_, cmds)) = s.recording.as_mut() {
+        cmds.push(cmd);
+    }
+}
+
+/// Execute one macro command directly (macros address tracks absolutely).
+/// Returns the undo command when something changed.
+fn apply_macro_cmd(s: &mut SequencerState, cmd: &state::MacroCmd, seed: u64) -> Option<Command> {
+    match cmd {
+        state::MacroCmd::SwitchPattern { track, slot } => {
+            let (t, slot) = (*track, (*slot).min(NUM_SLOTS - 1));
+            if t >= s.tracks.len() || s.tracks[t].active_slot == slot {
+                return None;
+            }
+            let from = s.tracks[t].active_slot;
+            switch_slot(&mut s.tracks[t], slot);
+            if s.current_track == t {
+                s.selected = s.selected.min(s.tracks[t].length.saturating_sub(1));
+            }
+            Some(Command::SwitchSlot { track: t, from, to: slot })
+        }
+        state::MacroCmd::SetMute { track, muted } => {
+            let t = *track;
+            if t >= s.tracks.len() || s.tracks[t].muted == *muted {
+                return None;
+            }
+            s.tracks[t].muted = *muted;
+            Some(Command::ToggleMute { track: t, was_muted: !*muted })
+        }
+        state::MacroCmd::SetCycle { track, mode } => {
+            let t = *track;
+            if t >= s.tracks.len() || s.tracks[t].cycle == *mode {
+                return None;
+            }
+            let old = s.tracks[t].cycle;
+            s.tracks[t].cycle = *mode;
+            Some(Command::SetCycle { track: t, old, new: *mode })
+        }
+        state::MacroCmd::TransposeTrack { track, by } => {
+            let t = *track;
+            if t >= s.tracks.len() || *by == 0 {
+                return None;
+            }
+            let len = s.tracks[t].length;
+            let old: Vec<Step> = s.tracks[t].steps[..len].to_vec();
+            let new: Vec<Step> = old
+                .iter()
+                .map(|st| Step {
+                    note: (i32::from(st.note) + by).clamp(0, 127) as u8,
+                    ..st.clone()
+                })
+                .collect();
+            if new == old {
+                return None;
+            }
+            s.tracks[t].steps[..len].clone_from_slice(&new);
+            Some(Command::EditSteps { track: t, start: 0, old, new })
+        }
+        state::MacroCmd::RotateTrack { track, by } => {
+            let t = *track;
+            if t >= s.tracks.len() {
+                return None;
+            }
+            let len = s.tracks[t].length;
+            let old: Vec<Step> = s.tracks[t].steps[..len].to_vec();
+            let mut new = old.clone();
+            new.rotate_right(by.rem_euclid(len as i32) as usize);
+            if new == old {
+                return None;
+            }
+            s.tracks[t].steps[..len].clone_from_slice(&new);
+            Some(Command::EditSteps { track: t, start: 0, old, new })
+        }
+        state::MacroCmd::SetScale { track, scale } => {
+            let t = *track;
+            if t >= s.tracks.len() {
+                return None;
+            }
+            // macros resolve scales by library name only ("" = chromatic)
+            let new_scale = if scale.is_empty() {
+                None
+            } else {
+                match crate::theory::scales::lookup(scale) {
+                    Some(sc) => Some(sc),
+                    None => return None,
+                }
+            };
+            let old = s.tracks[t].clone();
+            let root = old.root;
+            let new = retuned_track(&old, new_scale, root);
+            if new == old {
+                return None;
+            }
+            s.tracks[t] = new.clone();
+            Some(Command::SetScale { track: t, old: Box::new(old), new: Box::new(new) })
+        }
+        state::MacroCmd::Fill { track, kind, arg } => {
+            let t = *track;
+            if t >= s.tracks.len() {
+                return None;
+            }
+            // route through apply_action's Fill arm on a scratch history
+            let cur = s.current_track;
+            s.current_track = t;
+            let mut scratch = History::new();
+            apply_action(s, &mut scratch, &Action::Fill { kind: *kind, arg: *arg, seed });
+            s.current_track = cur.min(s.tracks.len().saturating_sub(1));
+            scratch.commands.pop().map(|(cmd, _)| cmd)
+        }
+        state::MacroCmd::SetBpm { bpm } => {
+            let old_bpm = s.bpm;
+            let new_bpm = bpm.clamp(20.0, 300.0);
+            if old_bpm == new_bpm {
+                return None;
+            }
+            s.bpm = new_bpm;
+            Some(Command::SetBpm { old_bpm, new_bpm })
+        }
+    }
+}
+
+/// Fire macro `idx` right now: run its commands, emit ONE undo group into
+/// the outbox (drained by the UI loop), remember it for `@@`.
+fn fire_macro_now(s: &mut SequencerState, idx: usize, seed: u64) {
+    let Some(Some(m)) = s.macros.get(idx).cloned() else {
+        return;
+    };
+    let mut undo: Vec<Command> = Vec::new();
+    for cmd in &m.cmds {
+        if let Some(c) = apply_macro_cmd(s, cmd, seed) {
+            undo.push(c);
+        }
+    }
+    s.last_macro = Some(idx);
+    match undo.len() {
+        0 => {}
+        1 => {
+            if let Some(c) = undo.pop() {
+                s.macro_outbox.push(c);
+            }
+        }
+        _ => s.macro_outbox.push(Command::Group { cmds: undo, desc: "Macro" }),
+    }
+}
+
+/// The global step a quantized firing lands on (strictly after `gstep`).
+fn quant_boundary(
+    quant: state::Quant,
+    gstep: u64,
+    first_track_len: Option<usize>,
+) -> u64 {
+    let unit = match quant {
+        state::Quant::Now => return gstep,
+        state::Quant::Beat => STEPS_PER_BEAT,
+        state::Quant::Bar => STEPS_PER_BAR,
+        state::Quant::PatternEnd => first_track_len.map_or(STEPS_PER_BAR, |l| l as u64).max(1),
+    };
+    (gstep / unit + 1) * unit
+}
+
+/// The track a macro's first command touches (pattern-end quantize syncs
+/// to that track's loop).
+fn macro_first_track(m: &Macro) -> Option<usize> {
+    m.cmds.first().map(|cmd| match cmd {
+        state::MacroCmd::SwitchPattern { track, .. }
+        | state::MacroCmd::SetMute { track, .. }
+        | state::MacroCmd::SetCycle { track, .. }
+        | state::MacroCmd::TransposeTrack { track, .. }
+        | state::MacroCmd::RotateTrack { track, .. }
+        | state::MacroCmd::SetScale { track, .. }
+        | state::MacroCmd::Fill { track, .. } => *track,
+        state::MacroCmd::SetBpm { .. } => 0,
+    })
+}
+
 /// A step's pitch in cents above the track root, under the track's current
 /// tuning (MIDI semitones when unscaled, scale degrees when tuned).
 fn step_pitch_cents(track: &Track, note: u8) -> f64 {
@@ -1418,8 +1774,10 @@ fn set_scale(
         if new == old {
             continue;
         }
+        let name = new.scale.as_ref().map(|sc| sc.name.clone()).unwrap_or_default();
         s.tracks[t] = new.clone();
         h.push(Command::SetScale { track: t, old: Box::new(old), new: Box::new(new) });
+        record_macro(s, state::MacroCmd::SetScale { track: t, scale: name });
     }
     if multi {
         h.end_group("Set scale");
@@ -1512,6 +1870,9 @@ fn sequencer_thread(
     // Global step counter the playheads derive from; per-track drunk-walk
     // positions; manifest + resolution cache for per-step mod-in bindings.
     let mut last_gstep: Option<u64> = None;
+    // Bar counter for the macro lane (None until the first tick so the
+    // very first bar's slot fires too).
+    let mut last_bar: Option<u64> = None;
     let mut drunk: Vec<usize> = Vec::new();
     let mut manifest: Option<Manifest> = Manifest::open().ok();
     let mut bind_cache: std::collections::HashMap<String, Option<usize>> =
@@ -1585,6 +1946,55 @@ fn sequencer_thread(
             }
 
             let gstep = clock.checked_div(samples_per_step).unwrap_or(0);
+
+            // Live macro firings: quantized while playing, immediate when
+            // the transport is stopped.
+            if !s.pending_macros.is_empty() {
+                let mut pending = std::mem::take(&mut s.pending_macros);
+                pending.retain_mut(|p| {
+                    if !playing {
+                        fire_macro_now(&mut s, p.idx, gstep ^ 0x51AB);
+                        return false;
+                    }
+                    let at = match p.at {
+                        Some(at) => at,
+                        None => {
+                            let m = s.macros.get(p.idx).and_then(|m| m.clone());
+                            let (quant, ftl) = m.map_or((state::Quant::Now, None), |m| {
+                                let ftl = macro_first_track(&m)
+                                    .and_then(|t| s.tracks.get(t))
+                                    .map(|t| t.length);
+                                (m.quant, ftl)
+                            });
+                            let at = quant_boundary(quant, gstep, ftl);
+                            p.at = Some(at);
+                            at
+                        }
+                    };
+                    if gstep >= at {
+                        fire_macro_now(&mut s, p.idx, gstep);
+                        false
+                    } else {
+                        true
+                    }
+                });
+                s.pending_macros.extend(pending);
+            }
+
+            // The macro lane: one slot per bar, fired exactly on the bar
+            // line (the lane is its own quantizer).
+            if playing && !s.lane.is_empty() {
+                let bar = gstep / STEPS_PER_BAR;
+                if last_bar != Some(bar) {
+                    last_bar = Some(bar);
+                    let pos = (bar as usize) % s.lane.len();
+                    s.lane_pos = pos;
+                    if let Some(idx) = s.lane[pos] {
+                        fire_macro_now(&mut s, idx, gstep);
+                    }
+                }
+            }
+
             if playing && last_gstep != Some(gstep) {
                 // bind sources re-resolve about once a second, like voice
                 // param bindings (handles module restarts)
@@ -2270,9 +2680,26 @@ fn snapshot_params(s: &SequencerState) -> state::SequencerParams {
                 })
                 .collect(),
         }).collect(),
-        macros: vec![],
-        lane: vec![],
-        lane_len: None,
+        macros: s
+            .macros
+            .iter()
+            .enumerate()
+            .filter_map(|(i, m)| {
+                m.as_ref().map(|m| state::MacroParam {
+                    id: ((b'a' + i as u8) as char).to_string(),
+                    quant: m.quant,
+                    cmds: m.cmds.clone(),
+                })
+            })
+            .collect(),
+        lane: s
+            .lane
+            .iter()
+            .map(|slot| {
+                slot.map(|i| ((b'a' + i as u8) as char).to_string()).unwrap_or_default()
+            })
+            .collect(),
+        lane_len: Some(s.lane.len()),
     }
 }
 
@@ -2348,6 +2775,38 @@ fn apply_tracks(s: &mut SequencerState, params: &state::SequencerParams) {
     s.current_track = s.current_track.min(s.tracks.len().saturating_sub(1));
     let len = s.tracks[s.current_track].length;
     s.selected = s.selected.min(len.saturating_sub(1));
+
+    // Macros + lane travel with the tracks (legacy saves simply have none).
+    let mut macros: Vec<Option<Macro>> = vec![None; 26];
+    for mp in &params.macros {
+        let idx = mp
+            .id
+            .chars()
+            .next()
+            .filter(char::is_ascii_lowercase)
+            .map(|ch| (ch as u8 - b'a') as usize);
+        if let Some(i) = idx {
+            macros[i] = Some(Macro { cmds: mp.cmds.clone(), quant: mp.quant });
+        }
+    }
+    s.macros = macros;
+    let lane_len = params
+        .lane_len
+        .unwrap_or_else(|| params.lane.len().max(DEFAULT_LANE_LEN))
+        .clamp(1, NUM_STEPS);
+    let mut lane: Vec<Option<usize>> = vec![None; lane_len];
+    for (i, slot) in params.lane.iter().take(lane_len).enumerate() {
+        lane[i] = slot
+            .chars()
+            .next()
+            .filter(char::is_ascii_lowercase)
+            .map(|ch| (ch as u8 - b'a') as usize);
+    }
+    s.lane = lane;
+    s.lane_pos = 0;
+    s.lane_selected = s.lane_selected.min(lane_len - 1);
+    s.pending_macros.clear();
+    s.recording = None;
 }
 
 pub fn run(instance: usize) -> Result<()> {
@@ -2429,6 +2888,10 @@ pub fn run(instance: usize) -> Result<()> {
     let mut pending_layer = false;
     // `"` pressed: next key (a-h / A-H) switches / saves a pattern slot
     let mut pending_quote = false;
+    // `q` pressed with no recording active: next key (a-z) starts one
+    let mut pending_record = false;
+    // `@` pressed: next key (a-z) fires a macro (assigns, on the lane)
+    let mut pending_at = false;
     // last fill, for `F` (re-run with a fresh seed) — the seed counter
     // keeps repeats deterministic within a session
     let mut last_fill: Option<(state::FillKind, f32)> = None;
@@ -2472,6 +2935,19 @@ pub fn run(instance: usize) -> Result<()> {
             }
         }
         
+        // Drain undo entries produced by thread-side macro firings into
+        // the history, so `u` reverts a fired macro like any edit
+        {
+            let mut s = state.lock().unwrap();
+            if !s.macro_outbox.is_empty() {
+                let drained: Vec<Command> = s.macro_outbox.drain(..).collect();
+                drop(s);
+                for cmd in drained {
+                    history.push(cmd);
+                }
+            }
+        }
+
         // Auto-execute gt on timeout (only when digits were collected)
         if let Some(ref target) = gt_target {
             if gt_last_key.as_ref().is_some_and(|t| t.elapsed() > Duration::from_millis(300)) && !gt_input.is_empty() {
@@ -2781,6 +3257,82 @@ pub fn run(instance: usize) -> Result<()> {
                                             }
                                         }
                                     }
+                                    "macro" => {
+                                        let mut s = state.lock().unwrap();
+                                        if rest.is_empty() {
+                                            let defined: Vec<String> = s
+                                                .macros
+                                                .iter()
+                                                .enumerate()
+                                                .filter(|(_, m)| m.is_some())
+                                                .map(|(i, _)| format!("@{}", (b'a' + i as u8) as char))
+                                                .collect();
+                                            undo_msg = Some(if defined.is_empty() {
+                                                String::from("No macros (qa…q records; :macro a = mute 2 | pat 1 b)")
+                                            } else {
+                                                defined.join(" ")
+                                            });
+                                        } else {
+                                            let (id, tail) = match rest.split_once(char::is_whitespace) {
+                                                Some((a, b)) => (a, b.trim()),
+                                                None => (rest.as_str(), ""),
+                                            };
+                                            let idx = (id.len() == 1)
+                                                .then(|| id.chars().next())
+                                                .flatten()
+                                                .filter(char::is_ascii_lowercase)
+                                                .map(|ch| (ch as u8 - b'a') as usize);
+                                            match idx {
+                                                None => {
+                                                    undo_msg = Some(format!("Bad macro id: {} (a-z)", id));
+                                                }
+                                                Some(idx) if tail.is_empty() => {
+                                                    undo_msg = Some(match &s.macros[idx] {
+                                                        Some(m) => format!(
+                                                            "@{} [{}]: {}",
+                                                            id,
+                                                            m.quant.name(),
+                                                            m.cmds
+                                                                .iter()
+                                                                .map(fmt_macro_cmd)
+                                                                .collect::<Vec<_>>()
+                                                                .join(" | ")
+                                                        ),
+                                                        None => format!("@{} is empty", id),
+                                                    });
+                                                }
+                                                Some(idx) => {
+                                                    let spec = tail.strip_prefix('=').map(str::trim);
+                                                    let text = spec.unwrap_or(tail);
+                                                    undo_msg = Some(match parse_macro_dsl(text) {
+                                                        Ok((cmds, quant)) => {
+                                                            let m = s.macros[idx]
+                                                                .take()
+                                                                .unwrap_or_default();
+                                                            let new = Macro {
+                                                                cmds: if cmds.is_empty() {
+                                                                    m.cmds
+                                                                } else {
+                                                                    cmds
+                                                                },
+                                                                quant: quant.unwrap_or(m.quant),
+                                                            };
+                                                            let desc = format!(
+                                                                "@{} [{}]: {} command{}",
+                                                                id,
+                                                                new.quant.name(),
+                                                                new.cmds.len(),
+                                                                if new.cmds.len() == 1 { "" } else { "s" }
+                                                            );
+                                                            s.macros[idx] = Some(new);
+                                                            desc
+                                                        }
+                                                        Err(e) => e,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
                                     _ => undo_msg = Some(format!("Not a command: {}", c)),
                                 }
                             }
@@ -2944,6 +3496,248 @@ pub fn run(instance: usize) -> Result<()> {
                     pending_g = false;
                     pending_layer = false;
                     pending_quote = false;
+                    pending_record = false;
+                    pending_at = false;
+                    continue;
+                }
+
+                // `q`: start/stop macro recording (normal mode). Recording
+                // captures semantic commands, not keystrokes — see
+                // docs/plans/sequencer-v2.md §7.
+                if pending_record {
+                    pending_record = false;
+                    if let KeyCode::Char(c @ 'a'..='z') = key.code {
+                        let mut s = state.lock().unwrap();
+                        s.recording = Some(((c as u8 - b'a') as usize, vec![]));
+                        undo_msg = Some(format!("rec @{} — q stops", c));
+                        undo_time = Some(Instant::now());
+                    }
+                    continue;
+                }
+                if key.code == KeyCode::Char('q') && mode == "normal" && submode.is_empty() {
+                    pending_count = None;
+                    let mut s = state.lock().unwrap();
+                    if let Some((idx, cmds)) = s.recording.take() {
+                        let quant =
+                            s.macros[idx].as_ref().map(|m| m.quant).unwrap_or_default();
+                        let n = cmds.len();
+                        s.macros[idx] = Some(Macro { cmds, quant });
+                        undo_msg = Some(format!(
+                            "@{} recorded ({} command{})",
+                            slot_letter(idx.min(25)),
+                            n,
+                            if n == 1 { "" } else { "s" }
+                        ));
+                        undo_time = Some(Instant::now());
+                    } else {
+                        pending_record = true;
+                    }
+                    continue;
+                }
+
+                // `@`: fire a macro live (quantized) — or assign it to the
+                // slot under the cursor when on the macro lane
+                if pending_at {
+                    pending_at = false;
+                    let idx = match key.code {
+                        KeyCode::Char(c @ 'a'..='z') => Some((c as u8 - b'a') as usize),
+                        KeyCode::Char('@') => state.lock().unwrap().last_macro,
+                        _ => None,
+                    };
+                    if let Some(idx) = idx {
+                        let mut s = state.lock().unwrap();
+                        if s.on_lane {
+                            let old = s.lane.clone();
+                            let sel = s.lane_selected.min(s.lane.len().saturating_sub(1));
+                            if !s.lane.is_empty() {
+                                s.lane[sel] = Some(idx);
+                                let new = s.lane.clone();
+                                if new != old {
+                                    history.push(Command::SetLane { old, new });
+                                }
+                                undo_msg = Some(format!(
+                                    "lane[{}] = @{}",
+                                    sel + 1,
+                                    (b'a' + idx as u8) as char
+                                ));
+                            }
+                        } else {
+                            let quant = s
+                                .macros
+                                .get(idx)
+                                .and_then(|m| m.as_ref())
+                                .filter(|m| !m.cmds.is_empty())
+                                .map(|m| m.quant);
+                            undo_msg = Some(match quant {
+                                Some(q) => {
+                                    s.pending_macros.push(PendingMacro { idx, at: None });
+                                    s.last_macro = Some(idx);
+                                    format!("…@{} ({})", (b'a' + idx as u8) as char, q.name())
+                                }
+                                None => format!(
+                                    "@{} is empty (qa…q records)",
+                                    (b'a' + idx as u8) as char
+                                ),
+                            });
+                        }
+                        undo_time = Some(Instant::now());
+                    }
+                    continue;
+                }
+                if key.code == KeyCode::Char('@') && mode == "normal" && submode.is_empty() {
+                    pending_count = None;
+                    pending_at = true;
+                    continue;
+                }
+
+                // The macro lane has its own small dialect (cursor on the
+                // lane row): h/l/0/$ move, @a assigns, x/d clear, y/p
+                // yank/paste, D clears the lane, #L sets its length, j leaves.
+                if mode == "normal" && state.lock().unwrap().on_lane {
+                    match key.code {
+                        KeyCode::Char(c) if c.is_ascii_digit() => {
+                            if c == '0' && pending_count.is_none() {
+                                state.lock().unwrap().lane_selected = 0;
+                            } else {
+                                pending_count.get_or_insert_with(String::new).push(c);
+                            }
+                        }
+                        KeyCode::Char('h') | KeyCode::Left => {
+                            let n: usize =
+                                pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
+                            let mut s = state.lock().unwrap();
+                            let len = s.lane.len().max(1);
+                            s.lane_selected = (s.lane_selected + len - (n % len)) % len;
+                        }
+                        KeyCode::Char('l') | KeyCode::Right => {
+                            let n: usize =
+                                pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
+                            let mut s = state.lock().unwrap();
+                            let len = s.lane.len().max(1);
+                            s.lane_selected = (s.lane_selected + n) % len;
+                        }
+                        KeyCode::Char('$') => {
+                            pending_count = None;
+                            let mut s = state.lock().unwrap();
+                            s.lane_selected = s.lane.len().saturating_sub(1);
+                        }
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            pending_count = None;
+                            state.lock().unwrap().on_lane = false;
+                        }
+                        KeyCode::Char('G') => {
+                            pending_count = None;
+                            let mut s = state.lock().unwrap();
+                            s.on_lane = false;
+                            s.current_track = s.tracks.len() - 1;
+                        }
+                        KeyCode::Char('@') => {
+                            pending_count = None;
+                            pending_at = true;
+                        }
+                        KeyCode::Char('x') | KeyCode::Char('d') => {
+                            pending_count = None;
+                            let mut s = state.lock().unwrap();
+                            let sel = s.lane_selected.min(s.lane.len().saturating_sub(1));
+                            if !s.lane.is_empty() && s.lane[sel].is_some() {
+                                let old = s.lane.clone();
+                                s.lane_register = Some(vec![s.lane[sel]]);
+                                s.lane[sel] = None;
+                                let new = s.lane.clone();
+                                history.push(Command::SetLane { old, new });
+                            }
+                        }
+                        KeyCode::Char('D') => {
+                            pending_count = None;
+                            let mut s = state.lock().unwrap();
+                            if s.lane.iter().any(Option::is_some) {
+                                let old = s.lane.clone();
+                                for slot in s.lane.iter_mut() {
+                                    *slot = None;
+                                }
+                                let new = s.lane.clone();
+                                history.push(Command::SetLane { old, new });
+                                undo_msg = Some(String::from("Lane cleared"));
+                                undo_time = Some(Instant::now());
+                            }
+                        }
+                        KeyCode::Char('y') => {
+                            pending_count = None;
+                            let mut s = state.lock().unwrap();
+                            let sel = s.lane_selected.min(s.lane.len().saturating_sub(1));
+                            if !s.lane.is_empty() {
+                                s.lane_register = Some(vec![s.lane[sel]]);
+                                undo_msg = Some(String::from("Yanked lane slot"));
+                                undo_time = Some(Instant::now());
+                            }
+                        }
+                        KeyCode::Char('p') => {
+                            let times: usize =
+                                pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
+                            let mut s = state.lock().unwrap();
+                            if let Some(reg) = s.lane_register.clone() {
+                                if !reg.is_empty() && !s.lane.is_empty() {
+                                    let old = s.lane.clone();
+                                    let start = s.lane_selected.min(s.lane.len() - 1);
+                                    let total = (reg.len() * times.max(1))
+                                        .min(s.lane.len() - start);
+                                    for i in 0..total {
+                                        s.lane[start + i] = reg[i % reg.len()];
+                                    }
+                                    let new = s.lane.clone();
+                                    if new != old {
+                                        history.push(Command::SetLane { old, new });
+                                    }
+                                }
+                            } else {
+                                undo_msg = Some(String::from("Lane register is empty"));
+                                undo_time = Some(Instant::now());
+                            }
+                        }
+                        // #L sets the lane length in bars (1-128)
+                        KeyCode::Char('L') => {
+                            if let Some(n) =
+                                pending_count.take().and_then(|s| s.parse::<usize>().ok())
+                            {
+                                let mut s = state.lock().unwrap();
+                                let n = n.clamp(1, NUM_STEPS);
+                                if n != s.lane.len() {
+                                    let old = s.lane.clone();
+                                    s.lane.resize(n, None);
+                                    s.lane_selected = s.lane_selected.min(n - 1);
+                                    let new = s.lane.clone();
+                                    history.push(Command::SetLane { old, new });
+                                    undo_msg = Some(format!("lane length = {}", n));
+                                    undo_time = Some(Instant::now());
+                                }
+                            }
+                        }
+                        // transport + undo still work from the lane
+                        KeyCode::Char(' ') => {
+                            pending_count = None;
+                            if transport_ui.is_none() {
+                                transport_ui = ShmTransport::open().ok();
+                            }
+                            if let Some(ref mut t) = transport_ui {
+                                let playing = t.toggle_playing();
+                                state.lock().unwrap().playing = playing;
+                            }
+                        }
+                        KeyCode::Char('u') => {
+                            let count = pending_count
+                                .take()
+                                .and_then(|c| c.parse().ok())
+                                .unwrap_or(1)
+                                .max(1);
+                            let mut s = state.lock().unwrap();
+                            undo_msg =
+                                Some(history_status("Undo", count, || history.undo(&mut s)));
+                            undo_time = Some(Instant::now());
+                        }
+                        _ => {
+                            pending_count = None;
+                        }
+                    }
                     continue;
                 }
 
@@ -3580,12 +4374,17 @@ pub fn run(instance: usize) -> Result<()> {
                             }
                         }
 
-                        // Track navigation
+                        // Track navigation (k from the top row reaches the
+                        // macro lane; j leaves it again)
                         KeyCode::Char('k') | KeyCode::Up => {
                             let n: usize = pending_count.take().and_then(|s| s.parse().ok()).unwrap_or(1);
                             let mut s = state.lock().unwrap();
-                            s.current_track = s.current_track.saturating_sub(n);
-                            s.selected = 0;
+                            if s.current_track == 0 {
+                                s.on_lane = true;
+                            } else {
+                                s.current_track = s.current_track.saturating_sub(n);
+                                s.selected = 0;
+                            }
                             pending_g = false;
                         }
                         KeyCode::Char('j') | KeyCode::Down => {
@@ -4893,6 +5692,131 @@ mod tests {
         assert_eq!(parse_root("C-1"), Some(0));
         assert_eq!(parse_root("H4"), None);
         assert_eq!(parse_root(""), None);
+    }
+
+    // ── macros + the lane ───────────────────────────────────────────────
+
+    #[test]
+    fn recording_captures_semantic_commands() {
+        let mut s = state_with_tracks(2);
+        let mut h = History::new();
+        s.recording = Some((0, vec![]));
+        s.current_track = 1;
+        apply_action(&mut s, &mut h, &Action::ToggleMute);
+        apply_action(&mut s, &mut h, &Action::SwitchSlot(2));
+        apply_action(&mut s, &mut h, &Action::SetCycle(state::CycleMode::Reverse));
+        let (_, cmds) = s.recording.clone().expect("still recording");
+        assert_eq!(
+            cmds,
+            vec![
+                state::MacroCmd::SetMute { track: 1, muted: true },
+                state::MacroCmd::SwitchPattern { track: 1, slot: 2 },
+                state::MacroCmd::SetCycle { track: 1, mode: state::CycleMode::Reverse },
+            ]
+        );
+        // navigation and step edits do NOT record
+        apply_action(&mut s, &mut h, &Action::ToggleStep);
+        assert_eq!(s.recording.as_ref().map(|(_, c)| c.len()), Some(3));
+    }
+
+    #[test]
+    fn fire_macro_applies_and_groups_undo() {
+        let mut s = state_with_tracks(3);
+        let mut h = History::new();
+        s.macros[0] = Some(Macro {
+            cmds: vec![
+                state::MacroCmd::SetMute { track: 0, muted: true },
+                state::MacroCmd::SetMute { track: 2, muted: true },
+                state::MacroCmd::SwitchPattern { track: 1, slot: 1 },
+            ],
+            quant: state::Quant::Now,
+        });
+        fire_macro_now(&mut s, 0, 99);
+        assert!(s.tracks[0].muted && s.tracks[2].muted);
+        assert_eq!(s.tracks[1].active_slot, 1);
+        assert_eq!(s.last_macro, Some(0));
+        // outbox drains into history as one entry
+        let drained: Vec<Command> = s.macro_outbox.drain(..).collect();
+        assert_eq!(drained.len(), 1);
+        for cmd in drained {
+            h.push(cmd);
+        }
+        assert_eq!(h.undo(&mut s), Some("Macro"));
+        assert!(!s.tracks[0].muted && !s.tracks[2].muted);
+        assert_eq!(s.tracks[1].active_slot, 0);
+    }
+
+    #[test]
+    fn fire_macro_skips_noops_and_bad_tracks() {
+        let mut s = state_with_tracks(1);
+        s.macros[3] = Some(Macro {
+            cmds: vec![
+                state::MacroCmd::SetMute { track: 9, muted: true }, // out of range
+                state::MacroCmd::SetMute { track: 0, muted: false }, // already false
+            ],
+            quant: state::Quant::Bar,
+        });
+        fire_macro_now(&mut s, 3, 1);
+        assert!(s.macro_outbox.is_empty(), "nothing changed, nothing to undo");
+    }
+
+    #[test]
+    fn macro_transpose_and_rotate_whole_track() {
+        let mut s = state_with_tracks(1);
+        let cmd = state::MacroCmd::TransposeTrack { track: 0, by: 7 };
+        let undo = apply_macro_cmd(&mut s, &cmd, 0).expect("changed");
+        assert_eq!(s.tracks[0].steps[0].note, 67);
+        undo.undo(&mut s);
+        assert_eq!(s.tracks[0].steps[0].note, 60);
+        let rot = state::MacroCmd::RotateTrack { track: 0, by: 1 };
+        apply_macro_cmd(&mut s, &rot, 0);
+        assert!(!s.tracks[0].steps[0].active && s.tracks[0].steps[1].active);
+    }
+
+    #[test]
+    fn quant_boundaries_land_on_the_grid() {
+        use state::Quant;
+        assert_eq!(quant_boundary(Quant::Now, 37, None), 37);
+        assert_eq!(quant_boundary(Quant::Beat, 37, None), 40);
+        assert_eq!(quant_boundary(Quant::Beat, 40, None), 44, "strictly after");
+        assert_eq!(quant_boundary(Quant::Bar, 37, None), 48);
+        assert_eq!(quant_boundary(Quant::PatternEnd, 37, Some(12)), 48);
+        assert_eq!(quant_boundary(Quant::PatternEnd, 37, None), 48, "falls back to bar");
+    }
+
+    #[test]
+    fn macro_dsl_round_trips() {
+        let text = "pat 2 b | mute 3 | unmute 1 | cycle 2 pingpong | xpose 1 +7 | rot 4 -2 | scale 1 dorian | fill 2 density 0.4 | bpm 90 | quant beat";
+        let (cmds, quant) = parse_macro_dsl(text).expect("parses");
+        assert_eq!(cmds.len(), 9);
+        assert_eq!(quant, Some(state::Quant::Beat));
+        // formatting then reparsing yields the same commands
+        let formatted: Vec<String> = cmds.iter().map(fmt_macro_cmd).collect();
+        let (cmds2, _) = parse_macro_dsl(&formatted.join(" | ")).expect("reparses");
+        assert_eq!(cmds, cmds2);
+        // errors are specific
+        assert!(parse_macro_dsl("pat 2 z").is_err(), "slot z out of range");
+        assert!(parse_macro_dsl("cycle 1 sideways").is_err());
+        assert!(parse_macro_dsl("scale 1 nonsense").is_err());
+        assert!(parse_macro_dsl("pat 0 a").is_err(), "tracks are 1-based");
+    }
+
+    #[test]
+    fn macros_and_lane_persist() {
+        let mut s = state_with_tracks(2);
+        s.macros[1] = Some(Macro {
+            cmds: vec![state::MacroCmd::SetMute { track: 0, muted: true }],
+            quant: state::Quant::PatternEnd,
+        });
+        s.lane = vec![Some(1), None, Some(1), None, None, None];
+        let params = snapshot_params(&s);
+        let toml = state::to_toml_string(&params).expect("serializes");
+        let back: state::SequencerParams = toml::from_str(&toml).expect("parses");
+        let mut s2 = SequencerState::default();
+        apply_tracks(&mut s2, &back);
+        assert_eq!(s2.macros[1], s.macros[1]);
+        assert!(s2.macros[0].is_none());
+        assert_eq!(s2.lane, s.lane);
     }
 
     #[test]
