@@ -229,13 +229,12 @@ pub fn relayout() -> Result<()> {
     let dims = tmux_cmd(&["display-message", "-p", "-t", win, "#{window_width} #{window_height}"])?;
     let mut it = dims.split_whitespace().filter_map(|n| n.parse::<usize>().ok());
     let (w, h) = (it.next().unwrap_or(120), it.next().unwrap_or(40));
-    let (top, row2, col) = house_dims(w, h);
-    // order matters: SEQ pins the top block, then the row split, then the
-    // column widths (the divider between vertical splits costs one line)
-    tmux_cmd_ok(&["resize-pane", "-t", by_title["SEQ"], "-y", &h.saturating_sub(top + 1).to_string()]);
-    tmux_cmd_ok(&["resize-pane", "-t", by_title["MATHs"], "-y", &row2.to_string()]);
+    let (row, seq_h, col) = house_dims(w, h);
+    // fixed panes get their content heights; the SCOPE band absorbs the rest
+    tmux_cmd_ok(&["resize-pane", "-t", by_title["SEQ"], "-y", &seq_h.to_string()]);
+    tmux_cmd_ok(&["resize-pane", "-t", by_title["VOICE 0"], "-y", &row.to_string()]);
+    tmux_cmd_ok(&["resize-pane", "-t", by_title["MATHs"], "-y", &row.to_string()]);
     tmux_cmd_ok(&["resize-pane", "-t", by_title["los"], "-x", &col.to_string()]);
-    tmux_cmd_ok(&["resize-pane", "-t", by_title["SCOPE"], "-y", &(top.saturating_sub(1) / 2).to_string()]);
     Ok(())
 }
 
@@ -362,17 +361,18 @@ fn install_shell_theme() {
 ///   ├─────────┴────────────┤
 ///   │         SEQ          │
 ///   └──────────────────────┘
-/// Content-aware split sizes for the house layout: `(top_block, row2,
-/// left_col)` in cells, given the window size. MIX and the VOICE|MATHs row
-/// have intrinsic content heights (~10 and ~15 lines with pane titles), so
-/// on tall windows they stay content-sized and the slack flows to the
-/// elastic panes (SEQ, and the badge/scope column). Small windows fall
-/// back to proportional splits so nothing collapses.
+/// Content-aware split sizes for the house layout: `(module_row, seq,
+/// left_col)` in cells, given the window size. The voices row and the
+/// MATHs|MIX row are content-sized (≤14 lines), SEQ snaps to its content
+/// (≤15: header + 8 tracks + detail strip + modeline) — and the SCOPE
+/// band absorbs every spare line, because the oscilloscope is the one
+/// module that genuinely renders full-pane at any size. Small windows
+/// scale everything down proportionally so nothing collapses.
 fn house_dims(w: usize, h: usize) -> (usize, usize, usize) {
-    let top = ((h * 3) / 5).clamp(6, 28);
-    let row2 = (top / 2).clamp(3, 14);
+    let row = ((h * 23) / 100).clamp(4, 14);
+    let seq = ((h * 28) / 100).clamp(5, 15);
     let col = (w / 4).clamp(20.min(w / 2), 48);
-    (top, row2, col)
+    (row, seq, col)
 }
 
 fn build_house_layout(exe: &str) -> Result<()> {
@@ -386,58 +386,58 @@ fn build_house_layout(exe: &str) -> Result<()> {
     ])?;
     let mut it = dims.split_whitespace().filter_map(|n| n.parse::<usize>().ok());
     let (w, h) = (it.next().unwrap_or(120), it.next().unwrap_or(40));
-    let (top, row2, col) = house_dims(w, h);
+    let (row, seq_h, col) = house_dims(w, h);
 
-    // the window's first pane becomes SEQ (bottom) after the splits
-    let seq = tmux_cmd(&["list-panes", "-t", win, "-F", "#{pane_id}"])?
+    // the window's base pane becomes the SCOPE band — the elastic one
+    let scope = tmux_cmd(&["list-panes", "-t", win, "-F", "#{pane_id}"])?
         .lines()
         .next()
         .unwrap_or_default()
         .to_string();
-    // top block (rows 1+2) above SEQ, content-sized; row 1 = the voices
+    // SEQ pinned at the bottom, snapped to its content height
+    let seq = tmux_cmd(&[
+        "split-window", "-t", &scope, "-v", "-l", &seq_h.to_string(), "-P", "-F",
+        "#{pane_id}",
+        &format!("{} sequencer 0", exe),
+    ])?;
+    let seq = seq.trim().to_string();
+    // module rows stack above the scope band: voices, then MATHs | MIX
     let row1 = tmux_cmd(&[
-        "split-window", "-t", &seq, "-v", "-b", "-l", &top.to_string(), "-P", "-F",
+        "split-window", "-t", &scope, "-v", "-b", "-l", &row.to_string(), "-P", "-F",
         "#{pane_id}",
         &format!("{} voice 0", exe),
     ])?;
     let row1 = row1.trim().to_string();
-    // row 2 under row 1: MATHs | MIX
-    let maths = tmux_cmd(&[
-        "split-window", "-t", &row1, "-v", "-l", &row2.to_string(), "-P", "-F",
+    let row2 = tmux_cmd(&[
+        "split-window", "-t", &scope, "-v", "-b", "-l", &row.to_string(), "-P", "-F",
         "#{pane_id}",
         &format!("{} envelope 0", exe),
     ])?;
-    let maths = maths.trim().to_string();
+    let row2 = row2.trim().to_string();
     let mix = tmux_cmd(&[
-        "split-window", "-t", &maths, "-h", "-l", "50%", "-P", "-F", "#{pane_id}",
+        "split-window", "-t", &row2, "-h", "-l", "50%", "-P", "-F", "#{pane_id}",
         &format!("{} mixer 0", exe),
     ])?;
-    // row 1 splits into the two default voices
+    // the voices row: badge column left, then the two voices
     let voice1 = tmux_cmd(&[
         "split-window", "-t", &row1, "-h", "-l", "50%", "-P", "-F", "#{pane_id}",
         &format!("{} voice 1", exe),
     ])?;
-    // row 1 left column: badge over scope
     let badge = tmux_cmd(&[
         "split-window", "-t", &row1, "-h", "-b", "-l", &col.to_string(), "-P", "-F",
         "#{pane_id}",
         &format!("{} badge 0", exe),
     ])?;
     let badge = badge.trim().to_string();
-    let scope = tmux_cmd(&[
-        "split-window", "-t", &badge, "-v", "-l", "50%", "-P", "-F", "#{pane_id}",
-        &format!("{} scope 0", exe),
-    ])?;
-    tmux_cmd(&["respawn-pane", "-k", "-t", &seq, &format!("{} sequencer 0", exe)])?;
 
     for (id, title) in [
         (seq.as_str(), "SEQ"),
         (row1.as_str(), "VOICE 0"),
         (voice1.trim(), "VOICE 1"),
-        (maths.as_str(), "MATHs"),
+        (row2.as_str(), "MATHs"),
         (mix.trim(), "MIX"),
         (badge.as_str(), "los"),
-        (scope.trim(), "SCOPE"),
+        (scope.as_str(), "SCOPE"),
     ] {
         tmux_cmd_ok(&["select-pane", "-t", id, "-T", title]);
     }
@@ -460,14 +460,15 @@ pub fn create_session() -> Result<()> {
     }
     
     // Spawn module panes (each with instance 0 by default)
-    // The house layout:
+    // The house layout (SCOPE is the elastic band — every pane above and
+    // below it is content-sized, spare height all lands in the waveform):
     //   ┌───────┬─────────┬─────────┐
-    //   │ los   │         │         │
-    //   ├───────┤ VOICE 0 │ VOICE 1 │
-    //   │ SCOPE │         │         │
+    //   │ los   │ VOICE 0 │ VOICE 1 │
     //   ├───────┴────┬────┴─────────┤
     //   │   MATHs    │     MIX      │
     //   ├────────────┴──────────────┤
+    //   │           SCOPE           │
+    //   ├───────────────────────────┤
     //   │            SEQ            │
     //   └───────────────────────────┘
     build_house_layout(&exe)?;
@@ -1213,23 +1214,26 @@ mod tests {
 
     #[test]
     fn house_dims_adapt_to_window() {
-        // tall window: rows stay content-sized, slack flows to SEQ
-        let (top, row2, _) = house_dims(180, 80);
-        assert_eq!(top, 28, "top block caps at content height");
-        assert_eq!(row2, 14, "MATHs/MIX row caps at content height");
+        // tall window: module rows + SEQ cap at content height — every
+        // spare line belongs to the scope band
+        let (row, seq, _) = house_dims(180, 80);
+        assert_eq!(row, 14, "module rows cap at content height");
+        assert_eq!(seq, 15, "SEQ snaps to its content");
+        let scope_band = 80 - 2 * row - seq - 3; // minus split borders
+        assert!(scope_band >= 15, "tall windows feed the waveform");
         // mid window (the gif terminal): proportional
-        let (top, row2, col) = house_dims(140, 40);
-        assert_eq!(top, 24);
-        assert_eq!(row2, 12);
+        let (row, seq, col) = house_dims(140, 40);
+        assert_eq!(row, 9);
+        assert_eq!(seq, 11);
         assert_eq!(col, 35);
         // small window: everything stays usable, nothing collapses
-        let (top, row2, col) = house_dims(60, 20);
-        assert!((6..20).contains(&top));
-        assert!((3..top).contains(&row2));
+        let (row, seq, col) = house_dims(60, 20);
+        assert!((4..10).contains(&row));
+        assert!((5..10).contains(&seq));
         assert!((15..=30).contains(&col));
         // degenerate sizes never panic or go to zero
-        let (top, row2, col) = house_dims(4, 4);
-        assert!(top >= 1 && row2 >= 1 && col >= 1);
+        let (row, seq, col) = house_dims(4, 4);
+        assert!(row >= 1 && seq >= 1 && col >= 1);
     }
 
     #[test]
