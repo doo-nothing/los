@@ -174,10 +174,10 @@ is a perfectly good way to bounce a jam). GitHub won't autoplay video in
 a README, so the silent looping GIF is the hero and the mp4 is the
 click-to-hear companion.
 
-To record from *your* rig instead: save a session from the conductor
-under the name `demo` and run `just demo-state`. Save-states capture the
-tmux pane layout portably, so your arrangement reproduces inside the
-recording terminal.
+To record from *your* rig instead: save a session from the conductor and
+run `just demo-state NAME`. Save-states capture the tmux pane layout
+portably, so your arrangement reproduces inside the recording terminal —
+the current README take is a curated state recorded exactly this way.
 
 ## License
 
