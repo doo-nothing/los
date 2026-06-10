@@ -12,18 +12,7 @@ process in its own tmux pane, wired together over shared memory. Edit
 patterns with vi grammar. Patch modulation like a Eurorack. No DAW, no
 plugins, no mouse required (but the mouse works too).
 
-```
-┌────────┬──────────────┬───────────────────┐
-│  Los   │              │                   │
-│ badge  │    MIXER     │                   │
-├────────┤              │                   │
-│        ├──────┬───────┤                   │
-│ scope  │VOICE │ MATHs │                   │
-│        │      │       │                   │
-├────────┴──────┴───────┴───────────────────┤
-│                SEQUENCER                   │
-└────────────────────────────────────────────┘
-```
+![a fresh los session: a pattern sketched in vi grammar, then the transport rolling](docs/demo.gif)
 
 ## Why this exists
 
@@ -147,6 +136,16 @@ division, swing).
 
 Built in Rust with [ratatui](https://ratatui.rs) + crossterm + cpal. macOS
 today (POSIX SHM + tmux; Linux should be close).
+
+## Hacking
+
+There's a [justfile](justfile): `just check` runs clippy (warnings are
+errors) and the full test suite, `just build` / `just install` do what they
+say, and `just demo` re-records the GIF above with
+[vhs](https://github.com/charmbracelet/vhs) (`brew install vhs`). The demo
+recipe spins up a real session, sketches a pattern, lets it play, and tears
+the session down — it refuses to run while a live `los` session exists, so
+it can't eat your work.
 
 ## License
 
