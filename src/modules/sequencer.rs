@@ -2913,10 +2913,27 @@ fn draw_ui(
                 format!("{}", if is_cur { theme::PLAYHEAD } else { ' ' }),
                 if is_cur { theme::chrome_hi() } else { theme::chrome() },
             ));
-            // marked tracks (X) wear a star; V-line spans light up
+            // marked tracks (X) wear a star; rows something in the rig is
+            // LISTENING to (a voice playing the notes, an envelope
+            // triggered by the output) wear ▸ — paste an empty row onto a
+            // listened position and you can see why it went quiet
             let marked = state.marks.get(ti).copied().unwrap_or(false);
+            let listened = entries.iter().any(|e| {
+                e.consumes_notes & (1u8 << ti.min(7)) != 0 && ti < 8
+                    || state.mod_base.is_some_and(|base| {
+                        let ch = base + ti;
+                        ch < 64 && e.consumes_channels & (1u64 << ch) != 0
+                    })
+            });
+            let tag = if marked {
+                '*'
+            } else if listened {
+                '▸'
+            } else {
+                ' '
+            };
             spans.push(Span::styled(
-                format!("t{}{}", ti + 1, if marked { '*' } else { ' ' }),
+                format!("t{}{}", ti + 1, tag),
                 if in_vline(ti) {
                     theme::selected()
                 } else if trk.muted {

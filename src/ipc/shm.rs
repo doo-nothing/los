@@ -1431,6 +1431,10 @@ impl Manifest {
 
                         ptr::write_unaligned(data.add(56) as *mut u32, mod_base);
                         ptr::write_unaligned(data.add(60) as *mut u32, mod_channels);
+                        // a reused slot must not inherit the previous
+                        // occupant's listening claims
+                        ptr::write_unaligned(data.add(64) as *mut u64, 0u64);
+                        ptr::write_unaligned(data.add(72), 0u8);
                     }
                     valid.store(1, Ordering::Release);
                     self.my_slot = Some(slot);
@@ -1446,6 +1450,19 @@ impl Manifest {
     /// The modbus base channel this module claimed at registration.
     pub fn claimed_base(&self) -> Option<usize> {
         self.my_mod_base
+    }
+
+    /// Publish what this module LISTENS to: a bitmap of consumed modbus
+    /// channels and a bitmap of sequencer note tracks. Display-only data
+    /// (the sequencer's who's-listening markers); torn reads are harmless.
+    pub fn publish_consumes(&mut self, channels: u64, note_tracks: u8) {
+        if let Some(slot) = self.my_slot {
+            let data = self.entry_data_ptr(slot);
+            unsafe {
+                ptr::write_unaligned(data.add(64) as *mut u64, channels);
+                ptr::write_unaligned(data.add(72), note_tracks);
+            }
+        }
     }
 
     /// Current value of the channel allocator (next free modbus channel).
@@ -1489,7 +1506,19 @@ impl Manifest {
             let raw_base = unsafe { ptr::read_unaligned(data.as_ptr().add(56) as *const u32) };
             let mod_count = unsafe { ptr::read_unaligned(data.as_ptr().add(60) as *const u32) };
             let mod_base = if raw_base == u32::MAX || mod_count == 0 { None } else { Some(raw_base as usize) };
-            result.push(ManifestEntry { module_name, instance, pid, audio_shm, mod_base, mod_count: mod_count as usize });
+            let consumes_channels =
+                unsafe { ptr::read_unaligned(data.as_ptr().add(64) as *const u64) };
+            let consumes_notes = data[72];
+            result.push(ManifestEntry {
+                module_name,
+                instance,
+                pid,
+                audio_shm,
+                mod_base,
+                mod_count: mod_count as usize,
+                consumes_channels,
+                consumes_notes,
+            });
         }
         result
     }
@@ -1504,6 +1533,10 @@ pub struct ManifestEntry {
     /// First modbus channel claimed by this module (None = claims none).
     pub mod_base: Option<usize>,
     pub mod_count: usize,
+    /// Bitmap of modbus channels this module reads (its bound sources).
+    pub consumes_channels: u64,
+    /// Bitmap of sequencer note tracks this module plays.
+    pub consumes_notes: u8,
 }
 
 #[cfg(test)]

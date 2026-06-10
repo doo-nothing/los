@@ -595,7 +595,7 @@ fn env_thread(
     let consumer_id = crate::shm::consumer_id("envelope", instance);
     let mut events = EventRingbuf::open(consumer_id).ok();
     let mut modbus = ModulationBus::open().or_else(|_| ModulationBus::create()).ok();
-    let manifest = Manifest::open().or_else(|_| Manifest::create())?;
+    let mut manifest = Manifest::open().or_else(|_| Manifest::create())?;
     let _transport = ShmTransport::open().ok();
 
     // Audio-rate output: a cycling channel is a sound source. The mixer
@@ -653,6 +653,23 @@ fn env_thread(
                 ];
                 r.signal = p.signal_src.as_ref().and_then(|a| routing::resolve(&entries, a));
             }
+            // publish consumed channels + note-track triggers for the
+            // sequencer's who's-listening markers
+            let mut channels = 0u64;
+            let mut notes = 0u8;
+            for r in resolved.iter().take(s.params.len()) {
+                for ch in r.mods.iter().flatten().chain(r.signal.iter()) {
+                    if *ch < 64 {
+                        channels |= 1 << ch;
+                    }
+                }
+                match r.trig {
+                    Some(RTrig::Edge(ch)) if ch < 64 => channels |= 1 << ch,
+                    Some(RTrig::Note(t)) if t < 8 => notes |= 1 << t,
+                    _ => {}
+                }
+            }
+            manifest.publish_consumes(channels, notes);
         }
         refresh_in -= 1;
 

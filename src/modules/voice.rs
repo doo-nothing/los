@@ -162,6 +162,15 @@ fn voice_thread(
             ch_fm = s.fm_src.as_ref().and_then(|a| routing::resolve(&entries, a));
             ch_amp = s.amp_src.as_ref().and_then(|a| routing::resolve(&entries, a));
             note_filter = s.notes_src.as_ref().and_then(routing::note_source_track);
+            // publish what this voice listens to (the sequencer's
+            // who's-listening markers read it back)
+            let channels = [ch_shape, ch_sub, ch_fm, ch_amp]
+                .iter()
+                .flatten()
+                .filter(|&&c| c < 64)
+                .fold(0u64, |m, &c| m | (1 << c));
+            let notes = note_filter.filter(|&t| t < 8).map_or(0u8, |t| 1 << t);
+            manifest.publish_consumes(channels, notes);
         }
         refresh_in -= 1;
 
