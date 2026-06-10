@@ -380,7 +380,7 @@ pub const HOUSE_TITLES: [&str; 7] =
 fn house_dims(w: usize, h: usize) -> (usize, usize, usize, usize) {
     let seq = ((h * 28) / 100).clamp(5, crate::sequencer::CONTENT_LINES);
     let top = h.saturating_sub(seq + 1);
-    let row1 = ((top * 48) / 100).clamp(8.min(top.max(1)), 24);
+    let row1 = ((top * 52) / 100).clamp(8.min(top.max(1)), 28);
     let col = (w / 4).clamp(20.min(w / 2), 48);
     let badge = ((h * 16) / 100).clamp(4, 10);
     (row1, seq, col, badge)
@@ -1259,7 +1259,7 @@ mod tests {
         // about evenly; badge + scope stack to the voices' height
         let (row1, seq, _, badge) = house_dims(180, 80);
         assert_eq!(seq, 15, "SEQ snaps to its content");
-        assert_eq!(row1, 24, "voices row takes a real share");
+        assert_eq!(row1, 28, "voices row takes a real share");
         assert_eq!(badge, 10, "badge caps at content height");
         let scope_h = row1 - badge - 1;
         assert!(scope_h >= 8, "scope still gets a usable window");
@@ -1268,7 +1268,7 @@ mod tests {
         // mid window (the gif terminal): proportional
         let (row1, seq, col, badge) = house_dims(140, 40);
         assert_eq!(seq, 11);
-        assert_eq!(row1, 13);
+        assert_eq!(row1, 14);
         assert_eq!(col, 35);
         assert_eq!(badge, 6);
         // small window: everything stays usable, nothing collapses
