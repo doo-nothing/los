@@ -1,11 +1,6 @@
-# Los
-
-```
-▗▖ ▄▄▄   ▄▄▄
-▐▌█   █ ▀▄▄
-▐▌▀▄▄▄▀ ▄▄▄▀
-▐▙▄▄▖
-```
+<p align="center">
+  <img src="docs/logo.svg" width="190" alt="Los">
+</p>
 
 **A modular groovebox that lives in your terminal.** Every module is its own
 process in its own tmux pane, wired together over shared memory. Edit
@@ -146,6 +141,21 @@ Built in Rust with [ratatui](https://ratatui.rs) + crossterm + cpal. macOS
 today (POSIX SHM + tmux; Linux should be close).
 
 ## Hacking
+
+The source is grouped by role — if you want to add a module, everything you
+touch is in `src/modules/` plus a few registration points
+([CONTRIBUTING.md](CONTRIBUTING.md) has the walkthrough):
+
+```
+src/
+  main.rs     CLI entry — dispatch, ctl, ps, record
+  modules/    the runnable panes: sequencer, voice, mixer, envelope,
+              scope, tone, badge, conductor
+  ui/         shared TUI kit: theme, vi keys, : command line, @ picker, undo
+  ipc/        POSIX shared memory (manifest, rings, modbus, transport)
+              and modulation routing
+  session/    save/load state, house layout, tmux wrapper
+```
 
 There's a [justfile](justfile): `just check` runs clippy (warnings are
 errors) and the full test suite, `just build` / `just install` do what they
