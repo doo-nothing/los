@@ -53,6 +53,7 @@ fn usage() {
     eprintln!("  los add <module> [instance]   Spawn a module in the running session");
     eprintln!("  los ps                        Inspect the live session (manifest, ring, clock)");
     eprintln!("  los relayout                  Re-apply the house layout sizes (runs on client resize)");
+    eprintln!("  los record <secs> <out.wav>   Tape out: record the master mix of the running session");
     eprintln!("  los --help                    Show this help");
     eprintln!();
     eprintln!("Modules:");
@@ -128,6 +129,33 @@ fn main() -> Result<()> {
             }
             "ctl" => ctl(args.get(2).map(|s| s.as_str()).unwrap_or("toggle")),
             "relayout" => conductor::relayout(),
+            "record" => {
+                let secs: f32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(10.0);
+                let path = args.get(3).cloned().unwrap_or_else(|| "los-tape.wav".into());
+                let abs = if std::path::Path::new(&path).is_absolute() {
+                    std::path::PathBuf::from(&path)
+                } else {
+                    std::env::current_dir()?.join(&path)
+                };
+                let abs = abs.to_string_lossy().to_string();
+                let done = format!("{abs}.done");
+                let _ = std::fs::remove_file(&done);
+                std::fs::write(state::tmp_dir().join("record.arm"), format!("{secs}\n{abs}"))?;
+                eprintln!("[los] tape armed: {secs}s -> {abs} (starts when the mixer sees it)");
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f32(secs + 20.0);
+                loop {
+                    if std::path::Path::new(&done).exists() {
+                        let _ = std::fs::remove_file(&done);
+                        eprintln!("[los] tape done: {abs}");
+                        return Ok(());
+                    }
+                    anyhow::ensure!(
+                        std::time::Instant::now() < deadline,
+                        "tape never finished — is a session (mixer) running?"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+            }
             "ps" => {
                 let m = shm::Manifest::open()
                     .map_err(|_| anyhow::anyhow!("no manifest found — is a session running?"))?;

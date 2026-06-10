@@ -4,6 +4,7 @@ version = "0.2.0"
 edition = "2021"
 
 [dependencies]
+hound = "3.5"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 anyhow = "1"

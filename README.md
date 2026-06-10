@@ -12,7 +12,10 @@ process in its own tmux pane, wired together over shared memory. Edit
 patterns with vi grammar. Patch modulation like a Eurorack. No DAW, no
 plugins, no mouse required (but the mouse works too).
 
-![a fresh los session: a pattern sketched in vi grammar, then the transport rolling](docs/demo.gif)
+![a fresh los session, one sequencer loop, seamlessly looping](docs/demo.gif)
+
+**[🔊 ten seconds with sound →](docs/demo.mp4)** — same rig, real audio
+from the mixer's tape out.
 
 ## Why this exists
 
@@ -152,12 +155,19 @@ recipe spins up a real session, lets it play, and tears the session down —
 it refuses to run while a live `los` session exists, so it can't eat your
 work.
 
-By default the demo records a fresh session and sketches a pattern on
-camera. To record *your* rig instead: arrange a session until it looks
-right, save it from the conductor under the name `demo`, close the
-session, and run `just demo`. Save-states capture the tmux pane layout in
-a portable form, so your arrangement reproduces inside the recording
-terminal (playing or stopped — the tape starts the transport itself).
+`just demo` records the out-of-the-box session and produces two files:
+`docs/demo.gif`, exactly one sequencer loop (2.0s at 120 BPM) cut on the
+loop boundary so it loops seamlessly forever, and `docs/demo.mp4`, the
+same take with real audio — recorded through `los record`, the mixer's
+tape out (`los record 16 take.wav` works against any running session, and
+is a perfectly good way to bounce a jam). GitHub won't autoplay video in
+a README, so the silent looping GIF is the hero and the mp4 is the
+click-to-hear companion.
+
+To record from *your* rig instead: save a session from the conductor
+under the name `demo` and run `just demo-state`. Save-states capture the
+tmux pane layout portably, so your arrangement reproduces inside the
+recording terminal.
 
 ## License
 
