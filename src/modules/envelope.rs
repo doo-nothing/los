@@ -829,15 +829,14 @@ fn env_thread(
                     eoc_pulse = true;
                 }
                 // audio path: attenuverted function (offsets excluded —
-                // DC). Only CYCLING channels are audio sources: a one-shot
-                // strike is a control transient, and through the DC blocker
-                // it lands in the master as a 0.5-amplitude impulse — the
-                // click heard on every triggered note.
-                if params.loop_mode {
-                    let a = ch.output * att;
-                    audio_buf[frame * 2] += a;
-                    audio_buf[frame * 2 + 1] += a;
-                }
+                // DC), one-shot strikes and all — the hardware function
+                // jack carries everything, clicks included. Opt-in lives
+                // at the MIXER: this source's fader defaults to 0 (the
+                // software equivalent of an unpatched cable), so the raw
+                // transients only reach the master when you push it up.
+                let a = ch.output * att;
+                audio_buf[frame * 2] += a;
+                audio_buf[frame * 2 + 1] += a;
             }
 
             ch_final[i] = (ch.output * att + params.offset).clamp(-1.0, 1.0);

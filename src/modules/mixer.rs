@@ -203,13 +203,18 @@ fn mixer_thread(
 
             if let Ok(ringbuf) = AudioRingbuf::open(shm_name) {
                 let label = format!("{} {}", capitalize(&entry.module_name), entry.instance);
+                // The envelope's function out carries raw control
+                // transients (zero-rise strikes = impulses). Its fader
+                // starts DOWN — like an unpatched cable on the hardware —
+                // so those clicks are opt-in, not the default mix.
+                let level = if entry.module_name == "envelope" { 0.0 } else { 0.8 };
                 inner.audio_sources.push(AudioSource {
                     shm_name: shm_name.clone(),
                     ringbuf,
                 });
                 inner.tracks.push(TrackState {
                     name: label,
-                    level: 0.8,
+                    level,
                     pan: 0.0,
                     mute: false,
                     solo: false,
