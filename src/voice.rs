@@ -390,6 +390,7 @@ fn draw_ui(
         ]);
         lines.push(Line::from(lpg_spans));
 
+        theme::anchor_bottom(&mut lines, area.height as usize, 4);
         lines.push(theme::rule(w));
 
         // live output line (AUDIO hue)

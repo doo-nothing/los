@@ -1181,6 +1181,10 @@ fn draw_ui(
             lines.push(Line::from(spans));
         }
 
+        // pin the command block (rule + detail strip + rule + status) to
+        // the pane bottom; spare height lands here, between the tracks
+        // and the detail strip, instead of dangling below the status bar
+        theme::anchor_bottom(&mut lines, area.height as usize, 6);
         lines.push(theme::rule(w));
 
         // ── detail strip: current track, three rows ─────────────────────

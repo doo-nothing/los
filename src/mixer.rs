@@ -382,6 +382,7 @@ fn draw_ui(
         ]);
         lines.push(Line::from(mspans));
 
+        theme::anchor_bottom(&mut lines, area.height as usize, 2);
         lines.push(theme::rule(w));
         lines.push(theme::status("NORMAL", overlay.unwrap_or(""), "", w));
 

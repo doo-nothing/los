@@ -199,6 +199,16 @@ fn shade(c: Color, f: f32) -> Color {
     }
 }
 
+/// Pad `lines` with blanks so the next `bottom` lines render flush with
+/// the pane's bottom edge — vim-style: content at the top, the command /
+/// status block pinned to the bottom, flex in between. No-op when the
+/// pane is already full.
+pub fn anchor_bottom(lines: &mut Vec<Line<'static>>, height: usize, bottom: usize) {
+    while lines.len() + bottom < height {
+        lines.push(Line::default());
+    }
+}
+
 /// Bar width for a pane `w` columns wide with `reserved` columns of
 /// labels/readouts beside the bar. Scales with the pane (instead of
 /// pinning to a fixed width) so wide panes fill with slider instead of
@@ -401,5 +411,16 @@ mod tests {
         // can't toggle COLORTERM safely in-process; just exercise the calls
         let _ = (bg(), ink(), ink_dim(), amber(), amber_hi());
         let _ = (note(), cv(), audio(), clock(), alert());
+    }
+
+    #[test]
+    fn anchor_bottom_fills_exactly() {
+        let mut lines: Vec<Line> = vec![Line::default(); 5];
+        anchor_bottom(&mut lines, 20, 6);
+        assert_eq!(lines.len(), 14, "5 content + 9 filler + 6 bottom = 20");
+        // already-full pane: untouched
+        let mut full: Vec<Line> = vec![Line::default(); 30];
+        anchor_bottom(&mut full, 20, 6);
+        assert_eq!(full.len(), 30);
     }
 }
