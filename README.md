@@ -96,9 +96,3 @@ the GIF/mp4 above ([vhs](https://github.com/charmbracelet/vhs) + ffmpeg);
 `just demo-state NAME` records from your own saved session instead.
 `los record 16 take.wav` bounces the master mix of any running session.
 
-## License
-
-[AGPL-3.0-or-later](LICENSE) — use it, fork it, learn from it; if you
-distribute or serve a modified Los, share the source.
-
-Copyright © 2026 doo-nothing / AU Supply
