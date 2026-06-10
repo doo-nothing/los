@@ -1034,9 +1034,16 @@ fn draw_ui(
                     .min(trk.length - visible)
             };
             let mut spans: Vec<Span> = Vec::with_capacity(visible + 10);
+            // the track label wears its source-identity color — the same hue
+            // any param bound to this track shows on its bar
+            let cable = theme::source_color(&format!("sequencer/0/t{}", ti + 1));
             spans.push(Span::styled(
-                format!("{}t{} ", if is_cur { theme::PLAYHEAD } else { ' ' }, ti + 1),
+                format!("{}", if is_cur { theme::PLAYHEAD } else { ' ' }),
                 if is_cur { theme::chrome_hi() } else { theme::chrome() },
+            ));
+            spans.push(Span::styled(
+                format!("t{} ", ti + 1),
+                if trk.muted { theme::dim() } else { theme::signal(cable) },
             ));
             spans.push(Span::styled(
                 if start > 0 { "‹" } else { " " }.to_string(),

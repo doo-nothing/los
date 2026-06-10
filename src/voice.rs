@@ -294,6 +294,7 @@ fn draw_ui(
             }
         };
 
+        let bar_w = (w.saturating_sub(24)).clamp(8, 22);
         // value gauges with mod ghosts (§5)
         let value_rows = [
             (0usize, "shape", state.shape, &state.shape_src, ghosts[0]),
@@ -302,12 +303,16 @@ fn draw_ui(
         ];
         for (row, name, set, src, ghost) in value_rows {
             let mut spans = vec![label(row, name)];
-            spans.extend(theme::param_dots(set, ghost));
+            let hue = match src {
+                Some(a) => theme::source_color(&a.to_string()),
+                None => theme::amber(),
+            };
+            spans.extend(theme::bar(set, ghost, bar_w, hue));
             spans.push(Span::styled(format!(" {:.2}", set), theme::value()));
             if let Some(a) = src {
                 spans.push(Span::styled(
                     format!(" {}{}", theme::BIND, a.output),
-                    theme::signal(theme::cv()),
+                    theme::signal(theme::source_color(&a.to_string())),
                 ));
             }
             lines.push(Line::from(spans));
@@ -325,21 +330,21 @@ fn draw_ui(
         lines.push(Line::from(vec![
             label(4, "amp"),
             match &state.amp_src {
-                Some(a) => Span::styled(format!("{}{}", theme::BIND, a), theme::signal(theme::cv())),
+                Some(a) => Span::styled(format!("{}{}", theme::BIND, a), theme::signal(theme::source_color(&a.to_string()))),
                 None => Span::styled("unbound = 1.0".to_string(), theme::dim()),
             },
         ]));
         lines.push(Line::from(vec![
             label(5, "notes"),
             match &state.notes_src {
-                Some(a) => Span::styled(format!("{}{}", theme::BIND, a), theme::signal(theme::note())),
+                Some(a) => Span::styled(format!("{}{}", theme::BIND, a), theme::signal(theme::source_color(&a.to_string()))),
                 None => Span::styled("all tracks".to_string(), theme::dim()),
             },
         ]));
 
         // LPG
         let mut lpg_spans = vec![label(6, "lpg")];
-        lpg_spans.extend(theme::param_dots(state.lpg, None));
+        lpg_spans.extend(theme::bar(state.lpg, None, bar_w, theme::audio()));
         lpg_spans.extend(vec![
             Span::styled(format!(" {:.2}", state.lpg), theme::value()),
             Span::styled(

@@ -105,21 +105,76 @@ pub fn meter_char(level: f32) -> char {
     METER[idx.min(7)]
 }
 
-/// Compact param indicator (sliders, take five — the keeper): one bone
-/// meter glyph for the set position and, when modulated, a live teal glyph
-/// beside it that bounces with the signal. The number next door carries the
-/// precision; these carry the gestalt. Same vocabulary as the MATHs
-/// overview meters.
-pub fn param_dots(set: f32, live: Option<f32>) -> Vec<Span<'static>> {
-    let mut v = vec![Span::styled(meter_char(set).to_string(), value())];
-    match live {
-        Some(l) => v.push(Span::styled(meter_char(l).to_string(), signal(cv()))),
-        None => v.push(Span::raw(" ".to_string())),
+/// Identity palette for modulation sources — patch-cable colors. A source
+/// address hashes to a stable hue; everything wired to it wears the same
+/// color (the param's bar, the ⌁tag, the source's own label in its pane).
+const SOURCE_PALETTE: [(u8, u8, u8, u8); 8] = [
+    (0xe0, 0x76, 0x3a, 166), // coral
+    (0x3f, 0xc9, 0xb0, 79),  // teal
+    (0x8f, 0xbf, 0x4d, 107), // moss
+    (0xc4, 0x5d, 0xd4, 170), // orchid
+    (0x5f, 0xa8, 0xd3, 74),  // sky
+    (0xd9, 0xa4, 0x41, 179), // gold
+    (0xd3, 0x6a, 0x8a, 168), // rose
+    (0x9a, 0xa8, 0x6a, 143), // sage
+];
+
+/// Stable identity color for a source address ("sequencer/0/t3", …).
+pub fn source_color(addr: &str) -> Color {
+    let h: usize = addr.bytes().map(|b| b as usize).sum::<usize>() % SOURCE_PALETTE.len();
+    let (r, g, b, idx) = SOURCE_PALETTE[h];
+    if truecolor() {
+        Color::Rgb(r, g, b)
+    } else {
+        Color::Indexed(idx)
     }
-    v
 }
 
-/// A segmented switch: every option visible, the active one carved out in
+fn shade(c: Color, f: f32) -> Color {
+    match c {
+        Color::Rgb(r, g, b) => Color::Rgb(
+            (r as f32 * f) as u8,
+            (g as f32 * f) as u8,
+            (b as f32 * f) as u8,
+        ),
+        other => other,
+    }
+}
+
+/// The bar (sliders, take six): half-height fill `▄` that GLOWS — a
+/// truecolor gradient rising toward the tip — with a quarter-block tip for
+/// half-cell resolution, a faint `▁` rail, and a bone ghost `▴` at the live
+/// modulated position. Pass the binding's [`source_color`] as `hue` (amber
+/// when unbound): the bar wears its cable's color.
+pub fn bar(set: f32, live: Option<f32>, width: usize, hue: Color) -> Vec<Span<'static>> {
+    let width = width.max(4);
+    let subs = (set.clamp(0.0, 1.0) * (2 * width) as f32).round() as usize;
+    let ghost = live.map(|v| ((v.clamp(0.0, 1.0)) * (width - 1) as f32).round() as usize);
+    let fill_cells = (subs as f32 / 2.0).max(1.0);
+    (0..width)
+        .map(|i| {
+            if ghost == Some(i) {
+                return Span::styled(GHOST.to_string(), value());
+            }
+            let lit = subs.saturating_sub(i * 2).min(2);
+            match lit {
+                2 => {
+                    let f = 0.55 + 0.45 * ((i + 1) as f32 / fill_cells).min(1.0);
+                    Span::styled("▄".to_string(), Style::default().fg(shade(hue, f)))
+                }
+                1 => Span::styled("▖".to_string(), Style::default().fg(hue)),
+                _ => Span::styled("▁".to_string(), dim()),
+            }
+        })
+        .collect()
+}
+
+/// Plain-string form of [`bar`] for tests.
+pub fn bar_str(set: f32, live: Option<f32>, width: usize) -> String {
+    bar(set, live, width, amber()).iter().map(|s| s.content.clone()).collect()
+}
+
+/// A segmented switch:/// A segmented switch: every option visible, the active one carved out in
 /// an inverse block — a hardware toggle, not a blind cycle.
 pub fn segments(options: &[&str], active: usize) -> Vec<Span<'static>> {
     let mut spans = Vec::with_capacity(options.len() * 2);
@@ -141,10 +196,6 @@ pub fn segments_str(options: &[&str], active: usize) -> String {
     segments(options, active).iter().map(|s| s.content.clone()).collect()
 }
 
-/// Plain-string form of [`param_dots`] for tests.
-pub fn param_dots_str(set: f32, live: Option<f32>) -> String {
-    param_dots(set, live).iter().map(|s| s.content.clone()).collect()
-}
 
 // ── pane anatomy ────────────────────────────────────────────────────────────
 
@@ -209,11 +260,28 @@ mod tests {
     }
 
     #[test]
-    fn param_dots_show_set_and_live() {
-        assert_eq!(param_dots_str(0.0, None), "▁ ");
-        assert_eq!(param_dots_str(1.0, None), "█ ");
-        assert_eq!(param_dots_str(1.0, Some(0.2)), "█▂", "live glyph beside the set one");
-        assert_eq!(param_dots_str(0.5, Some(0.5)).chars().count(), 2);
+    fn bar_fills_with_tip_rail_and_ghost() {
+        assert_eq!(bar_str(1.0, None, 4), "▄▄▄▄");
+        assert_eq!(bar_str(0.0, None, 4), "▁▁▁▁", "empty = faint rail");
+        let g = bar_str(0.5, None, 8);
+        assert_eq!(&g[..], "▄▄▄▄▁▁▁▁");
+        assert_eq!(
+            bar_str(0.31, None, 8).chars().nth(2),
+            Some('▖'),
+            "quarter-block tip = half-cell resolution"
+        );
+        let g = bar_str(0.25, Some(1.0), 8);
+        assert_eq!(g.chars().last(), Some(GHOST), "ghost at the live position");
+        assert_eq!(g.chars().count(), 8);
+    }
+
+    #[test]
+    fn source_colors_are_stable_and_spread() {
+        assert_eq!(source_color("sequencer/0/t1"), source_color("sequencer/0/t1"));
+        let distinct: std::collections::HashSet<String> = (1..=8)
+            .map(|i| format!("{:?}", source_color(&format!("sequencer/0/t{}", i))))
+            .collect();
+        assert!(distinct.len() >= 4, "neighboring tracks mostly differ: {}", distinct.len());
     }
 
     #[test]

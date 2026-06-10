@@ -818,6 +818,7 @@ fn draw_ui(
     overlay: Option<&str>,
     picker: Option<(Vec<String>, usize)>,
     ghosts: &[Option<f32>; 4],
+    instance: usize,
     bpm: f32,
     playing: bool,
 ) -> Result<()> {
@@ -847,7 +848,12 @@ fn draw_ui(
                 Stage::Sustain => theme::SUSTAIN_BAR,
                 Stage::Off => ' ',
             };
-            let style = if i == cur { theme::chrome_hi() } else { theme::chrome() };
+            let cable = theme::source_color(&format!("envelope/{}/ch{}", instance, i + 1));
+            let style = if i == cur {
+                theme::signal(cable).add_modifier(ratatui::style::Modifier::BOLD)
+            } else {
+                theme::signal(cable)
+            };
             ov.push(Span::styled(format!(" C{}", i + 1), style));
             ov.push(Span::styled(
                 theme::meter_char(ch.output.abs()).to_string(),
@@ -881,6 +887,7 @@ fn draw_ui(
         lines.push(theme::rule(w));
 
         // ── detail: the current channel with real sliders ───────────────
+        let bar_w = (w.saturating_sub(26)).clamp(8, 22);
         let trig_text = match &p.trigger {
             Trigger::Any => String::from("any note"),
             Trigger::Off => String::from("off"),
@@ -920,12 +927,16 @@ fn draw_ui(
         ];
         for (row, name, set, disp, ghost, src) in rows {
             let mut spans = vec![row_label(row, name)];
-            spans.extend(theme::param_dots(set, ghost));
+            let hue = match src {
+                Some(Some(a)) => theme::source_color(&a.to_string()),
+                _ => theme::amber(),
+            };
+            spans.extend(theme::bar(set, ghost, bar_w, hue));
             spans.push(Span::styled(format!(" {:>7}", disp), theme::value()));
             if let Some(Some(a)) = src {
                 spans.push(Span::styled(
                     format!(" {}{}", theme::BIND, a.output),
-                    theme::signal(theme::cv()),
+                    theme::signal(theme::source_color(&a.to_string())),
                 ));
             }
             lines.push(Line::from(spans));
@@ -1126,7 +1137,7 @@ pub fn run(instance: usize) -> Result<()> {
             ex_msg.clone()
         };
         let picker_rows = if picker.is_active() { Some(picker.rows()) } else { None };
-        draw_ui(&mut terminal, &current_state, selected, show_help, overlay.as_deref(), picker_rows, &ghosts, bpm, playing)?;
+        draw_ui(&mut terminal, &current_state, selected, show_help, overlay.as_deref(), picker_rows, &ghosts, instance, bpm, playing)?;
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
