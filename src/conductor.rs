@@ -429,6 +429,9 @@ fn build_house_layout(exe: &str) -> Result<()> {
         &format!("{} badge 0", exe),
     ])?;
     let badge = badge.trim().to_string();
+    // the base pane never got a command — it still runs the login shell;
+    // every other pane spawned its module via split-window
+    tmux_cmd(&["respawn-pane", "-k", "-t", &scope, &format!("{} scope 0", exe)])?;
 
     for (id, title) in [
         (seq.as_str(), "SEQ"),
