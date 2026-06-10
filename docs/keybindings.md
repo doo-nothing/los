@@ -75,7 +75,7 @@ The full feature tour lives in [sequencer.md](sequencer.md).
 |-----|--------|--------|
 | `x` | cut current step into register (normal + insert) | ✅ |
 | `y` | yank current step (insert mode; in normal mode `y` is the operator) | ✅ |
-| `p` | paste register **into** the track at the cursor — steps overwrite on the fixed grid; a yanked **track** contributes its pattern's steps the same way | ✅ |
+| `p` | paste register **into** the row(s) at the cursor — steps overwrite on the fixed grid; a multi-track yank **block-pastes** down successive rows | ✅ |
 | `P` | paste before — the overwrite ends at the cursor | ✅ |
 | `gp` / `gP` | materialize the register as a **new track** after / before (a 3-step yank becomes a 3-step polymeter track) | ✅ |
 | `#p` / `#gp` | paste # times / insert # tracks (vi idiom) | ✅ |
@@ -128,7 +128,7 @@ The full feature tour lives in [sequencer.md](sequencer.md).
 
 | Key | Action |
 |-----|--------|
-| `q{a-z}` … `q` | record a macro: semantic commands (mute, pattern switch, cycle, scale, fill, bpm), not keystrokes |
+| `q{a-z}` … `q` | record a macro: EVERYTHING undoable records as absolute state (step edits, sweeps merged, euclid, mute, slots, cycle, scale, fill, bpm); track lifecycle + lane edits don't |
 | `@{a-z}` / `@@` | fire a macro (quantized per its `quant`: now/beat/bar/end; immediate when stopped) / refire the last |
 | lane `@a` | assign macro a to the lane slot under the cursor |
 | lane `x`/`d` `y` `p` `D` | cut / yank / paste (counts tile — `4p` = four bars) / wipe the lane |
@@ -155,6 +155,7 @@ The full feature tour lives in [sequencer.md](sequencer.md).
 | `:q!` | quit, discard changes |
 | `:x` / `:wq` | save patch and quit |
 | `:set <key> <value>` | module settings: sequencer `bpm`, `pulses`, `length`, `rotation`, `cycle <mode>`, `root <note>`; others as they grow |
+| ex line extras | command/value completion menus (`Tab` cycles, `↓`/`↑` browse + AUDITION in the sequencer), `↑` history when no menu row is selected — all modules |
 | `:scale <name>` | retune track(s): 139 built-ins, `off` = chromatic, `root <note>`, or a `.scl` file path (Scala import) — sequencer |
 | `:fill <kind> [arg]` | auto-fill: `mutate density markov cantor thuemorse fibonacci sierpinski` — sequencer |
 | `:macro [a] [= …]` | list / show / write macros (`pat 2 b \| mute 3 \| quant beat`) — sequencer |

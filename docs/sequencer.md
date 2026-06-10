@@ -30,8 +30,13 @@ A *word* below means a run of consecutive active steps — `w`/`b`/`e` and
 The track info column reads: length, Euclidean pulses/rotation, then only
 what's non-default — `"b` active pattern slot, a cycle-mode glyph
 (`← ↔ ? ~ ½ ◎ #`), `♪dori` scale tag, `⌁` modulation mode, `M` muted.
-A `*` after the track number is a mark. Steps with a mod cable patched in
-are underlined.
+A `*` after the track number is a mark; a `▸` means something in the rig
+is **listening** to that row (a voice playing its notes, an envelope
+triggered by its output) — if a listened row goes quiet, the music
+sitting on it is the reason. Steps with a mod cable patched in are
+underlined in the cable's color. The playhead trail follows the steps a
+track actually visited, so reverse/spiral/random motion reads correctly;
+`?` has the cycle-glyph legend.
 
 ## Value layers
 
@@ -118,9 +123,13 @@ picker (the same one voice uses) and plugs the cable:
 - on `'m`: it offsets the **mod value**
 
 `gB` unplugs. `(` / `)` dial the amount (±0.05 steps, counts work,
-clamped ±2). Bound steps are underlined; the detail strip shows the cable.
-The source is read at trigger time from the modbus — an envelope, another
-sequencer track's output, anything in the manifest. Yes, a track can
+clamped ±2). The cable is **visible**: bound steps wear an underline in
+the source's cable color, the detail strip's value row breathes with the
+live source (`50→82%` updating in real time on the matching layer), and
+parking the cursor on a bound step spells it out in the modeline
+(`← envelope/0/ch1 ×0.75`). The source is read at trigger time from the
+modbus — an envelope, another sequencer track's output, anything in the
+manifest. Yes, a track can
 modulate its own steps' probability with its neighbor's output. The
 sequencer is now both a producer *and consumer* of modulation.
 
@@ -138,6 +147,10 @@ A pattern is steps + length + pulses + rotation; the scale and cycle mode
 belong to the *track* and apply to all its slots. Switching is undoable
 and macro-recordable.
 
+The detail strip's number row carries a **slot chip** — `a b c d e f g h`
+with the active slot highlighted and slots holding content lit — so an
+empty slot reads as "empty slot," not as your pattern vanishing.
+
 ## Multi-select
 
 Two mechanisms, freely combined:
@@ -148,10 +161,13 @@ Two mechanisms, freely combined:
 - `X` — toggles a persistent **mark** on the current track (`t3*` in the
   gutter); `gX` clears all marks. Non-consecutive selection, dired-style.
 
-Every track-level edit and step edit fans out: **V-line span beats marks
-beats current track**, and a fanned-out edit is ONE undo entry. Yanks and
-pastes never fan out. A register-filling delete across a multi-select
-leaves the register holding the last target's steps.
+Every edit fans out: **V-line span beats marks beats current track**,
+and a fanned-out edit is ONE undo entry. **Yank fans out too**: `y` over
+three marked tracks reports `3 tracks yanked`; `p` then **block-pastes**
+them down successive rows from the cursor, and `gp` re-inserts all three
+as new tracks. A multi-track delete leaves everything it removed in the
+register, row order intact. (A step-range delete across a multi-select
+still keeps only the last target's steps.)
 
 ## Auto-fill
 
@@ -168,19 +184,48 @@ leaves the register holding the last target's steps.
 gesture. `.` repeats it with the *same* seed, exactly. All fills are
 plain undoable edits.
 
+## The command bar
+
+`:` is more than a prompt. Typing hints commands (`:sc` shows `scale`),
+`Tab` completes — longest common prefix first, then cycling — and
+**value positions get a menu**: `:scale ` lists all 139 scales,
+`:fill ` its seven generators, `:set cycle ` the eight playhead modes,
+`:e ` your patches.
+
+The arrow keys are the explorer: `↓` enters the menu and **auditions**
+the highlighted value live — scales retune the playing track as you
+scroll, fills regenerate the pattern (same seed while you browse), cycle
+modes flip. `Enter` keeps what you hear (one undo entry), `Esc` or more
+typing reverts it exactly. Typing, `Tab`, and `Enter` never audition —
+if you know what you want, nothing plays under you.
+
+`↑` with no menu row selected recalls command history.
+
 ## Macros — sequencing the sequencer
 
 vi's macro surface, pointed at performance:
 
-- `qa` … `q` records macro **a**. What's recorded is **semantic
-  commands** — mute/unmute, pattern switches, cycle modes, scales, fills,
-  bpm — not keystrokes. Step edits don't record (they have `.`).
+- `qa` … `q` records macro **a**. **Everything you can undo records** —
+  step toggles, value sweeps (a held `k` records once, as its final
+  value), euclid changes, mutes, pattern switches, cycle modes, scales,
+  fills, bpm. Recording captures *absolute results*, not keystrokes, so
+  replays are exact. The modeline counter ticks on every captured
+  command: `rec @a [4]`.
+- **The one thing to understand:** recording performs your actions live.
+  After `qa m q`, track 1 IS muted — so firing `@a` right away changes
+  nothing, and the modeline says so: `@a: no change`. The idiom: record
+  the gesture, hit `u` a few times to rewind its live effects, keep the
+  macro for later. (And don't record a toggle twice — `mute, unmute`
+  nets to nothing forever.)
 - `@a` fires it, **quantized**: the modeline shows `…@a` until the
-  boundary lands. `@@` refires the last one. Fired macros are one undo
-  entry — `u` takes the whole gesture back.
+  boundary lands, then flashes `@a`. `@@` refires the last one. Fired
+  macros are one undo entry — `u` takes the whole gesture back — and a
+  macro fired while you're recording another does NOT leak into it.
 - Each macro has a quantize: `now`, `beat`, `bar` (default), or `end`
   (the first affected track's pattern boundary).
 - When the transport is stopped, macros fire immediately.
+- Not recorded, on purpose: making/deleting/pasting tracks, lane edits,
+  slot save-as. Macros perform on the music that exists.
 
 `:macro` lists what's defined. `:macro a` shows a macro as text.
 `:macro a = pat 2 b | mute 3 | xpose 1 +7 | quant beat` writes one by
@@ -195,8 +240,14 @@ rot <t> <±n>       rotate the pattern
 scale <t> <name>   retune (library names; "off" = chromatic)
 fill <t> <kind> [arg]
 bpm <n>
+step <t> <n> on|off
+euclid <t> <pulses> <length> <rotation>
+mode <t> note|mod
 quant now|beat|bar|end
 ```
+
+Recorded step edits display as `edit 2 @5 ×3` (absolute snapshots) and
+can only come from `q` — they're not hand-writable.
 
 ### The macro lane
 
