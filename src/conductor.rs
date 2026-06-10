@@ -187,7 +187,7 @@ fn install_transport_keys(exe: &str) {
 }
 
 /// Module types the conductor (and `los add`) can spawn at runtime.
-pub const ADDABLE_MODULES: &[&str] = &["voice", "envelope", "sequencer", "scope", "tone"];
+pub const ADDABLE_MODULES: &[&str] = &["voice", "envelope", "sequencer", "scope", "tone", "badge"];
 
 /// Spawn a new module instance in a fresh pane of the modules window.
 /// Picks the next free instance number from the manifest when not given.
@@ -247,6 +247,90 @@ pub fn remove_module(module: &str, instance: usize) -> Result<()> {
     anyhow::bail!("no pane titled '{}' found", title)
 }
 
+/// Theme the tmux shell itself (design-language.md §8): dim ink borders,
+/// amber active edge, brand-voice status bar. Session-scoped options only —
+/// other tmux sessions keep their look.
+fn install_shell_theme() {
+    let t = |args: &[&str]| tmux_cmd_ok(args);
+    t(&["set-option", "-w", "-t", "los:modules", "pane-border-style", "fg=#4a4438,bg=#070605"]);
+    t(&["set-option", "-w", "-t", "los:modules", "pane-active-border-style", "fg=#e3a818,bold,bg=#1b1610"]);
+    t(&["set-option", "-w", "-t", "los:modules", "pane-border-format", " #{pane_title} "]);
+    t(&["set-option", "-t", "los", "status-style", "fg=#9a7b2d,bg=#0d0b08"]);
+    t(&["set-option", "-t", "los", "status-left", "#[fg=#e3a818,bold] los #[fg=#9a7b2d]· "]);
+    t(&["set-option", "-t", "los", "status-right", "#[fg=#c45dd4]♪ #{session_name} "]);
+    t(&["set-option", "-t", "los", "window-status-current-style", "fg=#e8dcc8,bold"]);
+    t(&["set-option", "-t", "los", "window-status-style", "fg=#7d7363"]);
+    // Active-pane clarity: inactive panes sink into near-black with dimmed
+    // ink; the active pane sits on a clearly lifted warm charcoal with full
+    // ink — plus the bold amber border. Unmissable.
+    t(&["set-option", "-w", "-t", "los:modules", "window-style", "fg=#8d8170,bg=#070605"]);
+    t(&["set-option", "-w", "-t", "los:modules", "window-active-style", "fg=#e8dcc8,bg=#1b1610"]);
+}
+
+/// Build the default window layout:
+///   ┌──────┬───────────────┐
+///   │ los  │               │
+///   ├──────┤      MIX      │
+///   │SCOPE │               │
+///   ├──────┴──┬────────────┤
+///   │  VOICE  │   MATHs    │
+///   ├─────────┴────────────┤
+///   │         SEQ          │
+///   └──────────────────────┘
+fn build_house_layout(exe: &str) -> Result<()> {
+    let win = "los:modules";
+    tmux_cmd(&["new-window", "-t", "los", "-n", "modules"])?;
+    tmux_cmd(&["set-option", "-w", "-t", win, "pane-border-status", "top"])?;
+    tmux_cmd(&["set-option", "-w", "-t", win, "pane-border-format", " #{pane_title} "])?;
+
+    // the window's first pane becomes SEQ (bottom) after the splits
+    let seq = tmux_cmd(&["list-panes", "-t", win, "-F", "#{pane_id}"])?
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    // top block (rows 1+2) above SEQ: 60% of the window; row 1 = mixer
+    let row1 = tmux_cmd(&[
+        "split-window", "-t", &seq, "-v", "-b", "-l", "60%", "-P", "-F", "#{pane_id}",
+        &format!("{} mixer 0", exe),
+    ])?;
+    let row1 = row1.trim().to_string();
+    // row 2 under row 1: voice | maths
+    let voice = tmux_cmd(&[
+        "split-window", "-t", &row1, "-v", "-l", "50%", "-P", "-F", "#{pane_id}",
+        &format!("{} voice 0", exe),
+    ])?;
+    let voice = voice.trim().to_string();
+    let maths = tmux_cmd(&[
+        "split-window", "-t", &voice, "-h", "-l", "50%", "-P", "-F", "#{pane_id}",
+        &format!("{} envelope 0", exe),
+    ])?;
+    // row 1 left column: badge over scope
+    let badge = tmux_cmd(&[
+        "split-window", "-t", &row1, "-h", "-b", "-l", "48", "-P", "-F", "#{pane_id}",
+        &format!("{} badge 0", exe),
+    ])?;
+    let badge = badge.trim().to_string();
+    let scope = tmux_cmd(&[
+        "split-window", "-t", &badge, "-v", "-l", "50%", "-P", "-F", "#{pane_id}",
+        &format!("{} scope 0", exe),
+    ])?;
+    tmux_cmd(&["respawn-pane", "-k", "-t", &seq, &format!("{} sequencer 0", exe)])?;
+
+    for (id, title) in [
+        (seq.as_str(), "SEQ"),
+        (row1.as_str(), "MIX"),
+        (voice.as_str(), "VOICE"),
+        (maths.trim(), "MATHs"),
+        (badge.as_str(), "los"),
+        (scope.trim(), "SCOPE"),
+    ] {
+        tmux_cmd_ok(&["select-pane", "-t", id, "-T", title]);
+    }
+    tmux_cmd_ok(&["select-pane", "-t", &seq]);
+    Ok(())
+}
+
 pub fn create_session() -> Result<()> {
     state::ensure_dirs()?;
     let _ = tmux_cmd(&["kill-session", "-t", "los"]);
@@ -262,19 +346,18 @@ pub fn create_session() -> Result<()> {
     }
     
     // Spawn module panes (each with instance 0 by default)
-    let modules = [
-        ("sequencer 0", "Sequencer 0"),
-        ("voice 0", "Voice 0"),
-        ("mixer 0", "Mixer 0"),
-        ("scope 0", "Scope 0"),
-        ("envelope 0", "Envelope 0"),
-    ];
-    spawn_session_panes(&modules)?;
-
-    // Apply default tiled layout
-    tmux_cmd(&["select-layout", "-t", "los:modules", "tiled"])?;
+    // The house layout:
+    //   ┌───────┬─────────┬─────────┬───────┐
+    //   │ los   │         │         │       │
+    //   ├───────┤  VOICE  │  MATHs  │  MIX  │
+    //   │ SCOPE │         │         │       │
+    //   ├───────┴─────────┴─────────┴───────┤
+    //   │               SEQ                 │
+    //   └───────────────────────────────────┘
+    build_house_layout(&exe)?;
 
     install_transport_keys(&exe);
+    install_shell_theme();
 
     // Attach (blocks until detached; use raw .status())
     let _ = Command::new("tmux")
@@ -370,6 +453,7 @@ pub fn load_session(state_path: &str) -> Result<()> {
     }
 
     install_transport_keys(&exe);
+    install_shell_theme();
 
     let _ = Command::new("tmux")
         .args(["attach-session", "-t", "los"])

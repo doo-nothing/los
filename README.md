@@ -4,12 +4,10 @@ A console-based groovebox/synth workstation. Every module runs in its own
 `tmux` pane. Process isolation. Unix pipes. Keyboard-driven.
 
 ```
-                     ___
-                    / _ \
- _ __    ___   ___ | | | |
-| '_ \  / _ \ / _ \| | | |
-| | | || (_) | (_) \ \_/ /
-|_| |_| \___/ \___/ \___/
+▗▖ ▄▄▄   ▄▄▄
+▐▌█   █ ▀▄▄
+▐▌▀▄▄▄▀ ▄▄▄▀
+▐▙▄▄▖
 ```
 
 ## Quick start

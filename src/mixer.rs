@@ -10,8 +10,7 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::Rect,
-    style::{Color, Style},
+    style::Style,
     text::Line,
     widgets::{Block, Borders, Paragraph},
     Terminal,
@@ -89,14 +88,23 @@ fn mixer_thread(
                         .map(|t| (t.level, t.mute))
                         .collect();
 
+                    let mut track_peaks = vec![0.0f32; inner.audio_sources.len()];
                     for (i, source) in inner.audio_sources.iter_mut().enumerate() {
                         if i >= track_info.len() { break; }
                         if track_info[i].1 { continue; }
                         let track_level = track_info[i].0;
                         if let Ok(true) = source.ringbuf.read(&mut voice_buf[..slot_len]) {
                             for j in 0..slot_len {
-                                data[written + j] += voice_buf[j] * track_level;
+                                let s = voice_buf[j] * track_level;
+                                data[written + j] += s;
+                                track_peaks[i] = track_peaks[i].max(s.abs());
                             }
+                        }
+                    }
+                    for (i, &p) in track_peaks.iter().enumerate() {
+                        if let Some(t) = inner.tracks.get_mut(i) {
+                            // peak with ~decay so the meters breathe
+                            t.meter = p.max(t.meter * 0.92);
                         }
                     }
 
@@ -303,100 +311,107 @@ fn draw_ui(
     selected: usize,
     show_help: bool,
     overlay: Option<&str>,
+    bpm: f32,
+    playing: bool,
 ) -> Result<()> {
+    use crate::theme;
+    use ratatui::text::Span;
+
     terminal.draw(|f| {
         let area = f.area();
-        let num_tracks = tracks.len();
-        let track_width = if num_tracks > 0 {
-            area.width / (num_tracks as u16 + 1)
-        } else {
-            area.width
-        };
+        let w = area.width as usize;
+        let mut lines: Vec<Line> = Vec::new();
 
-        for (i, track) in tracks.iter().enumerate() {
-            let is_selected = selected == i;
+        let _ = (bpm, playing);
+        lines.push(theme::header("MIX", &format!("{}ch", tracks.len()), "", w));
 
-            let x = i as u16 * track_width;
-            let rect = Rect::new(x, 0, track_width, area.height);
-
-            let style = if is_selected {
-                Style::default().fg(Color::Yellow)
+        let bar_w = (w.saturating_sub(28)).clamp(8, 22);
+        // channel strips as dense rows: name · meter · level gauge · pan · M/S
+        for (i, t) in tracks.iter().enumerate() {
+            let sel = i == selected;
+            let name_style = if sel { theme::selected() } else { theme::chrome() };
+            let mut spans: Vec<Span> = vec![Span::styled(format!(" {:<9}", t.name), name_style)];
+            // live meter (AUDIO hue), drained when muted
+            let m = if t.mute { 0.0 } else { t.meter };
+            spans.push(Span::styled(
+                format!("{} ", theme::meter_char(m)),
+                theme::signal(theme::audio()),
+            ));
+            if t.mute {
+                spans.push(Span::styled(theme::bar_str(t.level, None, bar_w), theme::dim()));
             } else {
-                Style::default().fg(Color::White)
+                spans.extend(theme::bar(t.level, None, bar_w, theme::audio()));
+            }
+            spans.push(Span::styled(format!(" {:>3.0}%", t.level * 100.0), theme::value()));
+            let pan = if t.pan.abs() < 0.05 {
+                String::from(" ·")
+            } else if t.pan < 0.0 {
+                format!(" ‹{:.0}", t.pan.abs() * 100.0)
+            } else {
+                format!(" {:.0}›", t.pan * 100.0)
             };
-
-            let mute_str = if track.mute { "M" } else { " " };
-            let solo_str = if track.solo { "S" } else { " " };
-
-            let track_text = format!(
-                "{} [{}{}]\nL:{:.0}%\nP:{:+.0}\n\n{:.0}%",
-                track.name,
-                mute_str,
-                solo_str,
-                track.level * 100.0,
-                track.pan * 100.0,
-                track.meter * 100.0
-            );
-
-            let track_widget = Paragraph::new(track_text).style(style);
-            f.render_widget(track_widget, rect);
+            spans.push(Span::styled(pan, theme::dim()));
+            if t.mute {
+                spans.push(Span::styled(" M", theme::signal(theme::alert())));
+            }
+            if t.solo {
+                spans.push(Span::styled(" S", theme::signal(theme::clock())));
+            }
+            lines.push(Line::from(spans));
         }
 
-        let master_x = if num_tracks > 0 {
-            num_tracks as u16 * track_width
-        } else {
-            0
-        };
-        let master_rect = Rect::new(master_x, 0, track_width, area.height);
-        let is_master_selected = selected == num_tracks;
+        lines.push(theme::rule(w));
 
-        let master_style = if is_master_selected {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default().fg(Color::Cyan)
-        };
+        // master strip
+        let sel = selected >= tracks.len();
+        let name_style = if sel { theme::selected() } else { theme::chrome_hi() };
+        let mut mspans = vec![
+            Span::styled(format!(" {:<9}", "MASTER"), name_style),
+            Span::styled(
+                format!("{} ", theme::meter_char(master_meter)),
+                theme::signal(if master_meter > 0.95 { theme::alert() } else { theme::audio() }),
+            ),
+        ];
+        mspans.extend(theme::bar(master, None, bar_w, theme::audio()));
+        mspans.extend(vec![
+            Span::styled(format!(" {:>3.0}%", master * 100.0), theme::value()),
+            Span::styled(
+                format!("  {}", theme::AUDIO_GLYPH),
+                theme::signal(theme::audio()),
+            ),
+        ]);
+        lines.push(Line::from(mspans));
 
-        let master_text = format!(
-            "MASTER\n\n{:.0}%\n\n{:.0}%",
-            master * 100.0,
-            master_meter * 100.0
-        );
+        lines.push(theme::rule(w));
+        lines.push(theme::status("NORMAL", overlay.unwrap_or(""), "", w));
 
-        let master_widget = Paragraph::new(master_text).style(master_style);
-        f.render_widget(master_widget, master_rect);
+        f.render_widget(Paragraph::new(lines), area);
 
         if show_help {
             let help_text = vec![
-                Line::from("Mixer Help"),
+                Line::from("━━━ MIX ━━━"),
                 Line::from(""),
-                Line::from("  h/l       Select track/master (counts)"),
-                Line::from("  j/k       Level down/up"),
-                Line::from("  J/K       Coarse level (10x)"),
+                Line::from("  j/k       Select strip (counts, wraps)"),
+                Line::from("  gg / G    First strip / master"),
+                Line::from("  h/l       Level down/up (H/L ×10)"),
                 Line::from("  < / >     Pan left/right"),
-                Line::from("  gg / G    First track / master"),
-                Line::from("  m         Toggle mute"),
-                Line::from("  s         Toggle solo"),
-                Line::from("  u / ^r    Undo / redo"),
-                Line::from("  :w/:e/:q  Patch save/load, quit"),
-                Line::from("  space      Play/pause (global)"),
-                Line::from("  ?         Toggle help"),
-                Line::from("  ^s        Save state"),
+                Line::from("  m / s     Mute / solo"),
+                Line::from("  u/^r      Undo / redo"),
+                Line::from("  :w/:e/:q  Patches / quit"),
+                Line::from("  space     Play/pause (global)"),
+                Line::from(""),
+                Line::from("Channels appear as modules register"),
+                Line::from("audio in the manifest."),
+                Line::from(""),
+                Line::from("  ? closes help"),
             ];
             let help = Paragraph::new(help_text)
-                .style(Style::default().fg(Color::White).bg(Color::Black))
+                .style(Style::default().fg(theme::ink()).bg(theme::bg()))
                 .block(Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Cyan))
-                    .title("Help"));
+                    .border_style(theme::chrome())
+                    .title(Span::styled(" MIX ", theme::chrome_hi())));
             f.render_widget(help, area);
-        }
-
-        if let Some(text) = overlay {
-            let r = Rect::new(0, area.height.saturating_sub(1), area.width, 1);
-            f.render_widget(
-                Paragraph::new(text.to_string()).style(Style::default().fg(Color::Yellow)),
-                r,
-            );
         }
     })?;
 
@@ -488,6 +503,10 @@ pub fn run() -> Result<()> {
         } else {
             ex_msg.clone()
         };
+        let (bpm, playing) = transport_ui
+            .as_ref()
+            .map(|t| (t.bpm(), t.playing()))
+            .unwrap_or((120.0, false));
         draw_ui(
             &mut terminal,
             &snapshot.0,
@@ -496,6 +515,8 @@ pub fn run() -> Result<()> {
             snapshot.3,
             show_help,
             overlay.as_deref(),
+            bpm,
+            playing,
         )?;
 
         if event::poll(Duration::from_millis(50))? {
@@ -559,23 +580,23 @@ pub fn run() -> Result<()> {
                 }
                 match key.code {
                     KeyCode::Char(c) if c.is_ascii_digit() && count.push(c) => {}
-                    KeyCode::Char('h') | KeyCode::Left => {
-                        select_strip(&mut inner.lock().unwrap(), -(count.take() as i32));
-                    }
-                    KeyCode::Char('l') | KeyCode::Right => {
+                    KeyCode::Char('j') | KeyCode::Down => {
                         select_strip(&mut inner.lock().unwrap(), count.take() as i32);
                     }
-                    KeyCode::Char('j' | 'k' | 'J' | 'K') | KeyCode::Down | KeyCode::Up => {
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        select_strip(&mut inner.lock().unwrap(), -(count.take() as i32));
+                    }
+                    KeyCode::Char('h' | 'l' | 'H' | 'L') | KeyCode::Left | KeyCode::Right => {
                         let c = match key.code {
                             KeyCode::Char(c) => c,
-                            KeyCode::Down => 'j',
-                            _ => 'k',
+                            KeyCode::Left => 'h',
+                            _ => 'l',
                         };
                         let n = count.take() as i32;
                         let (steps, coarse) = match c {
-                            'j' => (-n, false),
-                            'k' => (n, false),
-                            'J' => (-n, true),
+                            'h' => (-n, false),
+                            'l' => (n, false),
+                            'H' => (-n, true),
                             _ => (n, true),
                         };
                         use crate::undo::ParamUndo;

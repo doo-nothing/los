@@ -243,34 +243,40 @@ fn draw_ui(
     show_help: bool,
     overlay: Option<&str>,
     picker: Option<(Vec<String>, usize)>,
+    show_menu: bool,
 ) -> Result<()> {
     terminal.draw(|f| {
         let area = f.area();
         
+        // the scope is the picture: chrome auto-hides when you're not
+        // touching it, leaving a full-bleed waveform
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(0),
-                Constraint::Length(1),
-            ])
+            .constraints(if show_menu {
+                [Constraint::Min(0), Constraint::Length(1)]
+            } else {
+                [Constraint::Min(0), Constraint::Length(0)]
+            })
             .split(area);
 
-        // Param list rendered as one status line; the selected row is
-        // bracketed (j/k select, h/l adjust, H/L coarse)
-        let status = (0..NUM_ROWS)
-            .map(|row| {
-                let text = row_display(state, row);
-                if row == state.selected {
-                    format!("[{}]", text)
-                } else {
-                    format!(" {} ", text)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("|");
+        // Param list as one status line, theme anatomy: selected row inverse
+        use ratatui::text::Span;
         let status_widget = match overlay {
-            Some(text) => Paragraph::new(text.to_string()).style(Style::default().fg(Color::Yellow)),
-            None => Paragraph::new(status).style(Style::default().fg(Color::Cyan)),
+            Some(text) => Paragraph::new(Span::styled(text.to_string(), crate::theme::value())),
+            None => {
+                let mut spans: Vec<Span> = vec![Span::styled("SCOPE ", crate::theme::chrome_hi())];
+                for row in 0..NUM_ROWS {
+                    let text = row_display(state, row);
+                    let style = if row == state.selected {
+                        crate::theme::selected()
+                    } else {
+                        crate::theme::chrome()
+                    };
+                    spans.push(Span::styled(text, style));
+                    spans.push(Span::raw(" "));
+                }
+                Paragraph::new(ratatui::text::Line::from(spans))
+            }
         };
         f.render_widget(status_widget, chunks[1]);
 
@@ -300,7 +306,7 @@ fn draw_ui(
         let datasets = vec![Dataset::default()
             .marker(marker)
             .graph_type(GraphType::Line)
-            .style(Style::default().fg(Color::Green))
+            .style(crate::theme::signal(crate::theme::audio()))
             .data(&data)];
 
         let chart = Chart::new(datasets)
@@ -437,6 +443,8 @@ pub fn run(instance: usize) -> Result<()> {
     let mut picker = crate::picker::Picker::default();
     let mut history = crate::undo::ParamHistory::default();
     let mut ex = crate::excmd::ExLine::default();
+    // param strip auto-hides ~4s after the last interaction
+    let mut menu_until = std::time::Instant::now() + Duration::from_secs(4);
     let mut ex_msg: Option<String> = None;
     let mut patch_name: Option<String> = None;
     let mut baseline = state::to_toml_string(&snapshot_params(&state.lock().unwrap())).unwrap_or_default();
@@ -472,7 +480,8 @@ pub fn run(instance: usize) -> Result<()> {
             ex_msg.clone()
         };
         let picker_rows = if picker.is_active() { Some(picker.rows()) } else { None };
-        draw_ui(&mut terminal, &current_state, show_help, overlay.as_deref(), picker_rows)?;
+        let show_menu = std::time::Instant::now() < menu_until || overlay.is_some();
+        draw_ui(&mut terminal, &current_state, show_help, overlay.as_deref(), picker_rows, show_menu)?;
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
@@ -536,6 +545,10 @@ pub fn run(instance: usize) -> Result<()> {
                 }
                 if !matches!(key.code, KeyCode::Char('g')) {
                     pending_g = false;
+                }
+                // any interaction reveals the param strip for a few seconds
+                if !matches!(key.code, KeyCode::Char(' ')) {
+                    menu_until = std::time::Instant::now() + Duration::from_secs(4);
                 }
                 // Ctrl-s: save module state
                 if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::CONTROL {
