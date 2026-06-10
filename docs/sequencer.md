@@ -78,7 +78,7 @@ other no matter how weird their paths are.
 
 `:scale <name>` retunes a track. The engine is cents-based — a scale is a
 list of cents offsets within a repeating period, and the period doesn't
-have to be an octave — so the 137-scale built-in library includes:
+have to be an octave — so the 139-scale built-in library includes:
 
 - every common 12-TET scale and mode (majors, minors, bebop, blues,
   pentatonics, Japanese scales, Messiaen modes, double harmonic, …)

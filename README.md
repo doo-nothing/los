@@ -15,7 +15,7 @@ plugins, no mouse required (but the mouse works too).
   `.` repeat, `u` undo. Everywhere. Macros too: `qa…q` records a
   performance gesture, `@a` fires it on the next bar.
 - **Weird on purpose** — per-step probability, eight playhead cycle modes
-  (pingpong, drunk, prime-jump…), generative fills, and a 137-scale
+  (pingpong, drunk, prime-jump…), generative fills, and a 139-scale
   microtonal library with Scala `.scl` import.
 - **Cable-colored patching** — bind any parameter to any output with `@`;
   the connection wears one color at both ends.

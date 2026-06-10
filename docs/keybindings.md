@@ -155,7 +155,7 @@ The full feature tour lives in [sequencer.md](sequencer.md).
 | `:q!` | quit, discard changes |
 | `:x` / `:wq` | save patch and quit |
 | `:set <key> <value>` | module settings: sequencer `bpm`, `pulses`, `length`, `rotation`, `cycle <mode>`, `root <note>`; others as they grow |
-| `:scale <name>` | retune track(s): 137 built-ins, `off` = chromatic, `root <note>`, or a `.scl` file path (Scala import) — sequencer |
+| `:scale <name>` | retune track(s): 139 built-ins, `off` = chromatic, `root <note>`, or a `.scl` file path (Scala import) — sequencer |
 | `:fill <kind> [arg]` | auto-fill: `mutate density markov cantor thuemorse fibonacci sierpinski` — sequencer |
 | `:macro [a] [= …]` | list / show / write macros (`pat 2 b \| mute 3 \| quant beat`) — sequencer |
 

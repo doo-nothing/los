@@ -618,7 +618,7 @@ The pre-release feature pass (docs/plans/sequencer-v2.md, user tour in
 docs/sequencer.md): value layers ('n/'v/'p/'m) so one vi grammar edits
 note/velocity/probability/mod lanes; per-step probability with
 deterministic rolls; eight per-track cycle modes; a cents-based scale
-engine (137 built-ins incl. maqamat, gamelan, Bohlen-Pierce, Partch 43,
+engine (139 built-ins incl. maqamat, gamelan, Bohlen-Pierce, Partch 43,
 EDOs 5-72) with Scala .scl import — true microtonal, voices take Hz;
 per-step mod-IN bindings (B picker, the sequencer now consumes
 modulation); pattern slots "a-"h per track; semantic-command macros on
