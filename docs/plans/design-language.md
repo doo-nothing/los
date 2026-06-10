@@ -285,7 +285,7 @@ NORMAL                          Enter:load
 
 # Build plan (after mockup sign-off)
 
-1. `src/theme.rs` — palette tokens (truecolor + 256 fallback detection),
+1. `src/ui/theme.rs` — palette tokens (truecolor + 256 fallback detection),
    glyph constants, shared header/status/rule renderers. Tests.
 2. tmux shell theme at session creation.
 3. Badge module (`los badge`): breathe mood + info line, then familiar.

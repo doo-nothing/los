@@ -1,20 +1,25 @@
-pub mod badge;
-pub mod conductor;
-pub mod envelope;
-pub mod excmd;
-pub mod keys;
-pub mod layout;
-pub mod mixer;
-pub mod picker;
-pub mod routing;
-pub mod scope;
-pub mod sequencer;
-pub mod shm;
-pub mod state;
-pub mod theme;
-pub mod tmux;
-pub mod tone;
-pub mod undo;
-pub mod voice;
+//! Los — a modular groovebox that lives in your terminal (see DESIGN.md).
+//!
+//! The crate is organized into four groups:
+//!
+//! - [`modules`] — the runnable pane processes (sequencer, voice, mixer, …).
+//!   Start here to contribute a new module.
+//! - [`ui`] — shared TUI components (theme, vi keys, `:` command line, …).
+//! - [`ipc`] — shared-memory plumbing between module processes.
+//! - [`session`] — persistence and the tmux rack.
+//!
+//! Every module is also re-exported at the crate root (`los::sequencer`,
+//! `crate::shm`, …) so call sites stay short and moving a file between
+//! groups never breaks imports.
+
+pub mod ipc;
+pub mod modules;
+pub mod session;
+pub mod ui;
+
+pub use ipc::{routing, shm};
+pub use modules::{badge, conductor, envelope, mixer, scope, sequencer, tone, voice};
+pub use session::{layout, state, tmux};
+pub use ui::{excmd, keys, picker, theme, undo};
 
 pub const NUM_TRACKS: usize = 8;
