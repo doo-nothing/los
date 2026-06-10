@@ -125,13 +125,13 @@ struct ChannelParams {
 impl Default for ChannelParams {
     fn default() -> Self {
         Self {
-            rise_param: 0.42, // ~100ms on the new taper
-            fall_param: 0.42,
-            shape_param: 0.5, // linear
+            rise_param: 0.0,  // instant strike
+            fall_param: 0.38, // ~145ms decay
+            shape_param: 0.9, // strongly exponential: snappy spikes
             loop_mode: false,
             attenuverter: 1.0,
             offset: 0.0,
-            pluck: 0.0,
+            pluck: 0.75, // deep vactrol snap+ring
             gate_mode: false,
             trigger: Trigger::Any,
             signal_src: None,
@@ -273,9 +273,17 @@ struct EnvelopeState {
 impl Default for EnvelopeState {
     fn default() -> Self {
         let mut params = vec![ChannelParams::default(); DEFAULT_CHANNELS];
-        // Channel 1 defaults to sequencer track 1; the rest to any-note
-        if let Some(a) = SourceAddr::parse("sequencer/0/t1") {
-            params[0].trigger = Trigger::Source(a);
+        // Default patch: odd channels are the voices' pluck envelopes
+        // (ch1 <- seq t1, ch3 <- seq t3, matching each voice's amp
+        // binding); even channels stay unwired, free for patching.
+        for (i, p) in params.iter_mut().enumerate() {
+            p.trigger = if i % 2 == 0 {
+                SourceAddr::parse(&format!("sequencer/0/t{}", i + 1))
+                    .map(Trigger::Source)
+                    .unwrap_or(Trigger::Off)
+            } else {
+                Trigger::Off
+            };
         }
         Self {
             channels: vec![EnvelopeChannel::default(); DEFAULT_CHANNELS],
@@ -1862,6 +1870,29 @@ mod tests {
             gate_mode: gate,
             pluck,
         }
+    }
+
+    #[test]
+    fn fresh_session_channel_wiring_is_spikey_plucks() {
+        let s = EnvelopeState::default();
+        assert_eq!(s.params.len(), 4);
+        // odd channels feed the voices, even ones stay free
+        for (i, want) in [(0, Some("sequencer/0/t1")), (1, None), (2, Some("sequencer/0/t3")), (3, None)] {
+            match (&s.params[i].trigger, want) {
+                (Trigger::Source(a), Some(w)) => assert_eq!(a.to_string(), w),
+                (Trigger::Off, None) => {}
+                (got, want) => panic!("ch{} trigger {:?}, wanted {:?}", i + 1, got, want),
+            }
+        }
+        // the pluck character: instant strike, ~145ms exponential decay
+        let p = ChannelParams::default();
+        assert_eq!(p.rise_param, 0.0, "instant rise");
+        assert_eq!(param_to_time(p.rise_param), 0.0);
+        let fall = param_to_time(p.fall_param);
+        assert!((0.1..0.25).contains(&fall), "short fall, got {fall}s");
+        assert!(p.shape_param > 0.8, "strongly exponential");
+        assert!(p.pluck > 0.5, "deep vactrol pluck");
+        assert!(!p.gate_mode, "trig semantics");
     }
 
     #[test]

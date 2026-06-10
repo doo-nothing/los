@@ -55,6 +55,60 @@ impl Track {
         }
         Self { steps, length: 16, pulses: 5, rotation: 0, muted: false, mode: state::TrackMode::Note }
     }
+
+    /// A silent 16-step track (no pulses) — the blank-slate default.
+    fn empty() -> Self {
+        Self {
+            steps: vec![Step::default(); NUM_STEPS],
+            length: 16,
+            pulses: 0,
+            rotation: 0,
+            muted: false,
+            mode: state::TrackMode::Note,
+        }
+    }
+
+    /// A note track from (step, midi-note) pairs; step 0 gets an accent.
+    fn with_melody(notes: &[(usize, u8)]) -> Self {
+        let mut t = Track::empty();
+        for &(i, note) in notes {
+            t.steps[i].active = true;
+            t.steps[i].note = note;
+            t.steps[i].velocity = if i == 0 { 112 } else { 100 };
+        }
+        t.pulses = notes.len();
+        t
+    }
+}
+
+/// The fresh-session pattern: t1 carries a melody and t3 a bass line
+/// (wired by default into maths ch1/ch3 -> voice 0/1 amps); t2 and t4 are
+/// modulation tracks left empty for patching; the rest are blank slates.
+fn default_tracks(count: usize) -> Vec<Track> {
+    let mut tracks: Vec<Track> = (0..count).map(|_| Track::empty()).collect();
+    if let Some(t) = tracks.get_mut(0) {
+        // A minor lead: arpeggio up, answer down
+        *t = Track::with_melody(&[
+            (0, 69),  // A4
+            (2, 72),  // C5
+            (4, 76),  // E5
+            (7, 74),  // D5
+            (8, 72),  // C5
+            (11, 67), // G4
+            (12, 69), // A4
+            (14, 71), // B4
+        ]);
+    }
+    if let Some(t) = tracks.get_mut(2) {
+        // bass roots: Am . . . | F . G .
+        *t = Track::with_melody(&[(0, 45), (4, 45), (8, 41), (12, 43)]);
+    }
+    for i in [1usize, 3] {
+        if let Some(t) = tracks.get_mut(i) {
+            t.mode = state::TrackMode::Modulation;
+        }
+    }
+    tracks
 }
 
 #[derive(Clone)]
@@ -76,10 +130,11 @@ impl Default for SequencerState {
     fn default() -> Self {
         let track_count = crate::NUM_TRACKS;
         Self {
-            tracks: vec![Track::new(); track_count],
+            tracks: default_tracks(track_count),
             current_track: 0,
             bpm: 120.0,
-            playing: true,
+            // a fresh session waits for Space — never opens with sound
+            playing: false,
             current_steps: vec![0; track_count],
             selected: 0,
             last_notes: vec![None; track_count],
@@ -2425,8 +2480,12 @@ mod tests {
     use super::*;
 
     fn state_with_tracks(n: usize) -> SequencerState {
-        let mut s = SequencerState::default();
-        s.tracks.truncate(n);
+        // plain euclid-starter tracks: tests want predictable steps, not
+        // the curated fresh-session melody defaults
+        let mut s = SequencerState {
+            tracks: (0..n).map(|_| Track::new()).collect(),
+            ..Default::default()
+        };
         s.current_steps.truncate(n);
         s.last_notes.truncate(n);
         s
@@ -3119,5 +3178,31 @@ mod tests {
         // last_notes longer than tracks never panics
         let extra = vec![Some(60u8); 5];
         assert_eq!(stuck_notes(&tracks, &extra, false).len(), 3);
+    }
+
+    #[test]
+    fn fresh_session_defaults_are_playable_but_paused() {
+        let s = SequencerState::default();
+        assert!(!s.playing, "fresh sessions start paused");
+        // t1 melody + t3 bass, both note mode with active steps
+        for ti in [0usize, 2] {
+            assert_eq!(s.tracks[ti].mode, state::TrackMode::Note);
+            let actives = s.tracks[ti].steps[..16].iter().filter(|st| st.active).count();
+            assert!(actives >= 4, "t{} carries a pattern", ti + 1);
+            assert_eq!(s.tracks[ti].pulses, actives, "pulse count stays honest");
+        }
+        // t2/t4 are modulation tracks, empty
+        for ti in [1usize, 3] {
+            assert_eq!(s.tracks[ti].mode, state::TrackMode::Modulation);
+            assert!(s.tracks[ti].steps.iter().all(|st| !st.active));
+        }
+        // the rest are silent blank slates
+        for t in &s.tracks[4..] {
+            assert!(t.steps.iter().all(|st| !st.active));
+        }
+        // bass sits well below the lead
+        let lead_min = s.tracks[0].steps[..16].iter().filter(|st| st.active).map(|st| st.note).min();
+        let bass_max = s.tracks[2].steps[..16].iter().filter(|st| st.active).map(|st| st.note).max();
+        assert!(bass_max < lead_min, "t3 is the bass");
     }
 }
