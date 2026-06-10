@@ -280,11 +280,31 @@ fn install_shell_theme() {
 ///   ├─────────┴────────────┤
 ///   │         SEQ          │
 ///   └──────────────────────┘
+/// Content-aware split sizes for the house layout: `(top_block, row2,
+/// left_col)` in cells, given the window size. MIX and the VOICE|MATHs row
+/// have intrinsic content heights (~10 and ~15 lines with pane titles), so
+/// on tall windows they stay content-sized and the slack flows to the
+/// elastic panes (SEQ, and the badge/scope column). Small windows fall
+/// back to proportional splits so nothing collapses.
+fn house_dims(w: usize, h: usize) -> (usize, usize, usize) {
+    let top = ((h * 3) / 5).clamp(6, 26);
+    let row2 = ((top * 3) / 5).clamp(3, 15);
+    let col = (w / 4).clamp(20.min(w / 2), 48);
+    (top, row2, col)
+}
+
 fn build_house_layout(exe: &str) -> Result<()> {
     let win = "los:modules";
     tmux_cmd(&["new-window", "-t", "los", "-n", "modules"])?;
     tmux_cmd(&["set-option", "-w", "-t", win, "pane-border-status", "top"])?;
     tmux_cmd(&["set-option", "-w", "-t", win, "pane-border-format", " #{pane_title} "])?;
+
+    let dims = tmux_cmd(&[
+        "display-message", "-p", "-t", win, "#{window_width} #{window_height}",
+    ])?;
+    let mut it = dims.split_whitespace().filter_map(|n| n.parse::<usize>().ok());
+    let (w, h) = (it.next().unwrap_or(120), it.next().unwrap_or(40));
+    let (top, row2, col) = house_dims(w, h);
 
     // the window's first pane becomes SEQ (bottom) after the splits
     let seq = tmux_cmd(&["list-panes", "-t", win, "-F", "#{pane_id}"])?
@@ -292,15 +312,17 @@ fn build_house_layout(exe: &str) -> Result<()> {
         .next()
         .unwrap_or_default()
         .to_string();
-    // top block (rows 1+2) above SEQ: 60% of the window; row 1 = mixer
+    // top block (rows 1+2) above SEQ, content-sized; row 1 = mixer
     let row1 = tmux_cmd(&[
-        "split-window", "-t", &seq, "-v", "-b", "-l", "60%", "-P", "-F", "#{pane_id}",
+        "split-window", "-t", &seq, "-v", "-b", "-l", &top.to_string(), "-P", "-F",
+        "#{pane_id}",
         &format!("{} mixer 0", exe),
     ])?;
     let row1 = row1.trim().to_string();
     // row 2 under row 1: voice | maths
     let voice = tmux_cmd(&[
-        "split-window", "-t", &row1, "-v", "-l", "50%", "-P", "-F", "#{pane_id}",
+        "split-window", "-t", &row1, "-v", "-l", &row2.to_string(), "-P", "-F",
+        "#{pane_id}",
         &format!("{} voice 0", exe),
     ])?;
     let voice = voice.trim().to_string();
@@ -310,7 +332,8 @@ fn build_house_layout(exe: &str) -> Result<()> {
     ])?;
     // row 1 left column: badge over scope
     let badge = tmux_cmd(&[
-        "split-window", "-t", &row1, "-h", "-b", "-l", "48", "-P", "-F", "#{pane_id}",
+        "split-window", "-t", &row1, "-h", "-b", "-l", &col.to_string(), "-P", "-F",
+        "#{pane_id}",
         &format!("{} badge 0", exe),
     ])?;
     let badge = badge.trim().to_string();
@@ -1075,6 +1098,27 @@ fn prompt_string(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, prompt: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn house_dims_adapt_to_window() {
+        // tall window: rows stay content-sized, slack flows to SEQ
+        let (top, row2, _) = house_dims(180, 80);
+        assert_eq!(top, 26, "top block caps at content height");
+        assert_eq!(row2, 15, "voice/maths row caps at content height");
+        // mid window (the gif terminal): proportional
+        let (top, row2, col) = house_dims(140, 40);
+        assert_eq!(top, 24);
+        assert_eq!(row2, 14);
+        assert_eq!(col, 35);
+        // small window: everything stays usable, nothing collapses
+        let (top, row2, col) = house_dims(60, 20);
+        assert!((6..20).contains(&top));
+        assert!((3..top).contains(&row2));
+        assert!((15..=30).contains(&col));
+        // degenerate sizes never panic or go to zero
+        let (top, row2, col) = house_dims(4, 4);
+        assert!(top >= 1 && row2 >= 1 && col >= 1);
+    }
 
     #[test]
     fn test_shell_escape_no_quotes() {

@@ -199,6 +199,15 @@ fn shade(c: Color, f: f32) -> Color {
     }
 }
 
+/// Bar width for a pane `w` columns wide with `reserved` columns of
+/// labels/readouts beside the bar. Scales with the pane (instead of
+/// pinning to a fixed width) so wide panes fill with slider instead of
+/// dead space. Renderers and mouse hit-tests MUST both use this so drag
+/// geometry stays in sync.
+pub fn bar_width(w: usize, reserved: usize) -> usize {
+    (w.saturating_sub(reserved)).clamp(8, 36)
+}
+
 /// The bar (sliders, take six): half-height fill `▄` that GLOWS — a
 /// truecolor gradient rising toward the tip — with a quarter-block tip for
 /// half-cell resolution, a faint `▁` rail, and a bone ghost `▴` at the live

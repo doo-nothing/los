@@ -900,7 +900,7 @@ fn draw_ui(
         lines.push(theme::rule(w));
 
         // ── detail: the current channel with real sliders ───────────────
-        let bar_w = (w.saturating_sub(26)).clamp(8, 22);
+        let bar_w = theme::bar_width(w, 26);
         let trig_text = match &p.trigger {
             Trigger::Any => String::from("any note"),
             Trigger::Off => String::from("off"),
@@ -1209,7 +1209,7 @@ pub fn run(instance: usize) -> Result<()> {
                             if row <= 5 {
                                 selected = row;
                                 let w = terminal.size().map(|r| r.width as usize).unwrap_or(60);
-                                let bar_w = (w.saturating_sub(26)).clamp(8, 22);
+                                let bar_w = crate::theme::bar_width(w, 26);
                                 let x = (m.column as usize).saturating_sub(6);
                                 let mut v = (x as f32 / bar_w.saturating_sub(1).max(1) as f32)
                                     .clamp(0.0, 1.0);

@@ -143,9 +143,16 @@ There's a [justfile](justfile): `just check` runs clippy (warnings are
 errors) and the full test suite, `just build` / `just install` do what they
 say, and `just demo` re-records the GIF above with
 [vhs](https://github.com/charmbracelet/vhs) (`brew install vhs`). The demo
-recipe spins up a real session, sketches a pattern, lets it play, and tears
-the session down — it refuses to run while a live `los` session exists, so
-it can't eat your work.
+recipe spins up a real session, lets it play, and tears the session down —
+it refuses to run while a live `los` session exists, so it can't eat your
+work.
+
+By default the demo records a fresh session and sketches a pattern on
+camera. To record *your* rig instead: arrange a session until it looks
+right, save it from the conductor under the name `demo` (leave the
+transport stopped — the tape presses Space), close the session, and run
+`just demo`. Save-states capture the tmux pane layout in a portable form,
+so your arrangement reproduces inside the recording terminal.
 
 ## License
 
