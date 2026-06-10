@@ -997,6 +997,7 @@ fn draw_ui(
             },
         ]));
 
+        theme::anchor_bottom(&mut lines, area.height as usize, 2);
         lines.push(theme::rule(w));
 
         // ── status ──────────────────────────────────────────────────────
