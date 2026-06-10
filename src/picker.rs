@@ -61,6 +61,13 @@ impl Picker {
         (rows, self.selected)
     }
 
+    /// Per-row source address (None for special rows) — for cable coloring.
+    pub fn row_sources(&self) -> Vec<Option<&SourceAddr>> {
+        let mut v: Vec<Option<&SourceAddr>> = vec![None; self.specials.len()];
+        v.extend(self.sources.iter().map(Some));
+        v
+    }
+
     pub fn handle_key(&mut self, code: KeyCode) -> PickerEvent {
         match code {
             KeyCode::Char('j') | KeyCode::Down => {

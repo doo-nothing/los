@@ -818,6 +818,8 @@ fn draw_ui(
     overlay: Option<&str>,
     picker: Option<(Vec<String>, usize)>,
     ghosts: &[Option<f32>; 4],
+    entries: &[crate::shm::ManifestEntry],
+    picker_colors: &[Option<ratatui::style::Color>],
     instance: usize,
     bpm: f32,
     playing: bool,
@@ -834,8 +836,16 @@ fn draw_ui(
 
         let mut lines: Vec<Line> = Vec::new();
         let ctx = format!("ch{}/{}", cur + 1, n);
+        // the page wears its channel's identity color: title context, row
+        // labels, its own (unbound) sliders — bound bars wear their cable
+        let page = match state.mod_base {
+            Some(base) => theme::channel_color(base + cur),
+            None => theme::source_color(&format!("envelope/{}/ch{}", instance, cur + 1)),
+        };
         let _ = (bpm, playing);
-        lines.push(theme::header("MATHs", &ctx, "", w));
+        let mut hdr = theme::header("MATHs", "", "", w);
+        hdr.spans.insert(1, Span::styled(format!("·{}· ", ctx), theme::signal(page)));
+        lines.push(hdr);
 
         // ── overview: every channel at a glance + the buses ─────────────
         let mut ov: Vec<Span> = Vec::new();
@@ -848,7 +858,10 @@ fn draw_ui(
                 Stage::Sustain => theme::SUSTAIN_BAR,
                 Stage::Off => ' ',
             };
-            let cable = theme::source_color(&format!("envelope/{}/ch{}", instance, i + 1));
+            let cable = match state.mod_base {
+                Some(base) => theme::channel_color(base + i),
+                None => theme::source_color(&format!("envelope/{}/ch{}", instance, i + 1)),
+            };
             let style = if i == cur {
                 theme::signal(cable).add_modifier(ratatui::style::Modifier::BOLD)
             } else {
@@ -897,7 +910,7 @@ fn draw_ui(
             if row == selected {
                 Span::styled(format!(" {:<5}", name), theme::selected())
             } else {
-                Span::styled(format!(" {:<5}", name), theme::chrome())
+                Span::styled(format!(" {:<5}", name), theme::signal(page))
             }
         };
 
@@ -928,15 +941,15 @@ fn draw_ui(
         for (row, name, set, disp, ghost, src) in rows {
             let mut spans = vec![row_label(row, name)];
             let hue = match src {
-                Some(Some(a)) => theme::source_color(&a.to_string()),
-                _ => theme::amber(),
+                Some(Some(a)) => routing::cable_color(entries, a),
+                _ => page, // the channel's own slider wears its identity
             };
             spans.extend(theme::bar(set, ghost, bar_w, hue));
             spans.push(Span::styled(format!(" {:>7}", disp), theme::value()));
             if let Some(Some(a)) = src {
                 spans.push(Span::styled(
                     format!(" {}{}", theme::BIND, a.output),
-                    theme::signal(theme::source_color(&a.to_string())),
+                    theme::signal(routing::cable_color(entries, a)),
                 ));
             }
             lines.push(Line::from(spans));
@@ -991,7 +1004,13 @@ fn draw_ui(
                 .iter()
                 .enumerate()
                 .map(|(i, row)| {
-                    let style = if i == sel { theme::selected() } else { theme::value() };
+                    let style = if i == sel {
+                        theme::selected()
+                    } else if let Some(Some(c)) = picker_colors.get(i) {
+                        theme::signal(*c)
+                    } else {
+                        theme::value()
+                    };
                     ratatui::widgets::ListItem::new(row.clone()).style(style)
                 })
                 .collect();
@@ -1137,7 +1156,16 @@ pub fn run(instance: usize) -> Result<()> {
             ex_msg.clone()
         };
         let picker_rows = if picker.is_active() { Some(picker.rows()) } else { None };
-        draw_ui(&mut terminal, &current_state, selected, show_help, overlay.as_deref(), picker_rows, &ghosts, instance, bpm, playing)?;
+        let picker_colors: Vec<Option<ratatui::style::Color>> = if picker.is_active() {
+            picker
+                .row_sources()
+                .iter()
+                .map(|s| s.map(|a| routing::cable_color(&ui_entries, a)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        draw_ui(&mut terminal, &current_state, selected, show_help, overlay.as_deref(), picker_rows, &ghosts, &ui_entries, &picker_colors, instance, bpm, playing)?;
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {

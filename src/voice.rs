@@ -271,6 +271,8 @@ fn draw_ui(
     overlay: Option<&str>,
     picker: Option<(Vec<String>, usize)>,
     ghosts: &[Option<f32>; 3],
+    entries: &[crate::shm::ManifestEntry],
+    picker_colors: &[Option<ratatui::style::Color>],
     instance: usize,
     bpm: f32,
     playing: bool,
@@ -304,7 +306,7 @@ fn draw_ui(
         for (row, name, set, src, ghost) in value_rows {
             let mut spans = vec![label(row, name)];
             let hue = match src {
-                Some(a) => theme::source_color(&a.to_string()),
+                Some(a) => crate::routing::cable_color(entries, a),
                 None => theme::amber(),
             };
             spans.extend(theme::bar(set, ghost, bar_w, hue));
@@ -312,7 +314,7 @@ fn draw_ui(
             if let Some(a) = src {
                 spans.push(Span::styled(
                     format!(" {}{}", theme::BIND, a.output),
-                    theme::signal(theme::source_color(&a.to_string())),
+                    theme::signal(crate::routing::cable_color(entries, a)),
                 ));
             }
             lines.push(Line::from(spans));
@@ -330,14 +332,14 @@ fn draw_ui(
         lines.push(Line::from(vec![
             label(4, "amp"),
             match &state.amp_src {
-                Some(a) => Span::styled(format!("{}{}", theme::BIND, a), theme::signal(theme::source_color(&a.to_string()))),
+                Some(a) => Span::styled(format!("{}{}", theme::BIND, a), theme::signal(crate::routing::cable_color(entries, a))),
                 None => Span::styled("unbound = 1.0".to_string(), theme::dim()),
             },
         ]));
         lines.push(Line::from(vec![
             label(5, "notes"),
             match &state.notes_src {
-                Some(a) => Span::styled(format!("{}{}", theme::BIND, a), theme::signal(theme::source_color(&a.to_string()))),
+                Some(a) => Span::styled(format!("{}{}", theme::BIND, a), theme::signal(crate::routing::cable_color(entries, a))),
                 None => Span::styled("all tracks".to_string(), theme::dim()),
             },
         ]));
@@ -416,7 +418,13 @@ fn draw_ui(
                 .iter()
                 .enumerate()
                 .map(|(i, row)| {
-                    let style = if i == sel { theme::selected() } else { theme::value() };
+                    let style = if i == sel {
+                        theme::selected()
+                    } else if let Some(Some(c)) = picker_colors.get(i) {
+                        theme::signal(*c)
+                    } else {
+                        theme::value()
+                    };
                     ratatui::widgets::ListItem::new(row.clone()).style(style)
                 })
                 .collect();
@@ -656,7 +664,16 @@ pub fn run(instance: usize) -> Result<()> {
             ex_msg.clone()
         };
         let picker_rows = if picker.is_active() { Some(picker.rows()) } else { None };
-        draw_ui(&mut terminal, &current_state, selected, show_help, overlay.as_deref(), picker_rows, &ghosts, instance, bpm, playing)?;
+        let picker_colors: Vec<Option<ratatui::style::Color>> = if picker.is_active() {
+            picker
+                .row_sources()
+                .iter()
+                .map(|s| s.map(|a| crate::routing::cable_color(&ui_entries, a)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        draw_ui(&mut terminal, &current_state, selected, show_help, overlay.as_deref(), picker_rows, &ghosts, &ui_entries, &picker_colors, instance, bpm, playing)?;
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
