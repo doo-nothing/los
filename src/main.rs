@@ -1,3 +1,11 @@
+// Los — a modular groovebox that lives in your terminal
+// Copyright (C) 2026 doo-nothing / AU Supply
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version. See LICENSE.
+
 use anyhow::Result;
 use los::{badge, conductor, voice, sequencer, mixer, scope, envelope, tone, shm, state};
 
