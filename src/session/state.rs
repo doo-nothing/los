@@ -367,6 +367,34 @@ pub struct ScopeParams {
     pub trigger_level: Option<f32>,
 }
 
+/// The template module's params (modules/template.rs — the worked example
+/// for new module authors). The conventions on display: every field is
+/// `Option` (or `serde(default)`) so saves from older builds load instead
+/// of erroring; bindings serialize as source-address strings
+/// ("envelope/0/ch1"); `format` stamps the save so future migrations can
+/// tell eras apart.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TemplateParams {
+    #[serde(default)]
+    pub format: u32,
+    pub rate: Option<f32>,
+    /// Shape by name ("sine"), not index — saves stay readable and survive
+    /// reordering the shape list.
+    pub shape: Option<String>,
+    pub depth: Option<f32>,
+    pub pitch: Option<f32>,
+    pub level: Option<f32>,
+    pub unipolar: Option<bool>,
+    #[serde(default)]
+    pub rate_src: Option<String>,
+    #[serde(default)]
+    pub depth_src: Option<String>,
+    #[serde(default)]
+    pub pitch_src: Option<String>,
+    #[serde(default)]
+    pub level_src: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EnvelopeParams {
     #[serde(default)]

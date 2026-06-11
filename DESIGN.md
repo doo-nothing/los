@@ -573,6 +573,7 @@ by a trait or framework. The sections below describe what each phase must do and
 | sequencer | —                           | Open producer       | Open (read clock)  | Open (write ch 8+)    | Register  |
 | envelope  | —                           | Open prod + consumer| —                  | Create (write ch 0-7) | Register  |
 | scope     | Open `/los_mix_in` (peek)   | —                   | —                  | Open (read all)       | Register  |
+| template  | Create `/los_audio_template_N` | —                | Open (play/pause)  | Open (write 1 ch)     | Register  |
 | conductor | —                           | —                   | —                  | —                     | Create+Open |
 
 **Consumer ID assignment:** A module that opens EventRingbuf as a consumer needs
@@ -697,6 +698,12 @@ pub struct VoiceParams {
 ---
 
 ## 11. Adding a Module (Current Process)
+
+> **Start with the worked example.** `src/modules/template.rs` is a small,
+> fully wired module written to be read top to bottom and copied, and
+> [docs/writing-a-module.md](docs/writing-a-module.md) is the matching
+> guide (registration checklist, I/O choices, grammar, persistence,
+> threading). The steps below are the condensed protocol view.
 
 To add a new module to los today (e.g., a delay or reverb module), follow these
 steps:

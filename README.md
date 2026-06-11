@@ -75,7 +75,8 @@ language: [docs/plans/design-language.md](docs/plans/design-language.md)
 src/
   main.rs     CLI entry — dispatch, ctl, ps, record
   modules/    the runnable panes: sequencer, voice, mixer, envelope,
-              scope, tone, badge, conductor
+              scope, tone, badge, conductor — and template, the
+              commented worked example for writing your own
   ui/         shared TUI kit: theme, vi keys, : command line, @ picker, undo
   ipc/        POSIX shared memory (manifest, rings, modbus, transport)
               and modulation routing
@@ -83,7 +84,9 @@ src/
 ```
 
 Adding a module touches `src/modules/` plus a few registration points —
-[CONTRIBUTING.md](CONTRIBUTING.md) has the walkthrough.
+[docs/writing-a-module.md](docs/writing-a-module.md) is the guide and
+`src/modules/template.rs` the worked example ([CONTRIBUTING.md](CONTRIBUTING.md)
+has the house rules).
 
 ## Status
 

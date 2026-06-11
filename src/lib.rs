@@ -29,7 +29,7 @@ pub mod theory;
 pub mod ui;
 
 pub use ipc::{routing, shm};
-pub use modules::{badge, conductor, envelope, mixer, scope, sequencer, tone, voice};
+pub use modules::{badge, conductor, envelope, mixer, scope, sequencer, template, tone, voice};
 pub use session::{layout, state, tmux};
 pub use ui::{excmd, keys, picker, theme, undo};
 
