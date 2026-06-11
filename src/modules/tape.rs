@@ -622,8 +622,11 @@ fn audio_thread(shared: Arc<Mutex<TapeState>>, instance: usize) -> Result<()> {
                         t.filled = t.filled.max(frame + 1);
                     }
 
-                    // playback: fractional read, reverse-aware
-                    if !t.muted && t.filled > 0 && playing {
+                    // playback: fractional read, reverse-aware. A track
+                    // being recorded right now is skipped — reading the
+                    // frame just written doubles the live mix (you'd
+                    // monitor the repro head while printing to it)
+                    if !t.muted && t.filled > 0 && playing && !(rec && t.armed) {
                         if let Some(audio) = t.audio.as_ref() {
                             let span = t.filled.max(1) as f64;
                             let p = if t.reversed { span - 1.0 - pos.min(span - 1.0) } else { pos };
