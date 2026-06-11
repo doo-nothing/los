@@ -2653,8 +2653,6 @@ fn sequencer_thread(
     state: Arc<Mutex<SequencerState>>,
     shutdown: std::sync::mpsc::Receiver<()>,
 ) -> Result<()> {
-    let sample_rate = 48000.0;
-
     let mut events = match EventRingbuf::open_producer() {
         Ok(e) => e,
         Err(_) => EventRingbuf::create()?,
@@ -2664,7 +2662,8 @@ fn sequencer_thread(
 
     let mut transport = match ShmTransport::open() {
         Ok(t) => t,
-        Err(_) => ShmTransport::create(sample_rate as u32)?,
+        // placeholder rate; the mixer publishes the device's real one
+        Err(_) => ShmTransport::create(48000)?,
     };
 
     // Seed the global play flag from loaded/default state once; from here on
@@ -2716,6 +2715,10 @@ fn sequencer_thread(
         transport.set_bpm(bpm as f32);
 
         let clock = transport.clock();
+        // the mixer publishes the device's real rate once cpal answers;
+        // read it every pass so a mixer respawn on a different device
+        // just rescales the future (phase accumulation absorbs it)
+        let sample_rate = f64::from(transport.sample_rate()).max(1.0);
         let samples_per_step = (60.0 / bpm * sample_rate / 4.0) as u64;
 
         // Scope the lock so it's not held during sleep
