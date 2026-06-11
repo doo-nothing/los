@@ -329,22 +329,30 @@ fn src_slot_at(s: &BankState) -> Option<usize> {
 
 fn adjust(s: &mut BankState, steps: i32, coarse: bool) -> Option<String> {
     use crate::keys::step_f32;
+    // fine = 1% of the range, coarse = 5%
+    let u = |fine: f32, coarse_u: f32| if coarse { coarse_u } else { fine };
     if s.selected == GLOBAL_STRIP {
         match GLOBAL_ROWS[s.sel_row.min(GLOBAL_ROWS.len() - 1)] {
             GlobalRow::Input => return Some(String::from("@ picks the input source")),
-            GlobalRow::Morph => s.morph = step_f32(s.morph, steps, 0.05, coarse, 0.0, 1.0),
+            GlobalRow::Morph => s.morph = step_f32(s.morph, steps, u(0.01, 0.05), false, 0.0, 1.0),
             GlobalRow::Transfer => s.xfer = crate::keys::cycle(s.xfer, steps, XFERS.len()),
             GlobalRow::Freeze => {
                 if steps != 0 {
                     s.freeze = !s.freeze;
                 }
             }
-            GlobalRow::WinCenter => s.wcent = step_f32(s.wcent, steps, 0.02, coarse, 0.0, 1.0),
-            GlobalRow::WinWidth => s.wwidth = step_f32(s.wwidth, steps, 0.02, coarse, 0.0, 1.0),
-            GlobalRow::Spread => s.spread = step_f32(s.spread, steps, 0.02, coarse, 0.0, 1.0),
-            GlobalRow::Split => s.split = step_f32(s.split, steps, 0.05, coarse, 0.0, 1.0),
-            GlobalRow::Dry => s.dry = step_f32(s.dry, steps, 0.05, coarse, 0.0, 1.0),
-            GlobalRow::Decay => s.decay = step_f32(s.decay, steps, 0.02, coarse, 0.0, 1.0),
+            GlobalRow::WinCenter => {
+                s.wcent = step_f32(s.wcent, steps, u(0.01, 0.05), false, 0.0, 1.0)
+            }
+            GlobalRow::WinWidth => {
+                s.wwidth = step_f32(s.wwidth, steps, u(0.01, 0.05), false, 0.0, 1.0)
+            }
+            GlobalRow::Spread => {
+                s.spread = step_f32(s.spread, steps, u(0.01, 0.05), false, 0.0, 1.0)
+            }
+            GlobalRow::Split => s.split = step_f32(s.split, steps, u(0.01, 0.05), false, 0.0, 1.0),
+            GlobalRow::Dry => s.dry = step_f32(s.dry, steps, u(0.01, 0.05), false, 0.0, 1.0),
+            GlobalRow::Decay => s.decay = step_f32(s.decay, steps, u(0.01, 0.05), false, 0.0, 1.0),
         }
     } else {
         let b = s.selected;
@@ -353,7 +361,7 @@ fn adjust(s: &mut BankState, steps: i32, coarse: bool) -> Option<String> {
         } else {
             &mut s.bank_a
         };
-        bank[b] = step_f32(bank[b], steps, 0.05, coarse, 0.0, 1.0);
+        bank[b] = step_f32(bank[b], steps, u(0.01, 0.05), false, 0.0, 1.0);
     }
     None
 }
@@ -662,6 +670,22 @@ fn audio_thread(shared: Arc<Mutex<BankState>>, instance: usize) -> Result<()> {
 const BAND_W: usize = 4;
 const PANEL_W: usize = 26;
 const CONSOLE_MIN_H: usize = 14;
+/// First fader row in console mode: header + names.
+const FADER_TOP: usize = 2;
+
+/// Fader geometry from the pane height — one function for the renderer
+/// and the mouse hit-test.
+fn fader_rows_for(h: usize) -> usize {
+    h.saturating_sub(5).clamp(9, 14)
+}
+
+/// Each band's center as a MIDI note, for the pitch-wheel tint: the
+/// slider wall reads as a spectrum (terracotta lows → plum highs,
+/// brightness rising with octave — the same wheel notes wear).
+fn band_pitch(i: usize) -> u8 {
+    let hz = dsp::CENTERS[i.min(dsp::BANDS - 1)];
+    (69.0 + 12.0 * (hz / 440.0).log2()).round().clamp(0.0, 127.0) as u8
+}
 
 fn global_label(r: GlobalRow) -> &'static str {
     match r {
@@ -776,7 +800,7 @@ fn draw_ui(
 
         let console = h >= CONSOLE_MIN_H && w >= BANDS * BAND_W + 3 + PANEL_W;
         if console {
-            let fader_rows = (h - 5).clamp(9, 14);
+            let fader_rows = fader_rows_for(h);
             let sep = || Span::styled(" │", theme::chrome());
             let edited = if s.edit_bank { &s.bank_b } else { &s.bank_a };
 
@@ -800,7 +824,7 @@ fn draw_ui(
                         .unwrap_or_else(theme::clock);
                     theme::signal(cable)
                 } else {
-                    theme::chrome_hi()
+                    theme::signal(theme::pitch_color(band_pitch(i)))
                 };
                 spans.push(Span::styled(nm, style));
             }
@@ -816,28 +840,35 @@ fn draw_ui(
             for fr in 0..fader_rows {
                 let mut spans: Vec<Span> = Vec::new();
                 for (i, &lvl) in edited.iter().enumerate() {
-                    let bound = s.band_srcs[i].is_some();
-                    let tick = fr == row_of(lvl);
-                    let ghost = fr == row_of(s.band_eff[i]) && (bound || s.morph > 0.01);
+                    // ghost whenever the live gain (morph, CV, window —
+                    // bound or not) has left the edited fader behind
+                    let ghost =
+                        fr == row_of(s.band_eff[i]) && (s.band_eff[i] - lvl).abs() > 0.02;
                     let meter = s.followers[i].min(1.0);
-                    let fill = meter > 0.005 && fr >= row_of(meter);
-                    let (ch, style) = if tick {
-                        (
-                            '█',
-                            if i == s.selected {
-                                theme::selected()
-                            } else {
-                                theme::value()
-                            },
-                        )
-                    } else if ghost {
-                        (theme::GHOST, theme::signal(theme::clock()))
-                    } else if fill {
-                        ('▓', theme::signal(theme::audio()))
+                    spans.push(Span::raw(" "));
+                    // fader column: ghost (the live gain after morph /
+                    // CV / window) over knob over rail
+                    if ghost {
+                        let hue = s.band_srcs[i]
+                            .as_ref()
+                            .map(|a| routing::cable_color(entries, a))
+                            .unwrap_or_else(theme::cv);
+                        spans.push(Span::styled(theme::GHOST.to_string(), theme::signal(hue)));
+                    } else if let Some(knob) = theme::knob_cell(lvl, fr, fader_rows) {
+                        let style = if i == s.selected {
+                            theme::selected()
+                        } else {
+                            theme::value()
+                        };
+                        spans.push(Span::styled(knob.to_string(), style));
                     } else {
-                        ('·', theme::dim())
-                    };
-                    spans.push(Span::styled(format!("  {} ", ch), style));
+                        spans.push(Span::styled(theme::RAIL.to_string(), theme::chrome()));
+                    }
+                    // that band's follower as an LED ladder, snug to its
+                    // fader — the analysis half of the 296e at a glance
+                    let (mc, mstyle) = theme::meter_cell(meter, fr, fader_rows);
+                    spans.push(Span::styled(mc.to_string(), mstyle));
+                    spans.push(Span::raw(" "));
                 }
                 spans.push(sep());
                 spans.extend(panel_line(fr + 1));
@@ -906,7 +937,7 @@ fn draw_ui(
                 Line::from("━━━ BANK · spectral processor (296e) ━━━"),
                 Line::from(""),
                 Line::from("  h/l        Select band (b1–b16, then GLOBAL)"),
-                Line::from("  j/k        Select global row · -/= adjust"),
+                Line::from("  j/k        Global row · K/J or =/- adjust 1% (_/+ 5%)"),
                 Line::from("  b          Edit bank A ↔ B (morph blends them)"),
                 Line::from("  f          Freeze (latch the followers)"),
                 Line::from("  0          Reset · @ bind (band: CV in; input"),
@@ -1111,15 +1142,37 @@ pub fn run(instance: usize) -> Result<()> {
                         ex_msg = msg;
                     }
                 }
-                MouseEventKind::Down(_) => {
+                MouseEventKind::Down(_) | MouseEventKind::Drag(_) => {
+                    use crate::undo::{ParamUndo, ParamValue};
+                    let h = terminal.size().map(|r| r.height as usize).unwrap_or(0);
                     let mut s = shared.lock().unwrap();
                     let col = m.column as usize;
-                    if col < BANDS * BAND_W {
-                        s.selected = col / BAND_W;
-                    } else {
-                        s.selected = GLOBAL_STRIP;
+                    let strip = if col < BANDS * BAND_W { col / BAND_W } else { GLOBAL_STRIP };
+                    if matches!(m.kind, MouseEventKind::Down(_)) {
+                        s.selected = strip;
+                        s.sel_row = s.sel_row.min(s.rows_in(s.selected) - 1);
                     }
-                    s.sel_row = s.sel_row.min(s.rows_in(s.selected) - 1);
+                    // click/drag in the wall paints the edited bank's fader
+                    let rows = fader_rows_for(h);
+                    let row = m.row as usize;
+                    if strip < BANDS
+                        && h >= CONSOLE_MIN_H
+                        && (FADER_TOP..FADER_TOP + rows).contains(&row)
+                    {
+                        s.selected = strip;
+                        let value =
+                            (1.0 - (row - FADER_TOP) as f32 / (rows - 1) as f32).clamp(0.0, 1.0);
+                        let slot = strip * BAND_STRIDE + s.edit_bank as usize;
+                        let old = s.get_param(slot);
+                        if s.edit_bank {
+                            s.bank_b[strip] = value;
+                        } else {
+                            s.bank_a[strip] = value;
+                        }
+                        if let Some(old) = old {
+                            history.record(slot, "Fader", old, ParamValue::F32(value));
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -1284,12 +1337,12 @@ pub fn run(instance: usize) -> Result<()> {
                 let rows = s.rows_in(s.selected);
                 s.sel_row = crate::keys::cycle(s.sel_row.min(rows - 1), -n, rows);
             }
-            KeyCode::Char(c @ ('-' | '=' | '_' | '+' | 'H' | 'L')) => {
+            KeyCode::Char(c @ ('-' | '=' | '_' | '+' | 'J' | 'K')) => {
                 let n = count.take() as i32;
                 let (steps, coarse) = match c {
-                    '-' => (-n, false),
-                    '=' => (n, false),
-                    '_' | 'H' => (-n, true),
+                    '-' | 'J' => (-n, false),
+                    '=' | 'K' => (n, false),
+                    '_' => (-n, true),
                     _ => (n, true),
                 };
                 use crate::undo::ParamUndo;
@@ -1559,12 +1612,14 @@ mod tests {
         let mut s = BankState::new();
         s.selected = 3;
         adjust(&mut s, -4, false);
-        assert!((s.bank_a[3] - 0.6).abs() < 1e-6);
+        assert!((s.bank_a[3] - 0.76).abs() < 1e-6, "fine = 1%");
+        adjust(&mut s, -2, true);
+        assert!((s.bank_a[3] - 0.66).abs() < 1e-6, "coarse = 5%");
         assert!((s.bank_b[3] - 0.2).abs() < 1e-6, "B untouched");
         s.edit_bank = true;
         adjust(&mut s, 100, true);
         assert_eq!(s.bank_b[3], 1.0);
-        assert!((s.bank_a[3] - 0.6).abs() < 1e-6, "A untouched");
+        assert!((s.bank_a[3] - 0.66).abs() < 1e-6, "A untouched");
         // globals
         s.selected = GLOBAL_STRIP;
         s.sel_row = 2; // xfer cycles

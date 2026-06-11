@@ -128,6 +128,52 @@ pub const FALL_ARROW: char = '↘';
 pub const SUSTAIN_BAR: char = '―';
 
 /// A meter cell for a 0..1 level.
+/// One cell of a vertical LED meter ladder, `row` 0 at the top. Lit
+/// cells fill from the bottom with an eighth-block tip, and the ladder
+/// wears console zones: AUDIO green through the body, hot amber above
+/// ~70%, clip red at the very top. Unlit cells are a faint notch so the
+/// ladder reads as hardware even at silence.
+pub fn meter_cell(level: f32, row: usize, rows: usize) -> (char, Style) {
+    const TIP: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let rows = rows.max(1);
+    let from_bottom = rows - 1 - row.min(rows - 1);
+    let lit = level.clamp(0.0, 1.0) * rows as f32 - from_bottom as f32;
+    let zone = (from_bottom as f32 + 1.0) / rows as f32;
+    let hue = if zone > 0.92 {
+        alert()
+    } else if zone > 0.70 {
+        amber_hi()
+    } else {
+        audio()
+    };
+    if lit >= 1.0 {
+        ('█', signal(hue))
+    } else if lit > 0.0 {
+        (TIP[((lit * 8.0) as usize).min(7)], signal(hue))
+    } else {
+        ('╵', dim())
+    }
+}
+
+/// The cap of a vertical fader on its rail, half-cell precision:
+/// returns the knob glyph when `value`'s position lands in this cell
+/// ('▀' upper half, '▄' lower half), or None — draw the rail. Twice the
+/// resolution of a one-char-per-row tick, and it reads as a cap, not a
+/// dot.
+pub fn knob_cell(value: f32, row: usize, rows: usize) -> Option<char> {
+    let rows = rows.max(1);
+    let halves = rows * 2;
+    let pos = ((1.0 - value.clamp(0.0, 1.0)) * (halves - 1) as f32).round() as usize;
+    if pos / 2 == row.min(rows - 1) {
+        Some(if pos.is_multiple_of(2) { '▀' } else { '▄' })
+    } else {
+        None
+    }
+}
+
+/// The rail a fader knob rides on.
+pub const RAIL: char = '│';
+
 pub fn meter_char(level: f32) -> char {
     let idx = (level.clamp(0.0, 1.0) * 7.0).round() as usize;
     METER[idx.min(7)]

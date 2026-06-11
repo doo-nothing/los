@@ -847,14 +847,19 @@ fn adjust_param(s: &mut MixerInner, steps: i32, coarse: bool) {
     let sel = s.selected;
     let strip = s.strip_mut(sel);
     let v = strip.get(p);
+    // fine = 1% of the range, coarse = 5% — passed as explicit units
+    // (the doctrine's ×10 shift rule was too blunt for faders)
+    let unit = |fine: f32, coarse_u: f32| if coarse { coarse_u } else { fine };
     let new = match p {
         Param::Level | Param::Drive | Param::SendA | Param::SendB => {
-            step_f32(v, steps, 0.05, coarse, 0.0, 1.0)
+            step_f32(v, steps, unit(0.01, 0.05), false, 0.0, 1.0)
         }
-        Param::Pan => step_f32(v, steps, 0.05, coarse, -1.0, 1.0),
-        Param::Width => step_f32(v, steps, 0.05, coarse, 0.0, 2.0),
-        Param::Freq => step_f32(v, steps, 0.02, coarse, 0.0, 1.0),
-        Param::Lo | Param::Mid | Param::Hi => step_f32(v, steps, 0.5, coarse, -15.0, 15.0),
+        Param::Pan => step_f32(v, steps, unit(0.02, 0.10), false, -1.0, 1.0),
+        Param::Width => step_f32(v, steps, unit(0.02, 0.10), false, 0.0, 2.0),
+        Param::Freq => step_f32(v, steps, unit(0.01, 0.05), false, 0.0, 1.0),
+        Param::Lo | Param::Mid | Param::Hi => {
+            step_f32(v, steps, unit(0.5, 3.0), false, -15.0, 15.0)
+        }
     };
     strip.set(p, new);
 }
@@ -935,6 +940,14 @@ fn param_text(p: Param, v: f32) -> String {
 /// rows + % + MS + rule + status.
 const CONSOLE_MIN_H: usize = 17; // header+name+8 rows+3 fader+pct+MS+rule+status
 const STRIP_W: usize = 9;
+/// First fader row in console mode: header + names + 8 param rows.
+const FADER_TOP: usize = 10;
+
+/// Console fader geometry from the pane height — one function so the
+/// renderer and the mouse hit-test can never drift apart.
+fn fader_rows_for(h: usize) -> usize {
+    h.saturating_sub(14).clamp(3, 8)
+}
 
 fn draw_ui(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
@@ -985,22 +998,25 @@ fn draw_ui(
         let console = h >= CONSOLE_MIN_H && w >= strips.len() * STRIP_W && !strips.is_empty();
         if console {
             // ── the console: vertical strips ────────────────────────────
-            let fader_rows = (h - 14).clamp(3, 8);
+            let fader_rows = fader_rows_for(h);
             let mut name_spans: Vec<Span> = Vec::new();
-            for (name, _, _, _, _, sel, _) in &strips {
+            for (name, _, _, _, _, sel, is_master) in &strips {
                 let mut nm = format!(" {}", name);
                 nm.truncate(STRIP_W - 1);
                 while nm.chars().count() < STRIP_W {
                     nm.push(' ');
                 }
-                name_spans.push(Span::styled(
-                    nm,
-                    if *sel {
-                        theme::selected()
-                    } else {
-                        theme::chrome_hi()
-                    },
-                ));
+                // each strip wears a stable identity hue (the same hash
+                // palette cables use) so you can find a channel by color;
+                // MASTER stays chrome — it's the desk, not a source
+                let style = if *sel {
+                    theme::selected()
+                } else if *is_master {
+                    theme::chrome_hi()
+                } else {
+                    theme::signal(theme::source_color(name))
+                };
+                name_spans.push(Span::styled(nm, style));
             }
             lines.push(Line::from(name_spans));
             // param rows in console order (level renders as fader below)
@@ -1047,7 +1063,9 @@ fn draw_ui(
                 }
                 lines.push(Line::from(spans));
             }
-            // fader rows: meter fill, level tick, ghost at the live level
+            // the fader area: each strip gets a knob riding a rail
+            // (half-cell precision) beside an LED meter ladder — louder
+            // is taller, green through the body, amber hot, red at clip
             let row_of =
                 |v: f32| ((1.0 - v.clamp(0.0, 1.0)) * (fader_rows - 1) as f32).round() as usize;
             for fr in 0..fader_rows {
@@ -1056,26 +1074,26 @@ fn draw_ui(
                     let lvl = strip.get(Param::Level);
                     let live = strip.eff[0];
                     let bound = strip.srcs[0].is_some();
-                    let tick = fr == row_of(lvl);
-                    let ghost = bound && fr == row_of(live);
-                    let meter_fill = !mute && *meter > 0.005 && fr >= row_of(*meter);
-                    let (ch, style) = if ghost {
-                        (theme::GHOST, theme::signal(theme::clock()))
-                    } else if tick {
-                        (
-                            '█',
-                            if *sel {
-                                theme::selected()
-                            } else {
-                                theme::value()
-                            },
-                        )
-                    } else if meter_fill {
-                        ('▓', theme::signal(theme::audio()))
+                    spans.push(Span::raw("   "));
+                    // fader column: ghost (live modulated level, in the
+                    // cable's color) wins, then the knob, then the rail
+                    if bound && fr == row_of(live) {
+                        let cable = strip.srcs[0]
+                            .as_ref()
+                            .map(|a| routing::cable_color(entries, a))
+                            .unwrap_or_else(theme::clock);
+                        spans.push(Span::styled(theme::GHOST.to_string(), theme::signal(cable)));
+                    } else if let Some(knob) = theme::knob_cell(lvl, fr, fader_rows) {
+                        let style = if *sel { theme::selected() } else { theme::value() };
+                        spans.push(Span::styled(knob.to_string(), style));
                     } else {
-                        ('·', theme::dim())
-                    };
-                    spans.push(Span::styled(format!("   {}     ", ch), style));
+                        spans.push(Span::styled(theme::RAIL.to_string(), theme::chrome()));
+                    }
+                    spans.push(Span::raw(" "));
+                    let m = if *mute { 0.0 } else { *meter };
+                    let (mc, mstyle) = theme::meter_cell(m.min(1.0), fr, fader_rows);
+                    spans.push(Span::styled(mc.to_string(), mstyle));
+                    spans.push(Span::raw("   "));
                 }
                 lines.push(Line::from(spans));
             }
@@ -1211,7 +1229,7 @@ fn draw_ui(
                 Line::from(""),
                 Line::from("  h/l        Select strip (channels, then MASTER)"),
                 Line::from("  j/k        Select param (drv hi mid frq lo pan lvl)"),
-                Line::from("  - / =      Adjust selected param (_/+ coarse, counts)"),
+                Line::from("  K/J or =/- Adjust param 1% (up/down; _/+ = 5%, counts)"),
                 Line::from("  0          Reset param to default"),
                 Line::from("  @          Bind a mod source to the param · x unbinds"),
                 Line::from("  m / s      Mute / solo strip"),
@@ -1223,6 +1241,8 @@ fn draw_ui(
                 Line::from("Master adds width. Bound params show the live"),
                 Line::from("value in the source's cable color; ▴ on the"),
                 Line::from("fader is the live modulated level."),
+                Line::from(""),
+                Line::from("  mouse      wheel = 1% · click/drag the fader throws it"),
                 Line::from(""),
                 Line::from("  ? closes help"),
             ];
@@ -1403,12 +1423,40 @@ pub fn run() -> Result<()> {
                             history.record(slot, "Adjust", old, new);
                         }
                     }
-                    MouseEventKind::Down(_) => {
-                        // console mode: the column picks the strip
+                    MouseEventKind::Down(_) | MouseEventKind::Drag(_) => {
+                        // console mode: the column picks the strip; in the
+                        // fader area, click/drag throws the fader to the
+                        // pointer's row (sweeps coalesce into one undo)
+                        use crate::undo::{ParamUndo, ParamValue};
+                        let h = terminal.size().map(|r| r.height as usize).unwrap_or(0);
                         let mut s = inner.lock().unwrap();
                         let strip = (m.column as usize) / STRIP_W;
-                        if strip <= s.tracks.len() {
+                        if strip > s.tracks.len() {
+                            continue;
+                        }
+                        if matches!(m.kind, MouseEventKind::Down(_)) {
                             s.selected = strip;
+                        }
+                        let rows = fader_rows_for(h);
+                        let row = m.row as usize;
+                        if h >= CONSOLE_MIN_H && (FADER_TOP..FADER_TOP + rows).contains(&row) {
+                            s.selected = strip;
+                            s.selected_param = STRIP_ROWS.len() - 1; // the fader
+                            let value = 1.0 - (row - FADER_TOP) as f32 / (rows - 1) as f32;
+                            let slot = if strip < s.tracks.len() {
+                                strip * STRIDE
+                            } else {
+                                MASTER_SLOT
+                            };
+                            let old = s.get_param(slot);
+                            if strip < s.tracks.len() {
+                                s.tracks[strip].strip.set(Param::Level, value);
+                            } else {
+                                s.master.set(Param::Level, value);
+                            }
+                            if let Some(old) = old {
+                                history.record(slot, "Fader", old, ParamValue::F32(value));
+                            }
                         }
                     }
                     _ => {}
@@ -1541,12 +1589,15 @@ pub fn run() -> Result<()> {
                             crate::keys::cycle(s.selected_param, -n, STRIP_ROWS.len());
                     }
                     // -/= adjust the selected param; _/+ (or H/L) coarse
-                    KeyCode::Char(c @ ('-' | '=' | '_' | '+' | 'H' | 'L')) => {
+                    // J/K push the selected value down/up — vertical keys
+                    // for vertical faders, fine (1%) on the homerow.
+                    // -/= mirror them; _/+ are the 5% coarse pair.
+                    KeyCode::Char(c @ ('-' | '=' | '_' | '+' | 'J' | 'K')) => {
                         let n = count.take() as i32;
                         let (steps, coarse) = match c {
-                            '-' => (-n, false),
-                            '=' => (n, false),
-                            '_' | 'H' => (-n, true),
+                            '-' | 'J' => (-n, false),
+                            '=' | 'K' => (n, false),
+                            '_' => (-n, true),
                             _ => (n, true),
                         };
                         use crate::undo::ParamUndo;
@@ -1722,9 +1773,9 @@ mod tests {
     #[test]
     fn adjust_targets_the_selected_param() {
         let mut s = mixer_with_tracks(2);
-        // fader selected by default
+        // fader selected by default; fine steps are 1%
         adjust_param(&mut s, -2, false);
-        assert!((s.tracks[0].strip.level - 0.7).abs() < 1e-6);
+        assert!((s.tracks[0].strip.level - 0.78).abs() < 1e-6);
         // walk to the mid band and boost
         s.selected_param = 2; // STRIP_ROWS[2] = Mid
         adjust_param(&mut s, 4, false);
@@ -1745,7 +1796,9 @@ mod tests {
         s.selected_param = 6; // SendA
         assert_eq!(s.current_param(), Param::SendA);
         adjust_param(&mut s, 3, false);
-        assert!((s.tracks[0].strip.send_a - 0.15).abs() < 1e-6);
+        assert!((s.tracks[0].strip.send_a - 0.03).abs() < 1e-6, "fine = 1%");
+        adjust_param(&mut s, 1, true);
+        assert!((s.tracks[0].strip.send_a - 0.08).abs() < 1e-6, "coarse = 5%");
         s.selected_param = 7; // SendB
         adjust_param(&mut s, 100, true);
         assert_eq!(s.tracks[0].strip.send_b, 1.0, "clamps at 100%");
