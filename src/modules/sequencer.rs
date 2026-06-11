@@ -50,16 +50,53 @@ struct Step {
     /// Trigger probability 0–100.
     prob: u8,
     bind: Option<StepBind>,
+    /// Micro-timing push, read via `delay_unit` (ms literal or % of step).
+    delay: f32,
+    delay_unit: state::DelayUnit,
+    /// 100 = the exact set delay every time; below that, chance of a
+    /// random delay up to the set value (else straight).
+    delay_prob: u8,
+    /// Ratchet count 1–8 (note tracks; modulation tracks ignore it).
+    repeats: u8,
+    /// Coin flip per repeat beyond the first; 100 = all of them.
+    repeat_prob: u8,
 }
 
 impl Default for Step {
     fn default() -> Self {
-        Self { active: false, note: 60, velocity: 100, mod_value: 0.0, prob: 100, bind: None }
+        Self {
+            active: false,
+            note: 60,
+            velocity: 100,
+            mod_value: 0.0,
+            prob: 100,
+            bind: None,
+            delay: 0.0,
+            delay_unit: state::DelayUnit::Ms,
+            delay_prob: 100,
+            repeats: 1,
+            repeat_prob: 100,
+        }
     }
 }
 
 /// Number of pattern slots per track (`a`–`h`).
 const NUM_SLOTS: usize = 8;
+
+/// Ratchet ceiling (Varigate goes to 8; so do we).
+const MAX_REPEATS: u8 = 8;
+
+/// Humanize jitter ceiling — past ±30ms it's not "human", it's broken.
+const MAX_HUMANIZE_MS: f32 = 30.0;
+
+/// Delay ceiling as a fraction of the step window: a step's note-on must
+/// land before the next boundary's note-off or events reorder.
+const MAX_DELAY_FRAC: f64 = 0.95;
+
+/// Editing caps for the delay layer (the scheduler clamps to the step
+/// window regardless — at fast tempos a big ms value just maxes out).
+const MAX_DELAY_MS: f32 = 500.0;
+const MAX_DELAY_PCT: f32 = 95.0;
 
 /// Global steps per beat and per bar (16th-note steps, 4/4) — the macro
 /// quantize grid and the macro lane's slot duration.
@@ -120,6 +157,14 @@ struct Track {
     /// Parked pattern slots; `slots[active_slot]` is `None` (its data is
     /// inline above). Untouched slots are `None` and read as empty.
     slots: [Option<PatternData>; NUM_SLOTS],
+    /// MPC swing 50–75; odd global 16ths pushed by (2·s/100 − 1) steps.
+    swing: u8,
+    /// Groove template name (`theory::groove`); `None` = straight.
+    groove: Option<String>,
+    /// Timing jitter ± ms per fire, re-rolled per cycle. 0 = off.
+    humanize: f32,
+    /// Ratchet velocity shape −100..=100: + = decay, − = crescendo.
+    ratchet_decay: i8,
 }
 
 impl Track {
@@ -146,6 +191,10 @@ impl Track {
             root: 60,
             active_slot: 0,
             slots: Default::default(),
+            swing: 50,
+            groove: None,
+            humanize: 0.0,
+            ratchet_decay: 0,
         }
     }
 
@@ -308,6 +357,34 @@ impl SequencerState {
 /// 4. Call `history.push(Command::YourVariant { ... })` at the action site
 ///
 /// Non-undoable: navigation, clipboard yank, help toggle, save operations.
+/// A track's groove-section knobs as one undoable unit (`:swing`,
+/// `:groove`, `:humanize`, `:decay` each move one field).
+#[derive(Debug, Clone, PartialEq)]
+struct Timing {
+    swing: u8,
+    groove: Option<String>,
+    humanize: f32,
+    decay: i8,
+}
+
+impl Timing {
+    fn of(trk: &Track) -> Self {
+        Self {
+            swing: trk.swing,
+            groove: trk.groove.clone(),
+            humanize: trk.humanize,
+            decay: trk.ratchet_decay,
+        }
+    }
+
+    fn apply(&self, trk: &mut Track) {
+        trk.swing = self.swing;
+        trk.groove = self.groove.clone();
+        trk.humanize = self.humanize;
+        trk.ratchet_decay = self.decay;
+    }
+}
+
 #[derive(Clone)]
 enum Command {
     ToggleStep {
@@ -359,6 +436,11 @@ enum Command {
         track: usize,
         old: state::CycleMode,
         new: state::CycleMode,
+    },
+    SetTiming {
+        track: usize,
+        old: Timing,
+        new: Timing,
     },
     SwitchSlot {
         track: usize,
@@ -616,6 +698,10 @@ enum Action {
     BindStep { target: state::BindTarget, source: Option<String> },
     /// `(` / `)`: scale the bound source's influence
     BindAmount { delta: f32 },
+    /// `%` in the delay layer / a unit suffix at the `N` prompt. With
+    /// `convert`, the value is rescaled at the current bpm so the
+    /// effective timing doesn't move (the `%`-toggle behavior).
+    SetDelayUnit { unit: state::DelayUnit, convert: bool },
 }
 
 impl Action {
@@ -801,6 +887,28 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
                     let d = n as f32 * if *coarse { 0.1 } else { 0.01 };
                     st.mod_value = (st.mod_value + d).clamp(-1.0, 1.0);
                 }
+                state::BindTarget::Delay => {
+                    // ms moves in 1/10ms ticks, % in 1/10% — same muscle
+                    let d = n as f32 * if *coarse { 10.0 } else { 1.0 };
+                    let cap = match st.delay_unit {
+                        state::DelayUnit::Ms => MAX_DELAY_MS,
+                        state::DelayUnit::Pct => MAX_DELAY_PCT,
+                    };
+                    st.delay = (st.delay + d).clamp(0.0, cap);
+                }
+                state::BindTarget::DelayProb => {
+                    let d = n * if *coarse { 25 } else { 5 };
+                    st.delay_prob = (i32::from(st.delay_prob) + d).clamp(0, 100) as u8;
+                }
+                state::BindTarget::Repeats => {
+                    let d = n * if *coarse { i32::from(MAX_REPEATS) } else { 1 };
+                    st.repeats =
+                        (i32::from(st.repeats) + d).clamp(1, i32::from(MAX_REPEATS)) as u8;
+                }
+                state::BindTarget::RepeatProb => {
+                    let d = n * if *coarse { 25 } else { 5 };
+                    st.repeat_prob = (i32::from(st.repeat_prob) + d).clamp(0, 100) as u8;
+                }
             }
             let new_step = s.tracks[tidx].steps[sel].clone();
             push_step_edit(h, tidx, sel, old_step, new_step);
@@ -815,6 +923,22 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
                 state::BindTarget::Velocity => st.velocity = (*value as i32).clamp(1, 127) as u8,
                 state::BindTarget::Prob => st.prob = (*value as i32).clamp(0, 100) as u8,
                 state::BindTarget::Mod => st.mod_value = value.clamp(-1.0, 1.0),
+                state::BindTarget::Delay => {
+                    let cap = match st.delay_unit {
+                        state::DelayUnit::Ms => MAX_DELAY_MS,
+                        state::DelayUnit::Pct => MAX_DELAY_PCT,
+                    };
+                    st.delay = value.clamp(0.0, cap);
+                }
+                state::BindTarget::DelayProb => {
+                    st.delay_prob = (*value as i32).clamp(0, 100) as u8;
+                }
+                state::BindTarget::Repeats => {
+                    st.repeats = (*value as i32).clamp(1, i32::from(MAX_REPEATS)) as u8;
+                }
+                state::BindTarget::RepeatProb => {
+                    st.repeat_prob = (*value as i32).clamp(0, 100) as u8;
+                }
             }
             let new_step = s.tracks[tidx].steps[sel].clone();
             push_step_edit(h, tidx, sel, old_step, new_step);
@@ -1017,6 +1141,36 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
             push_step_edit(h, tidx, sel, old_step, new_step);
             Some(msg)
         }
+        Action::SetDelayUnit { unit, convert } => {
+            let sel = s.selected;
+            let step_ms = (60_000.0 / s.bpm / STEPS_PER_BEAT as f64) as f32;
+            let old_step = s.tracks[tidx].steps[sel].clone();
+            let st = &mut s.tracks[tidx].steps[sel];
+            if st.delay_unit == *unit {
+                return None;
+            }
+            if *convert {
+                // rescale so the effective timing holds at the current bpm
+                st.delay = match unit {
+                    state::DelayUnit::Ms => {
+                        (st.delay / 100.0 * step_ms).clamp(0.0, MAX_DELAY_MS)
+                    }
+                    state::DelayUnit::Pct => {
+                        (st.delay / step_ms * 100.0).clamp(0.0, MAX_DELAY_PCT)
+                    }
+                };
+            }
+            st.delay_unit = *unit;
+            let new_step = s.tracks[tidx].steps[sel].clone();
+            push_step_edit(h, tidx, sel, old_step, new_step);
+            Some(format!(
+                "delay unit: {}",
+                match unit {
+                    state::DelayUnit::Ms => "ms (literal — tempo changes the feel)",
+                    state::DelayUnit::Pct => "% of step (groove survives tempo)",
+                }
+            ))
+        }
         Action::Fill { kind, arg, seed } => {
             use crate::theory::gen;
             let len = s.tracks[tidx].length;
@@ -1069,6 +1223,11 @@ fn apply_action(s: &mut SequencerState, h: &mut History, action: &Action) -> Opt
                     prob: gs.prob,
                     mod_value: st.mod_value,
                     bind: st.bind.clone(),
+                    delay: st.delay,
+                    delay_unit: st.delay_unit,
+                    delay_prob: st.delay_prob,
+                    repeats: st.repeats,
+                    repeat_prob: st.repeat_prob,
                 })
                 .collect();
             if old == new {
@@ -1126,6 +1285,14 @@ fn fmt_macro_cmd(cmd: &state::MacroCmd) -> String {
                 TrackMode::Modulation => "mod",
             }
         ),
+        state::MacroCmd::SetTiming { track, swing, groove, humanize, decay } => format!(
+            "timing {} {} {} {} {}",
+            track + 1,
+            swing,
+            if groove.is_empty() { "straight" } else { groove },
+            humanize,
+            decay
+        ),
     }
 }
 
@@ -1177,6 +1344,25 @@ fn parse_macro_dsl(input: &str) -> Result<(Vec<state::MacroCmd>, Option<state::Q
                     return Err(format!("unknown scale: {scale}"));
                 }
                 cmds.push(state::MacroCmd::SetScale { track: parse_track(t)?, scale });
+            }
+            ["timing", t, sw, gr, hu, de] => {
+                let swing: u8 = sw.parse().map_err(|_| format!("bad swing: {sw}"))?;
+                let groove = if *gr == "straight" {
+                    String::new()
+                } else if crate::theory::groove::find(gr).is_some() {
+                    gr.to_string()
+                } else {
+                    return Err(format!("unknown groove: {gr}"));
+                };
+                let humanize: f32 = hu.parse().map_err(|_| format!("bad humanize: {hu}"))?;
+                let decay: i8 = de.parse().map_err(|_| format!("bad decay: {de}"))?;
+                cmds.push(state::MacroCmd::SetTiming {
+                    track: parse_track(t)?,
+                    swing: swing.clamp(50, 75),
+                    groove,
+                    humanize: humanize.clamp(0.0, MAX_HUMANIZE_MS),
+                    decay: decay.clamp(-100, 100),
+                });
             }
             ["fill", t, kind] | ["fill", t, kind, _] => {
                 let k = state::FillKind::parse(kind).ok_or_else(|| format!("bad fill: {kind}"))?;
@@ -1325,6 +1511,7 @@ impl Command {
             Command::SwitchSlot { .. } => "Switch pattern",
             Command::SaveSlot { .. } => "Save pattern slot",
             Command::SetScale { .. } => "Set scale",
+            Command::SetTiming { .. } => "Set timing",
             Command::SetLane { .. } => "Edit macro lane",
             Command::Group { desc, .. } => desc,
         }
@@ -1397,6 +1584,12 @@ impl Command {
             Command::SetScale { track, old, .. } => {
                 if *track < state.tracks.len() {
                     state.tracks[*track] = (**old).clone();
+                    state.focus(*track, None);
+                }
+            }
+            Command::SetTiming { track, old, .. } => {
+                if *track < state.tracks.len() {
+                    old.apply(&mut state.tracks[*track]);
                     state.focus(*track, None);
                 }
             }
@@ -1481,6 +1674,12 @@ impl Command {
             Command::SetScale { track, new, .. } => {
                 if *track < state.tracks.len() {
                     state.tracks[*track] = (**new).clone();
+                    state.focus(*track, None);
+                }
+            }
+            Command::SetTiming { track, new, .. } => {
+                if *track < state.tracks.len() {
+                    new.apply(&mut state.tracks[*track]);
                     state.focus(*track, None);
                 }
             }
@@ -1666,6 +1865,7 @@ fn is_multi_action(action: &Action) -> bool {
         | Action::CutStep
         | Action::Adjust { .. }
         | Action::SetStepValue { .. }
+        | Action::SetDelayUnit { .. }
         | Action::ToggleMute
         | Action::ToggleMode
         | Action::Rotate { .. }
@@ -1820,6 +2020,13 @@ fn macro_cmds_of(cmd: &Command) -> Vec<state::MacroCmd> {
         Command::SetScale { track, new, .. } => vec![state::MacroCmd::SetScale {
             track: *track,
             scale: new.scale.as_ref().map(|sc| sc.name.clone()).unwrap_or_default(),
+        }],
+        Command::SetTiming { track, new, .. } => vec![state::MacroCmd::SetTiming {
+            track: *track,
+            swing: new.swing,
+            groove: new.groove.clone().unwrap_or_default(),
+            humanize: new.humanize,
+            decay: new.decay,
         }],
         Command::Group { cmds, .. } => cmds.iter().flat_map(macro_cmds_of).collect(),
         Command::NewTrack { .. }
@@ -1994,6 +2201,24 @@ fn apply_macro_cmd(s: &mut SequencerState, cmd: &state::MacroCmd, seed: u64) -> 
             s.tracks[t].mode = *mode;
             Some(Command::ToggleMode { track: t, was_mode })
         }
+        state::MacroCmd::SetTiming { track, swing, groove, humanize, decay } => {
+            let t = *track;
+            if t >= s.tracks.len() {
+                return None;
+            }
+            let old = Timing::of(&s.tracks[t]);
+            let new = Timing {
+                swing: (*swing).clamp(50, 75),
+                groove: (!groove.is_empty()).then(|| groove.clone()),
+                humanize: humanize.clamp(0.0, MAX_HUMANIZE_MS),
+                decay: (*decay).clamp(-100, 100),
+            };
+            if new == old {
+                return None;
+            }
+            new.apply(&mut s.tracks[t]);
+            Some(Command::SetTiming { track: t, old, new })
+        }
     }
 }
 
@@ -2057,7 +2282,8 @@ fn macro_first_track(m: &Macro) -> Option<usize> {
         | state::MacroCmd::SetSteps { track, .. }
         | state::MacroCmd::SetActive { track, .. }
         | state::MacroCmd::SetEuclid { track, .. }
-        | state::MacroCmd::SetMode { track, .. } => *track,
+        | state::MacroCmd::SetMode { track, .. }
+        | state::MacroCmd::SetTiming { track, .. } => *track,
         state::MacroCmd::SetBpm { .. } => 0,
     })
 }
@@ -2146,6 +2372,43 @@ fn set_scale(
     }
 }
 
+/// `:swing/:groove/:humanize/:decay` executor: move one groove-section
+/// knob on the target tracks (marks honored), one undo entry for the lot.
+fn set_timing(
+    s: &mut SequencerState,
+    h: &mut History,
+    desc: &'static str,
+    tweak: impl Fn(&mut Timing),
+) -> Option<String> {
+    let targets = marked_targets(s);
+    let multi = targets.len() > 1;
+    if multi {
+        h.begin_group();
+    }
+    let mut changed = 0;
+    for &t in &targets {
+        if t >= s.tracks.len() {
+            continue;
+        }
+        let old = Timing::of(&s.tracks[t]);
+        let mut new = old.clone();
+        tweak(&mut new);
+        new.swing = new.swing.clamp(50, 75);
+        new.humanize = new.humanize.clamp(0.0, MAX_HUMANIZE_MS);
+        new.decay = new.decay.clamp(-100, 100);
+        if new == old {
+            continue;
+        }
+        new.apply(&mut s.tracks[t]);
+        h.push(Command::SetTiming { track: t, old, new });
+        changed += 1;
+    }
+    if multi {
+        h.end_group(desc);
+    }
+    (changed == 0).then(|| String::from("No change"))
+}
+
 /// Parse a root note: a MIDI number ("57") or a note name ("A3", "c#4",
 /// "eb2"). Octave -1 to 9, MIDI C4 = 60 convention.
 fn parse_root(input: &str) -> Option<u8> {
@@ -2182,10 +2445,13 @@ fn parse_root(input: &str) -> Option<u8> {
 fn seq_completer(macro_ids: Vec<String>) -> impl Fn(&str, &str) -> Vec<String> {
     move |head: &str, word: &str| {
         let items: Vec<String> = match head {
-            "" => ["w", "e", "q", "q!", "wq", "x", "set", "scale", "fill", "macro"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
+            "" => [
+                "w", "e", "q", "q!", "wq", "x", "set", "scale", "fill", "macro", "swing",
+                "groove", "humanize", "decay",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
             "e" | "edit" | "w" | "write" | "wq" | "x" => {
                 crate::excmd::patch_names(&state::patches_dir())
             }
@@ -2204,6 +2470,23 @@ fn seq_completer(macro_ids: Vec<String>) -> impl Fn(&str, &str) -> Vec<String> {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
+            "groove" => crate::theory::groove::LIBRARY
+                .iter()
+                .map(|g| g.name.to_string())
+                .collect(),
+            // canonical feels; any 50-75 value types fine
+            "swing" => ["50", "54", "58", "62", "66", "71", "75"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            "humanize" => ["0", "3", "6", "10", "18", "30"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            "decay" => ["0", "30", "60", "100", "-30", "-60"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             "set cycle" => state::CycleMode::ALL.iter().map(|m| m.name().to_string()).collect(),
             "macro" => macro_ids.clone(),
             _ => Vec::new(),
@@ -2214,7 +2497,8 @@ fn seq_completer(macro_ids: Vec<String>) -> impl Fn(&str, &str) -> Vec<String> {
 
 /// Apply an auditionable command line into a fresh scratch history (the
 /// command-bar arrow-key preview). Returns None when the line isn't
-/// previewable — only :scale, :fill, and :set cycle audition.
+/// previewable — :scale, :fill, :set cycle, and the groove section
+/// (:swing/:groove/:humanize/:decay) audition.
 fn start_preview(
     state: &Mutex<SequencerState>,
     line: &str,
@@ -2267,6 +2551,44 @@ fn start_preview(
                         apply_selected(&mut s, &mut scratch, &action, None);
                     })
                 }
+                // the groove section auditions live — you HEAR the menu
+                "swing" if !rest.is_empty() => rest
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|v| (50..=75).contains(v))
+                    .map(|v| {
+                        set_timing(&mut s, &mut scratch, "Set swing", |tm| tm.swing = v);
+                    }),
+                "groove" if !rest.is_empty() => {
+                    let name = rest.to_lowercase();
+                    let g: Option<Option<String>> = if name == "straight" || name == "off" {
+                        Some(None)
+                    } else {
+                        crate::theory::groove::find(&name).map(|g| Some(g.name.to_string()))
+                    };
+                    g.map(|g| {
+                        set_timing(&mut s, &mut scratch, "Set groove", |tm| {
+                            tm.groove = g.clone();
+                        });
+                    })
+                }
+                "humanize" if !rest.is_empty() => rest
+                    .parse::<f32>()
+                    .ok()
+                    .filter(|v| (0.0..=MAX_HUMANIZE_MS).contains(v))
+                    .map(|v| {
+                        set_timing(&mut s, &mut scratch, "Set humanize", |tm| {
+                            tm.humanize = v;
+                        });
+                    }),
+                "decay" if !rest.is_empty() => rest
+                    .parse::<i8>()
+                    .ok()
+                    .map(|v| {
+                        set_timing(&mut s, &mut scratch, "Set ratchet decay", |tm| {
+                            tm.decay = v;
+                        });
+                    }),
                 _ => None,
             }
         }
@@ -2358,6 +2680,10 @@ fn sequencer_thread(
     let mut phase: Option<f64> = None;
     let mut last_clock: u64 = 0;
     let mut last_gstep: Option<u64> = None;
+    // Scheduled sub-step fires (delay/swing/ratchets): boundaries
+    // schedule, the loop emits what has come due. Flushed on transport
+    // stop and clock regression — never carried across a rebase.
+    let mut pending_fires: Vec<PendingFire> = Vec::new();
     // Bar counter for the macro lane (None until the first tick so the
     // very first bar's slot fires too).
     let mut last_bar: Option<u64> = None;
@@ -2451,6 +2777,12 @@ fn sequencer_thread(
             }
 
             let gstep = if samples_per_step > 0 {
+                if clock < last_clock {
+                    // clock regression (mixer respawn / session reload):
+                    // scheduled fires belong to a timeline that no longer
+                    // exists — flush, never replay
+                    pending_fires.clear();
+                }
                 let p = advance_phase(phase, clock, last_clock, samples_per_step);
                 phase = Some(p);
                 last_clock = clock;
@@ -2546,6 +2878,7 @@ fn sequencer_thread(
                     let off = bind_offsets(step.bind.as_ref(), bind_value);
                     let prob = (i32::from(step.prob) + off.prob).clamp(0, 100) as u8;
 
+                    let step_ms = samples_per_step as f32 / sample_rate as f32 * 1000.0;
                     match track.mode {
                         TrackMode::Note => {
                             // probability-failed steps behave as inactive:
@@ -2553,25 +2886,57 @@ fn sequencer_thread(
                             let fires = step.active && step_fires(prob, t, gstep);
                             let velocity =
                                 (i32::from(step.velocity) + off.velocity).clamp(1, 127) as u8;
-                            let mod_val =
-                                if fires { f32::from(velocity) / 127.0 } else { 0.0 };
-                            if let (Some(ref mut bus), Some(base)) = (modbus.as_mut(), s.mod_base) {
-                                bus.set(base + t, mod_val);
-                            }
+                            let base = fire_offset(track, step, &off, step_ms, t, gstep);
+                            let reps = repeat_count(step, &off, t, gstep);
                             let hz = step_hz(track, step.note, off.degrees) as f32;
                             let note_id = step.note;
+                            let decay = track.ratchet_decay;
+                            // the previous note's gate always ends at the
+                            // boundary, fired or not, delayed or not
                             if let Some(n) = s.last_notes[t] {
                                 let _ = events.write_event(&AudioEvent::note_off_source(
                                     n, t as u8, prev_pos as u32,
                                 ));
+                                s.last_notes[t] = None;
                             }
                             if fires {
-                                let _ = events.write_event(&AudioEvent::note_on_hz(
-                                    hz, velocity, t as u8, pos as u32,
-                                ));
-                                s.last_notes[t] = Some(note_id);
-                            } else {
-                                s.last_notes[t] = None;
+                                if base > 0.0 {
+                                    // gate stays down until the pushed
+                                    // note-on actually lands
+                                    if let (Some(ref mut bus), Some(mb)) =
+                                        (modbus.as_mut(), s.mod_base)
+                                    {
+                                        bus.set(mb + t, 0.0);
+                                    }
+                                }
+                                let window = 1.0 - base;
+                                for k in 0..reps {
+                                    let vel = ratchet_vel(velocity, decay, k, reps);
+                                    let at = gstep as f64
+                                        + base
+                                        + window * f64::from(k) / f64::from(reps);
+                                    pending_fires.push(PendingFire {
+                                        at,
+                                        fire: Fire::NoteOn {
+                                            track: t,
+                                            pos,
+                                            hz,
+                                            vel,
+                                            note_id,
+                                        },
+                                    });
+                                    pending_fires.push(PendingFire {
+                                        at,
+                                        fire: Fire::BusSet {
+                                            track: t,
+                                            value: f32::from(vel) / 127.0,
+                                        },
+                                    });
+                                }
+                            } else if let (Some(ref mut bus), Some(mb)) =
+                                (modbus.as_mut(), s.mod_base)
+                            {
+                                bus.set(mb + t, 0.0);
                             }
                         }
                         TrackMode::Modulation => {
@@ -2580,10 +2945,16 @@ fn sequencer_thread(
                             // modulation tracks, as it always was
                             if step_fires(prob, t, gstep) {
                                 let v = (step.mod_value + off.mod_value).clamp(-1.0, 1.0);
-                                if let (Some(ref mut bus), Some(base)) =
+                                let base = fire_offset(track, step, &off, step_ms, t, gstep);
+                                if base > 0.0 {
+                                    pending_fires.push(PendingFire {
+                                        at: gstep as f64 + base,
+                                        fire: Fire::BusSet { track: t, value: v },
+                                    });
+                                } else if let (Some(ref mut bus), Some(mb)) =
                                     (modbus.as_mut(), s.mod_base)
                                 {
-                                    bus.set(base + t, v);
+                                    bus.set(mb + t, v);
                                 }
                             }
                         }
@@ -2591,9 +2962,52 @@ fn sequencer_thread(
                 }
                 last_gstep = Some(gstep);
             }
+
+            // Emit due scheduled fires (delays/ratchets land between
+            // boundaries; straight steps were scheduled at the boundary
+            // and come due in this same pass). Stopped transport flushes.
+            if playing {
+                if let Some(p) = phase {
+                    pending_fires.sort_by(|a, b| {
+                        a.at.partial_cmp(&b.at).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    let mut later = Vec::new();
+                    for pf in pending_fires.drain(..) {
+                        if pf.at > p {
+                            later.push(pf);
+                            continue;
+                        }
+                        match pf.fire {
+                            Fire::NoteOn { track, pos, hz, vel, note_id } => {
+                                if track < s.tracks.len() && !s.tracks[track].muted {
+                                    let _ = events.write_event(&AudioEvent::note_on_hz(
+                                        hz, vel, track as u8, pos as u32,
+                                    ));
+                                    s.last_notes[track] = Some(note_id);
+                                }
+                            }
+                            Fire::BusSet { track, value } => {
+                                if let (Some(ref mut bus), Some(mb)) =
+                                    (modbus.as_mut(), s.mod_base)
+                                {
+                                    if track < s.tracks.len() && !s.tracks[track].muted {
+                                        bus.set(mb + track, value);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    pending_fires = later;
+                }
+            } else {
+                pending_fires.clear();
+            }
         } // lock released here, before sleep
 
-        std::thread::sleep(Duration::from_millis(10));
+        // ratchets at /8 land ~15ms apart at 120bpm — poll tight while
+        // anything is in flight, relax when the grid is straight
+        let poll_ms = if pending_fires.is_empty() { 10 } else { 2 };
+        std::thread::sleep(Duration::from_millis(poll_ms));
     }
 
     Ok(())
@@ -2710,6 +3124,120 @@ fn step_fires(prob: u8, track: usize, gstep: u64) -> bool {
     r.below(100) < u64::from(prob)
 }
 
+/// RNG purpose salts for the timing rolls — each decision draws from its
+/// own stream so e.g. the delay roll can't correlate with repeat flips.
+const SALT_DELAY_GATE: u64 = 1;
+const SALT_DELAY_AMT: u64 = 2;
+const SALT_HUMANIZE: u64 = 3;
+const SALT_REPEAT: u64 = 16; // + repeat index
+
+/// Deterministic [0,1) roll for timing decisions, keyed like `step_fires`
+/// plus a purpose salt. Same key → same roll, forever.
+fn timing_roll(track: usize, gstep: u64, salt: u64) -> f32 {
+    let mut r = crate::theory::rng::Rng::new(
+        track_seed(track)
+            ^ gstep.wrapping_mul(0xBF58_476D_1CE4_E5B9)
+            ^ salt.wrapping_mul(0x94D0_49BB_1331_11EB),
+    );
+    (r.below(1 << 24) as f32) / (1u32 << 24) as f32
+}
+
+/// A scheduled sub-step emission, `at` in global-step phase units.
+#[derive(Debug, Clone, PartialEq)]
+enum Fire {
+    NoteOn { track: usize, pos: usize, hz: f32, vel: u8, note_id: u8 },
+    BusSet { track: usize, value: f32 },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PendingFire {
+    at: f64,
+    fire: Fire,
+}
+
+/// MPC swing: odd global 16ths pushed by (2·s/100 − 1) steps.
+/// 50 = straight, 66 ≈ triplet shuffle, 75 = max drag.
+fn swing_frac(swing: u8, gstep: u64) -> f64 {
+    if gstep % 2 == 1 {
+        f64::from(swing.clamp(50, 75)) / 50.0 - 1.0
+    } else {
+        0.0
+    }
+}
+
+/// The step's effective delay in step fractions: unit conversion, bind
+/// offset, then the delay-prob roll — 100 means the exact set delay every
+/// time; below that, prob-gated random amount up to the set value.
+fn delay_frac(step: &Step, off: &BindOffsets, step_ms: f32, track: usize, gstep: u64) -> f64 {
+    let set = match step.delay_unit {
+        state::DelayUnit::Ms if step_ms > 0.0 => f64::from(step.delay / step_ms),
+        state::DelayUnit::Ms => 0.0,
+        state::DelayUnit::Pct => f64::from(step.delay) / 100.0,
+    };
+    let set = (set + off.delay_frac).clamp(0.0, MAX_DELAY_FRAC);
+    let dprob = (i32::from(step.delay_prob) + off.delay_prob).clamp(0, 100);
+    if set <= 0.0 || dprob >= 100 {
+        return set;
+    }
+    if timing_roll(track, gstep, SALT_DELAY_GATE) * 100.0 < dprob as f32 {
+        set * f64::from(timing_roll(track, gstep, SALT_DELAY_AMT))
+    } else {
+        0.0
+    }
+}
+
+/// ± humanize jitter in step fractions, re-rolled per cycle (gstep is
+/// cycle-unique). The caller clamps the summed offset ≥ 0.
+fn humanize_frac(humanize: f32, step_ms: f32, track: usize, gstep: u64) -> f64 {
+    if humanize <= 0.0 || step_ms <= 0.0 {
+        return 0.0;
+    }
+    let ms = (timing_roll(track, gstep, SALT_HUMANIZE) * 2.0 - 1.0) * humanize;
+    f64::from(ms / step_ms)
+}
+
+/// Everything that moves a fire off its grid line, clamped to the step
+/// window: swing + groove + per-step delay + humanize.
+fn fire_offset(
+    track: &Track,
+    step: &Step,
+    off: &BindOffsets,
+    step_ms: f32,
+    t: usize,
+    gstep: u64,
+) -> f64 {
+    let base = swing_frac(track.swing, gstep)
+        + f64::from(crate::theory::groove::offset(track.groove.as_deref(), gstep))
+        + delay_frac(step, off, step_ms, t, gstep)
+        + humanize_frac(track.humanize, step_ms, t, gstep);
+    base.clamp(0.0, MAX_DELAY_FRAC)
+}
+
+/// How many of the step's repeats actually fire this cycle: one always,
+/// plus a coin flip per extra (p=100 → all, p=0 → one, bell in between).
+fn repeat_count(step: &Step, off: &BindOffsets, track: usize, gstep: u64) -> u32 {
+    let n_set = (i32::from(step.repeats) + off.repeats).clamp(1, i32::from(MAX_REPEATS)) as u32;
+    let rprob = (i32::from(step.repeat_prob) + off.repeat_prob).clamp(0, 100);
+    (1..n_set)
+        .filter(|&k| {
+            rprob >= 100
+                || timing_roll(track, gstep, SALT_REPEAT + u64::from(k)) * 100.0 < rprob as f32
+        })
+        .count() as u32
+        + 1
+}
+
+/// Ratchet velocity shape: decay > 0 fades successive repeats out
+/// (classic roll), decay < 0 swells them into the next beat.
+fn ratchet_vel(vel: u8, decay: i8, k: u32, n: u32) -> u8 {
+    if n <= 1 || k == 0 || decay == 0 {
+        return vel;
+    }
+    let along = k as f32 / (n - 1) as f32;
+    let factor = 1.0 - f32::from(decay) / 100.0 * along;
+    (f32::from(vel) * factor).round().clamp(1.0, 127.0) as u8
+}
+
 /// A step's frequency. No scale: `note` is MIDI, 12-TET. With a scale:
 /// `note` is a degree biased at 60 (60 = root), tuned by the cents engine
 /// from the track root — this is the microtonal path.
@@ -2732,6 +3260,11 @@ struct BindOffsets {
     velocity: i32,
     prob: i32,
     mod_value: f32,
+    /// Offset to the step's delay, in fractions of the step window.
+    delay_frac: f64,
+    delay_prob: i32,
+    repeats: i32,
+    repeat_prob: i32,
 }
 
 fn bind_offsets(bind: Option<&StepBind>, value: Option<f32>) -> BindOffsets {
@@ -2745,6 +3278,12 @@ fn bind_offsets(bind: Option<&StepBind>, value: Option<f32>) -> BindOffsets {
         state::BindTarget::Velocity => o.velocity = (v * 127.0).round() as i32,
         state::BindTarget::Prob => o.prob = (v * 100.0).round() as i32,
         state::BindTarget::Mod => o.mod_value = v,
+        state::BindTarget::Delay => o.delay_frac = f64::from(v) * MAX_DELAY_FRAC,
+        state::BindTarget::DelayProb => o.delay_prob = (v * 100.0).round() as i32,
+        state::BindTarget::Repeats => {
+            o.repeats = (v * f32::from(MAX_REPEATS)).round() as i32;
+        }
+        state::BindTarget::RepeatProb => o.repeat_prob = (v * 100.0).round() as i32,
     }
     o
 }
@@ -3127,6 +3666,25 @@ fn draw_ui(
                         "{:+.2}",
                         (step.mod_value + off.mod_value).clamp(-1.0, 1.0)
                     ),
+                    state::BindTarget::Delay => {
+                        format!("{}{:+.0}%", delay_text(step), off.delay_frac * 100.0)
+                    }
+                    state::BindTarget::DelayProb => format!(
+                        "{}→{}%",
+                        step.delay_prob,
+                        (i32::from(step.delay_prob) + off.delay_prob).clamp(0, 100)
+                    ),
+                    state::BindTarget::Repeats => format!(
+                        "x{}→x{}",
+                        step.repeats,
+                        (i32::from(step.repeats) + off.repeats)
+                            .clamp(1, i32::from(MAX_REPEATS))
+                    ),
+                    state::BindTarget::RepeatProb => format!(
+                        "{}→{}%",
+                        step.repeat_prob,
+                        (i32::from(step.repeat_prob) + off.repeat_prob).clamp(0, 100)
+                    ),
                 };
                 vels.push(Span::styled(
                     format!("{:^cell$}", text),
@@ -3158,6 +3716,38 @@ fn draw_ui(
                 state::BindTarget::Mod => (
                     format!("{:+.2}", step.mod_value),
                     theme::cv_ramp(step.mod_value),
+                ),
+                state::BindTarget::Delay => (
+                    if step.active || trk.mode == TrackMode::Modulation {
+                        delay_text(step)
+                    } else {
+                        String::from("·")
+                    },
+                    if step.delay > 0.0 { theme::clock() } else { theme::note() },
+                ),
+                state::BindTarget::DelayProb => (
+                    if step.active || trk.mode == TrackMode::Modulation {
+                        format!("{}%", step.delay_prob)
+                    } else {
+                        String::from("·")
+                    },
+                    if step.delay_prob < 100 { theme::clock() } else { theme::note() },
+                ),
+                state::BindTarget::Repeats => (
+                    if step.active && trk.mode == TrackMode::Note {
+                        format!("x{}", step.repeats)
+                    } else {
+                        String::from("·")
+                    },
+                    if step.repeats > 1 { theme::clock() } else { theme::note() },
+                ),
+                state::BindTarget::RepeatProb => (
+                    if step.active && trk.mode == TrackMode::Note {
+                        format!("{}%", step.repeat_prob)
+                    } else {
+                        String::from("·")
+                    },
+                    if step.repeat_prob < 100 { theme::clock() } else { theme::note() },
                 ),
             };
             vels.push(Span::styled(
@@ -3223,6 +3813,10 @@ fn draw_ui(
                     state::BindTarget::Velocity => "vel",
                     state::BindTarget::Prob => "prob",
                     state::BindTarget::Mod => "mod",
+                    state::BindTarget::Delay => "delay",
+                    state::BindTarget::DelayProb => "dly%",
+                    state::BindTarget::Repeats => "reps",
+                    state::BindTarget::RepeatProb => "rep%",
                 };
                 match live_binds.get(&state.selected) {
                     Some(v) => msg_parts.push(format!(
@@ -3360,7 +3954,8 @@ fn sequencer_help() -> Vec<Line<'static>> {
         Line::from("  x cut · ~ toggle · . repeat · o/O new track"),
         Line::from("  X mark track (multi-edit) · gX clear marks"),
         Line::from("  m mute · M note/mod mode · >>/<< rotate"),
-        Line::from("  'n 'v 'p 'm value layer · \"a-\"h pattern slot (\"A save)"),
+        Line::from("  'n 'v 'p 'm value layer · 'd delay ('D prob) · 'r repeats ('R prob)"),
+        Line::from("  \"a-\"h pattern slot (\"A save) · % delay unit ms↔step"),
         Line::from("  gc/gC cycle mode · F refill · u/^r undo/redo"),
         Line::from("  cycles: →fwd ←rev ↔pong ?rand ~drunk ½skip ◎spiral #prime"),
         Line::from(""),
@@ -3373,6 +3968,7 @@ fn sequencer_help() -> Vec<Line<'static>> {
         Line::from(""),
         Line::from("Ex: :w/:e/:q · :set bpm/pulses/length/rotation/cycle/root"),
         Line::from("  :scale <name>|off|<file.scl> · :fill <kind> · :macro a = …"),
+        Line::from("  :swing 50-75 · :groove <name> · :humanize ms · :decay ±%"),
         Line::from(""),
         Line::from("  ? closes help"),
     ]
@@ -3386,6 +3982,10 @@ fn layer_tag(layer: state::BindTarget) -> Option<&'static str> {
         state::BindTarget::Velocity => Some("'v"),
         state::BindTarget::Prob => Some("'p"),
         state::BindTarget::Mod => Some("'m"),
+        state::BindTarget::Delay => Some("'d"),
+        state::BindTarget::DelayProb => Some("'D"),
+        state::BindTarget::Repeats => Some("'r"),
+        state::BindTarget::RepeatProb => Some("'R"),
     }
 }
 
@@ -3459,6 +4059,53 @@ fn layer_cell(
             },
             theme::cv_ramp(step.mod_value),
         ),
+        state::BindTarget::Delay => {
+            if step.active || trk.mode == TrackMode::Modulation {
+                // meter scaled against the editing cap for the unit
+                let frac = match step.delay_unit {
+                    state::DelayUnit::Ms => step.delay / MAX_DELAY_MS,
+                    state::DelayUnit::Pct => step.delay / MAX_DELAY_PCT,
+                };
+                let color = if step.delay > 0.0 { theme::clock() } else { theme::note() };
+                (theme::meter_char(frac), color)
+            } else {
+                (off_glyph, theme::note())
+            }
+        }
+        state::BindTarget::DelayProb => {
+            if step.active || trk.mode == TrackMode::Modulation {
+                let c = theme::meter_char(f32::from(step.delay_prob) / 100.0);
+                let color =
+                    if step.delay_prob < 100 { theme::clock() } else { theme::note() };
+                (c, color)
+            } else {
+                (off_glyph, theme::note())
+            }
+        }
+        state::BindTarget::Repeats => {
+            if step.active && trk.mode == TrackMode::Note {
+                // the count itself, readable at a glance: ·2345678
+                let c = if step.repeats == 1 {
+                    theme::STEP_ON
+                } else {
+                    (b'0' + step.repeats) as char
+                };
+                let color = if step.repeats > 1 { theme::clock() } else { theme::note() };
+                (c, color)
+            } else {
+                (off_glyph, theme::note())
+            }
+        }
+        state::BindTarget::RepeatProb => {
+            if step.active && trk.mode == TrackMode::Note {
+                let c = theme::meter_char(f32::from(step.repeat_prob) / 100.0);
+                let color =
+                    if step.repeat_prob < 100 { theme::clock() } else { theme::note() };
+                (c, color)
+            } else {
+                (off_glyph, theme::note())
+            }
+        }
     }
 }
 
@@ -3490,17 +4137,42 @@ fn row_info(trk: &Track) -> String {
         }
         None => String::new(),
     };
+    // the groove section, compact: swing% · groove tag · ±humanize
+    let mut timing = String::new();
+    if trk.swing != 50 {
+        timing.push_str(&format!(" S{}", trk.swing));
+    }
+    if let Some(g) = &trk.groove {
+        let tag: String = g.chars().take(4).collect();
+        timing.push_str(&format!(" ≈{}", tag));
+    }
+    if trk.humanize > 0.0 {
+        timing.push_str(&format!(" ±{:.0}", trk.humanize));
+    }
     format!(
-        "  {:>3} P{} R{}{}{}{}{}{}",
+        "  {:>3} P{} R{}{}{}{}{}{}{}",
         trk.length,
         trk.pulses,
         trk.rotation,
         slot,
         cycle_glyph(trk.cycle),
         scale,
+        timing,
         if trk.mode == TrackMode::Modulation { " ⌁" } else { "" },
         if trk.muted { " M" } else { "" },
     )
+}
+
+/// The delay value as the user thinks of it: `12ms` or `8%` per the
+/// step's unit flag, `0` when straight.
+fn delay_text(step: &Step) -> String {
+    if step.delay <= 0.0 {
+        return String::from("0");
+    }
+    match step.delay_unit {
+        state::DelayUnit::Ms => format!("{:.0}ms", step.delay),
+        state::DelayUnit::Pct => format!("{:.0}%", step.delay),
+    }
 }
 
 fn step_to_param(step: &Step) -> state::StepParam {
@@ -3515,6 +4187,11 @@ fn step_to_param(step: &Step) -> state::StepParam {
             source: b.source.clone(),
             amount: b.amount,
         }),
+        delay: step.delay,
+        delay_unit: step.delay_unit,
+        delay_prob: step.delay_prob,
+        repeats: step.repeats,
+        repeat_prob: step.repeat_prob,
     }
 }
 
@@ -3530,6 +4207,11 @@ fn step_from_param(p: &state::StepParam) -> Step {
             source: b.source.clone(),
             amount: b.amount,
         }),
+        delay: p.delay.max(0.0),
+        delay_unit: p.delay_unit,
+        delay_prob: p.delay_prob.min(100),
+        repeats: p.repeats.clamp(1, MAX_REPEATS),
+        repeat_prob: p.repeat_prob.min(100),
     }
 }
 
@@ -3578,6 +4260,10 @@ fn snapshot_params(s: &SequencerState) -> state::SequencerParams {
                     rotation: Some(p.rotation),
                 })
                 .collect(),
+            swing: trk.swing,
+            groove: trk.groove.clone(),
+            humanize: trk.humanize,
+            ratchet_decay: trk.ratchet_decay,
         }).collect(),
         macros: s
             .macros
@@ -3680,6 +4366,10 @@ fn apply_tracks(s: &mut SequencerState, params: &state::SequencerParams) {
             root: tp.root.unwrap_or(60).min(127),
             active_slot,
             slots,
+            swing: tp.swing.clamp(50, 75),
+            groove: tp.groove.clone(),
+            humanize: tp.humanize.clamp(0.0, MAX_HUMANIZE_MS),
+            ratchet_decay: tp.ratchet_decay.clamp(-100, 100),
         });
         s.current_steps.push(0);
         s.last_notes.push(None);
@@ -4372,6 +5062,95 @@ pub fn run(instance: usize) -> Result<()> {
                                             }
                                         }
                                     }
+                                    "swing" => {
+                                        match rest.parse::<u8>() {
+                                            Ok(v) if (50..=75).contains(&v) => {
+                                                let mut s = state.lock().unwrap();
+                                                undo_msg = set_timing(
+                                                    &mut s,
+                                                    &mut history,
+                                                    "Set swing",
+                                                    |tm| tm.swing = v,
+                                                )
+                                                .or_else(|| Some(format!("swing = {}%", v)));
+                                            }
+                                            _ => {
+                                                undo_msg = Some(String::from(
+                                                    "swing takes 50-75 (%, 50 = straight, 66 = shuffle)",
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    "groove" => {
+                                        let name = rest.trim().to_lowercase();
+                                        let parsed: Option<Option<String>> =
+                                            if name.is_empty() || name == "straight" || name == "off" {
+                                                Some(None)
+                                            } else {
+                                                crate::theory::groove::find(&name)
+                                                    .map(|g| Some(g.name.to_string()))
+                                            };
+                                        match parsed {
+                                            Some(g) => {
+                                                let label = g.clone().unwrap_or_else(|| {
+                                                    String::from("straight")
+                                                });
+                                                let mut s = state.lock().unwrap();
+                                                undo_msg = set_timing(
+                                                    &mut s,
+                                                    &mut history,
+                                                    "Set groove",
+                                                    |tm| tm.groove = g.clone(),
+                                                )
+                                                .or_else(|| Some(format!("groove = {}", label)));
+                                            }
+                                            None => {
+                                                undo_msg =
+                                                    Some(format!("Unknown groove: {}", name));
+                                            }
+                                        }
+                                    }
+                                    "humanize" => {
+                                        match rest.parse::<f32>() {
+                                            Ok(v) if (0.0..=MAX_HUMANIZE_MS).contains(&v) => {
+                                                let mut s = state.lock().unwrap();
+                                                undo_msg = set_timing(
+                                                    &mut s,
+                                                    &mut history,
+                                                    "Set humanize",
+                                                    |tm| tm.humanize = v,
+                                                )
+                                                .or_else(|| {
+                                                    Some(format!("humanize = ±{}ms", v))
+                                                });
+                                            }
+                                            _ => {
+                                                undo_msg = Some(format!(
+                                                    "humanize takes 0-{} (± ms of jitter)",
+                                                    MAX_HUMANIZE_MS
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    "decay" => {
+                                        match rest.parse::<i8>() {
+                                            Ok(v) if (-100..=100).contains(&i32::from(v)) => {
+                                                let mut s = state.lock().unwrap();
+                                                undo_msg = set_timing(
+                                                    &mut s,
+                                                    &mut history,
+                                                    "Set ratchet decay",
+                                                    |tm| tm.decay = v,
+                                                )
+                                                .or_else(|| Some(format!("decay = {}%", v)));
+                                            }
+                                            _ => {
+                                                undo_msg = Some(String::from(
+                                                    "decay takes -100..100 (+fade, -swell)",
+                                                ));
+                                            }
+                                        }
+                                    }
                                     "macro" => {
                                         let mut s = state.lock().unwrap();
                                         if rest.is_empty() {
@@ -4583,19 +5362,44 @@ pub fn run(instance: usize) -> Result<()> {
                                 "vel" => Some(state::BindTarget::Velocity),
                                 "prob" => Some(state::BindTarget::Prob),
                                 "mod" => Some(state::BindTarget::Mod),
+                                "delay" => Some(state::BindTarget::Delay),
+                                "dprob" => Some(state::BindTarget::DelayProb),
+                                "reps" => Some(state::BindTarget::Repeats),
+                                "rprob" => Some(state::BindTarget::RepeatProb),
                                 _ => None,
                             };
-                            if let (Some(layer), Ok(value)) = (layer, input_buffer.parse::<f32>())
-                            {
-                                let action = Action::SetStepValue { layer, value };
+                            // the delay prompt accepts a unit suffix: `30ms`
+                            // sets ms, `25%` sets step-%, bare keeps the unit
+                            let (num, unit) = if submode == "delay" {
+                                if let Some(n) = input_buffer.strip_suffix("ms") {
+                                    (n.to_string(), Some(state::DelayUnit::Ms))
+                                } else if let Some(n) = input_buffer.strip_suffix('%') {
+                                    (n.to_string(), Some(state::DelayUnit::Pct))
+                                } else {
+                                    (input_buffer.clone(), None)
+                                }
+                            } else {
+                                (input_buffer.clone(), None)
+                            };
+                            if let (Some(layer), Ok(value)) = (layer, num.parse::<f32>()) {
                                 let mut s = state.lock().unwrap();
+                                if let Some(unit) = unit {
+                                    let action = Action::SetDelayUnit { unit, convert: false };
+                                    apply_selected(&mut s, &mut history, &action, None);
+                                }
+                                let action = Action::SetStepValue { layer, value };
                                 apply_selected(&mut s, &mut history, &action, None);
                                 last_change = Some(action);
                             }
                             submode.clear();
                             input_buffer.clear();
                         }
-                        KeyCode::Char(c) if c.is_ascii_digit() || c == '.' || c == '-' => {
+                        KeyCode::Char(c)
+                            if c.is_ascii_digit()
+                                || c == '.'
+                                || c == '-'
+                                || (submode == "delay" && matches!(c, 'm' | 's' | '%')) =>
+                        {
                             input_buffer.push(c);
                         }
                         _ => {
@@ -4929,6 +5733,10 @@ pub fn run(instance: usize) -> Result<()> {
                         KeyCode::Char('v') => Some(state::BindTarget::Velocity),
                         KeyCode::Char('p') => Some(state::BindTarget::Prob),
                         KeyCode::Char('m') => Some(state::BindTarget::Mod),
+                        KeyCode::Char('d') => Some(state::BindTarget::Delay),
+                        KeyCode::Char('D') => Some(state::BindTarget::DelayProb),
+                        KeyCode::Char('r') => Some(state::BindTarget::Repeats),
+                        KeyCode::Char('R') => Some(state::BindTarget::RepeatProb),
                         _ => None,
                     };
                     if let Some(layer) = layer {
@@ -4940,6 +5748,10 @@ pub fn run(instance: usize) -> Result<()> {
                                 state::BindTarget::Velocity => "velocity",
                                 state::BindTarget::Prob => "probability",
                                 state::BindTarget::Mod => "mod",
+                                state::BindTarget::Delay => "delay",
+                                state::BindTarget::DelayProb => "delay prob",
+                                state::BindTarget::Repeats => "repeats",
+                                state::BindTarget::RepeatProb => "repeat prob",
                             }
                         ));
                         undo_time = Some(Instant::now());
@@ -5768,8 +6580,38 @@ pub fn run(instance: usize) -> Result<()> {
                                 state::BindTarget::Velocity => "vel",
                                 state::BindTarget::Prob => "prob",
                                 state::BindTarget::Mod => "mod",
+                                state::BindTarget::Delay => "delay",
+                                state::BindTarget::DelayProb => "dprob",
+                                state::BindTarget::Repeats => "reps",
+                                state::BindTarget::RepeatProb => "rprob",
                             });
                             input_buffer.clear();
+                        }
+                        // `%` in the delay layer: flip the step's unit
+                        // (ms ↔ % of step), converting so the effective
+                        // timing holds at the current bpm
+                        KeyCode::Char('%') => {
+                            pending_count = None;
+                            let unit = {
+                                let s = state.lock().unwrap();
+                                if s.layer != state::BindTarget::Delay {
+                                    None
+                                } else {
+                                    s.track()
+                                        .steps
+                                        .get(s.selected)
+                                        .map(|st| match st.delay_unit {
+                                            state::DelayUnit::Ms => state::DelayUnit::Pct,
+                                            state::DelayUnit::Pct => state::DelayUnit::Ms,
+                                        })
+                                }
+                            };
+                            if let Some(unit) = unit {
+                                let action = Action::SetDelayUnit { unit, convert: true };
+                                undo_msg = exec_action(&state, &mut history, &action);
+                                undo_time = Some(Instant::now());
+                                last_change = Some(action);
+                            }
                         }
                         // Euclidean re-apply (no count)
                         KeyCode::Char('P') | KeyCode::Char('L') => {
@@ -7208,6 +8050,11 @@ mod tests {
                         mod_value: 0.0,
                         prob: 60,
                         bind: None,
+                        delay: 0.0,
+                        delay_unit: state::DelayUnit::Ms,
+                        delay_prob: 100,
+                        repeats: 1,
+                        repeat_prob: 100,
                     }],
                 },
                 state::MacroCmd::SetActive { track: 1, step: 7, active: true },
@@ -7356,5 +8203,208 @@ velocity = 90
         assert_eq!(s.tracks[0].root, 60);
         assert_eq!(s.tracks[0].active_slot, 0);
         assert!(s.tracks[0].slots.iter().all(Option::is_none));
+    }
+
+    // ── the timing pass: delay, swing, ratchets, prob-of-everything ─────
+
+    #[test]
+    fn swing_pushes_odd_gsteps_only() {
+        assert_eq!(swing_frac(50, 0), 0.0);
+        assert_eq!(swing_frac(50, 1), 0.0, "50 = straight");
+        assert_eq!(swing_frac(66, 2), 0.0, "even 16ths never move");
+        let s66 = swing_frac(66, 3);
+        assert!((s66 - 0.32).abs() < 1e-9, "66% = +0.32 steps, got {}", s66);
+        assert_eq!(swing_frac(75, 1), 0.5, "max drag is half a step");
+        assert_eq!(swing_frac(90, 1), 0.5, "clamps above 75");
+    }
+
+    #[test]
+    fn timing_rolls_are_deterministic_and_salted() {
+        let a = timing_roll(2, 100, SALT_DELAY_GATE);
+        let b = timing_roll(2, 100, SALT_DELAY_GATE);
+        assert_eq!(a, b, "same key, same roll, forever");
+        assert!((0.0..1.0).contains(&a));
+        let c = timing_roll(2, 100, SALT_DELAY_AMT);
+        assert_ne!(a, c, "purpose salts give independent streams");
+        let d = timing_roll(2, 101, SALT_DELAY_GATE);
+        assert_ne!(a, d, "different cycles differ");
+    }
+
+    #[test]
+    fn delay_frac_units_probability_and_clamp() {
+        let off = BindOffsets::default();
+        // 125ms step (120bpm 16ths): 25ms literal = 0.2 steps
+        let mut st = Step { delay: 25.0, ..Step::default() };
+        assert!((delay_frac(&st, &off, 125.0, 0, 4) - 0.2).abs() < 1e-6);
+        // same feel written as a percent
+        st.delay = 20.0;
+        st.delay_unit = state::DelayUnit::Pct;
+        assert!((delay_frac(&st, &off, 125.0, 0, 4) - 0.2).abs() < 1e-6);
+        // prob 100 = exact every cycle; prob 0 = never
+        st.delay_prob = 0;
+        assert_eq!(delay_frac(&st, &off, 125.0, 0, 4), 0.0);
+        // mid prob: when it lands it's a random amount UP TO the set value
+        st.delay = 80.0;
+        st.delay_prob = 60;
+        let rolls: Vec<f64> =
+            (0..200).map(|g| delay_frac(&st, &off, 125.0, 0, g)).collect();
+        assert!(rolls.iter().all(|&r| (0.0..=0.8 + 1e-9).contains(&r)));
+        let straight = rolls.iter().filter(|&&r| r == 0.0).count();
+        assert!((40..=120).contains(&straight), "p=60 skips ~40%: {}", straight);
+        let distinct: std::collections::HashSet<u64> =
+            rolls.iter().map(|r| r.to_bits()).collect();
+        assert!(distinct.len() > 20, "amounts vary, not a fixed delay");
+        // a huge delay clamps inside the step window
+        st.delay = 99.0;
+        st.delay_prob = 100;
+        assert_eq!(delay_frac(&st, &off, 125.0, 0, 4), MAX_DELAY_FRAC.min(0.99));
+    }
+
+    #[test]
+    fn repeat_count_coin_flips_per_extra() {
+        let off = BindOffsets::default();
+        let mut st = Step { repeats: 4, ..Step::default() };
+        assert_eq!(repeat_count(&st, &off, 0, 7), 4, "p=100 always all");
+        st.repeat_prob = 0;
+        assert_eq!(repeat_count(&st, &off, 0, 7), 1, "p=0 always one");
+        st.repeat_prob = 50;
+        let counts: Vec<u32> = (0..400).map(|g| repeat_count(&st, &off, 0, g)).collect();
+        assert!(counts.iter().all(|&n| (1..=4).contains(&n)));
+        let mean = counts.iter().sum::<u32>() as f64 / counts.len() as f64;
+        assert!((2.0..3.0).contains(&mean), "p=50 ~2.5 mean: {}", mean);
+        // and it's reproducible
+        assert_eq!(repeat_count(&st, &off, 0, 11), repeat_count(&st, &off, 0, 11));
+    }
+
+    #[test]
+    fn ratchet_decay_fades_and_swells() {
+        assert_eq!(ratchet_vel(100, 0, 2, 4), 100, "flat at 0");
+        assert_eq!(ratchet_vel(100, 60, 0, 4), 100, "first repeat untouched");
+        let fade: Vec<u8> = (0..4).map(|k| ratchet_vel(100, 60, k, 4)).collect();
+        assert_eq!(fade, vec![100, 80, 60, 40], "linear fade to 1-decay");
+        let swell: Vec<u8> = (0..4).map(|k| ratchet_vel(100, -30, k, 4)).collect();
+        assert_eq!(swell, vec![100, 110, 120, 127], "crescendo, clamped at 127");
+        assert_eq!(ratchet_vel(100, 100, 3, 4), 1, "full decay bottoms at 1, never 0");
+    }
+
+    #[test]
+    fn fire_offset_sums_and_clamps_to_the_window() {
+        let off = BindOffsets::default();
+        let mut trk = Track::empty();
+        let st = Step::default();
+        assert_eq!(fire_offset(&trk, &st, &off, 125.0, 0, 4), 0.0, "straight by default");
+        trk.swing = 75;
+        trk.groove = Some(String::from("molasses"));
+        let total = fire_offset(&trk, &st, &off, 125.0, 0, 15);
+        // odd gstep: 0.5 swing + 0.20 molasses tail
+        assert!((total - 0.7).abs() < 1e-6, "swing + groove sum: {}", total);
+        let st = Step { delay: 90.0, delay_unit: state::DelayUnit::Pct, ..Step::default() };
+        let total = fire_offset(&trk, &st, &off, 125.0, 0, 15);
+        assert_eq!(total, MAX_DELAY_FRAC, "the sum clamps inside the step window");
+        // humanize jitter stays within its bound on an even, straight step
+        let mut trk = Track::empty();
+        trk.humanize = 10.0;
+        let st = Step::default();
+        for g in (0..50).step_by(2) {
+            let o = fire_offset(&trk, &st, &off, 125.0, 0, g);
+            assert!((0.0..=0.08 + 1e-9).contains(&o), "±10ms of a 125ms step: {}", o);
+        }
+    }
+
+    #[test]
+    fn step_timing_round_trips_and_legacy_loads_straight() {
+        let st = Step {
+            active: true,
+            delay: 30.0,
+            delay_unit: state::DelayUnit::Pct,
+            delay_prob: 70,
+            repeats: 4,
+            repeat_prob: 50,
+            ..Step::default()
+        };
+        let back = step_from_param(&step_to_param(&st));
+        assert_eq!(back, st, "timing fields survive the param round-trip");
+        // a legacy save (no timing fields) parses to a straight step
+        let legacy: state::StepParam =
+            toml::from_str("active = true\nnote = 64\nvelocity = 90\n").unwrap();
+        let st = step_from_param(&legacy);
+        assert_eq!(st.delay, 0.0);
+        assert_eq!(st.delay_unit, state::DelayUnit::Ms);
+        assert_eq!(st.delay_prob, 100);
+        assert_eq!(st.repeats, 1);
+        assert_eq!(st.repeat_prob, 100);
+    }
+
+    #[test]
+    fn track_timing_persists_and_legacy_loads_straight() {
+        let mut s = state_with_tracks(2);
+        s.tracks[0].swing = 66;
+        s.tracks[0].groove = Some(String::from("lilt"));
+        s.tracks[0].humanize = 8.0;
+        s.tracks[0].ratchet_decay = 40;
+        let params = snapshot_params(&s);
+        let mut s2 = state_with_tracks(2);
+        apply_tracks(&mut s2, &params);
+        assert_eq!(s2.tracks[0].swing, 66);
+        assert_eq!(s2.tracks[0].groove.as_deref(), Some("lilt"));
+        assert_eq!(s2.tracks[0].humanize, 8.0);
+        assert_eq!(s2.tracks[0].ratchet_decay, 40);
+        assert_eq!(s2.tracks[1].swing, 50, "untouched track stays straight");
+    }
+
+    #[test]
+    fn delay_unit_toggle_converts_at_current_bpm() {
+        let mut s = state_with_tracks(1);
+        s.bpm = 120.0; // 125ms per 16th
+        let mut h = History::new();
+        s.tracks[0].steps[0].delay = 25.0; // ms
+        apply_action(
+            &mut s,
+            &mut h,
+            &Action::SetDelayUnit { unit: state::DelayUnit::Pct, convert: true },
+        );
+        let st = &s.tracks[0].steps[0];
+        assert_eq!(st.delay_unit, state::DelayUnit::Pct);
+        assert!((st.delay - 20.0).abs() < 1e-4, "25ms of 125ms = 20%: {}", st.delay);
+        // and back, losslessly
+        apply_action(
+            &mut s,
+            &mut h,
+            &Action::SetDelayUnit { unit: state::DelayUnit::Ms, convert: true },
+        );
+        let st = &s.tracks[0].steps[0];
+        assert!((st.delay - 25.0).abs() < 1e-4);
+        // undo restores both value and unit
+        h.undo(&mut s);
+        h.undo(&mut s);
+        let st = &s.tracks[0].steps[0];
+        assert_eq!(st.delay_unit, state::DelayUnit::Ms);
+        assert!((st.delay - 25.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn set_timing_is_undoable_and_macro_recordable() {
+        let mut s = state_with_tracks(2);
+        let mut h = History::new();
+        set_timing(&mut s, &mut h, "Set swing", |tm| tm.swing = 66);
+        assert_eq!(s.tracks[0].swing, 66);
+        // recorded as an absolute macro command
+        let (cmd, _) = h.commands.last().expect("undo entry");
+        let macros = macro_cmds_of(cmd);
+        assert_eq!(
+            macros,
+            vec![state::MacroCmd::SetTiming {
+                track: 0,
+                swing: 66,
+                groove: String::new(),
+                humanize: 0.0,
+                decay: 0,
+            }]
+        );
+        h.undo(&mut s);
+        assert_eq!(s.tracks[0].swing, 50, "undo restores straight");
+        // replaying the macro lands the same place
+        apply_macro_cmd(&mut s, &macros[0], 0);
+        assert_eq!(s.tracks[0].swing, 66);
     }
 }
