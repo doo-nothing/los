@@ -143,24 +143,32 @@ impl Spec {
             Spec::Semis(s) => (s.iter().map(|&i| f64::from(i) * 100.0).collect(), 1200.0),
             Spec::Quarts(q) => (q.iter().map(|&i| f64::from(i) * 50.0).collect(), 1200.0),
             Spec::Edo(n) => (
-                (0..n).map(|i| f64::from(i) * 1200.0 / f64::from(n)).collect(),
+                (0..n)
+                    .map(|i| f64::from(i) * 1200.0 / f64::from(n))
+                    .collect(),
                 1200.0,
             ),
             Spec::EdoSteps(n, idx) => (
-                idx.iter().map(|&i| f64::from(i) * 1200.0 / f64::from(n)).collect(),
+                idx.iter()
+                    .map(|&i| f64::from(i) * 1200.0 / f64::from(n))
+                    .collect(),
                 1200.0,
             ),
             Spec::EdN(n, p, q) => {
                 let period = ratio(p, q);
                 (
-                    (0..n).map(|i| f64::from(i) * period / f64::from(n)).collect(),
+                    (0..n)
+                        .map(|i| f64::from(i) * period / f64::from(n))
+                        .collect(),
                     period,
                 )
             }
             Spec::EdNSteps(n, p, q, idx) => {
                 let period = ratio(p, q);
                 (
-                    idx.iter().map(|&i| f64::from(i) * period / f64::from(n)).collect(),
+                    idx.iter()
+                        .map(|&i| f64::from(i) * period / f64::from(n))
+                        .collect(),
                     period,
                 )
             }
@@ -170,7 +178,11 @@ impl Spec {
             ),
             Spec::Cents(cs, period) => (cs.to_vec(), period),
         };
-        Scale { name: String::from(name), degrees, period }
+        Scale {
+            name: String::from(name),
+            degrees,
+            period,
+        }
     }
 }
 
@@ -460,12 +472,20 @@ mod tests {
             let s = lookup(name).unwrap_or_else(|| panic!("{name} must build"));
             assert!(!s.is_empty(), "{name}: empty");
             assert!(s.period > 0.0, "{name}: period {}", s.period);
-            assert!(s.degrees[0].abs() < EPS, "{name}: degrees[0] = {}", s.degrees[0]);
+            assert!(
+                s.degrees[0].abs() < EPS,
+                "{name}: degrees[0] = {}",
+                s.degrees[0]
+            );
             for w in s.degrees.windows(2) {
                 assert!(w[1] > w[0], "{name}: not ascending ({} -> {})", w[0], w[1]);
             }
             let last = s.degrees[s.degrees.len() - 1];
-            assert!(last < s.period, "{name}: degree {last} >= period {}", s.period);
+            assert!(
+                last < s.period,
+                "{name}: degree {last} >= period {}",
+                s.period
+            );
         }
         // names unique after folding
         let mut folded: Vec<String> = names.iter().map(|n| fold(n)).collect();

@@ -120,7 +120,11 @@ pub fn parse_scl(text: &str) -> Result<Scale, SclError> {
         )));
     }
 
-    Ok(Scale { name: name_from(description), degrees, period })
+    Ok(Scale {
+        name: name_from(description),
+        degrees,
+        period,
+    })
 }
 
 /// Read and parse a `.scl` file from disk.
@@ -153,11 +157,15 @@ fn parse_pitch(token: &str) -> Result<f64, SclError> {
     }
     let (p, q) = match token.split_once('/') {
         Some((p, q)) => (
-            p.parse::<i64>().map_err(|_| SclError::BadPitch(token.to_string()))?,
-            q.parse::<i64>().map_err(|_| SclError::BadPitch(token.to_string()))?,
+            p.parse::<i64>()
+                .map_err(|_| SclError::BadPitch(token.to_string()))?,
+            q.parse::<i64>()
+                .map_err(|_| SclError::BadPitch(token.to_string()))?,
         ),
         None => (
-            token.parse::<i64>().map_err(|_| SclError::BadPitch(token.to_string()))?,
+            token
+                .parse::<i64>()
+                .map_err(|_| SclError::BadPitch(token.to_string()))?,
             1,
         ),
     };
@@ -193,7 +201,10 @@ mod tests {
         let s = parse_scl(text).unwrap();
         assert_eq!(s.len(), 4);
         assert!((s.degrees[1] - 203.910_001_730_775).abs() < 1e-6, "9/8");
-        assert!((s.degrees[2] - 386.31371).abs() < 1e-9, "literal cents kept");
+        assert!(
+            (s.degrees[2] - 386.31371).abs() < 1e-9,
+            "literal cents kept"
+        );
         assert!((s.degrees[3] - 701.955_000_865_387).abs() < 1e-6, "3/2");
         assert!((s.period - 1200.0).abs() < 1e-9);
     }
@@ -265,13 +276,31 @@ mod tests {
     fn errors_are_specific() {
         assert!(matches!(parse_scl(""), Err(SclError::Truncated)));
         assert!(matches!(parse_scl("desc\n"), Err(SclError::Truncated)));
-        assert!(matches!(parse_scl("desc\n3\n100.0\n"), Err(SclError::Truncated)));
-        assert!(matches!(parse_scl("desc\nxyz\n"), Err(SclError::BadCount(_))));
-        assert!(matches!(parse_scl("desc\n1\nbanana\n"), Err(SclError::BadPitch(_))));
-        assert!(matches!(parse_scl("desc\n1\n-3/2\n"), Err(SclError::OutOfRange(_))));
-        assert!(matches!(parse_scl("desc\n1\n0/5\n"), Err(SclError::OutOfRange(_))));
+        assert!(matches!(
+            parse_scl("desc\n3\n100.0\n"),
+            Err(SclError::Truncated)
+        ));
+        assert!(matches!(
+            parse_scl("desc\nxyz\n"),
+            Err(SclError::BadCount(_))
+        ));
+        assert!(matches!(
+            parse_scl("desc\n1\nbanana\n"),
+            Err(SclError::BadPitch(_))
+        ));
+        assert!(matches!(
+            parse_scl("desc\n1\n-3/2\n"),
+            Err(SclError::OutOfRange(_))
+        ));
+        assert!(matches!(
+            parse_scl("desc\n1\n0/5\n"),
+            Err(SclError::OutOfRange(_))
+        ));
         // negative cents period
-        assert!(matches!(parse_scl("desc\n1\n-700.0\n"), Err(SclError::BadPeriod)));
+        assert!(matches!(
+            parse_scl("desc\n1\n-700.0\n"),
+            Err(SclError::BadPeriod)
+        ));
         // a degree above the period
         assert!(matches!(
             parse_scl("desc\n2\n1900.0\n1200.0\n"),

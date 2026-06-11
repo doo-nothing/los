@@ -304,7 +304,9 @@ impl crate::undo::ParamUndo for DelayState {
             return;
         }
         let (t, k) = (slot / TAP_STRIDE, slot % TAP_STRIDE);
-        let Some(tap) = self.tap.get_mut(t) else { return };
+        let Some(tap) = self.tap.get_mut(t) else {
+            return;
+        };
         match (k, value) {
             (0, V::F32(v)) => tap.pan = v.clamp(-1.0, 1.0),
             (1, V::Usize(v)) => tap.phase = v.min(PHASES.len() - 1),
@@ -487,7 +489,9 @@ fn audio_thread(shared: Arc<Mutex<DelayState>>, instance: usize) -> Result<()> {
     // 9 modbus channels: the input follower + one per tap.
     manifest.register("delay", instance, Some(&out_name), (MAX_TAPS + 1) as u32)?;
     let mod_base = manifest.claimed_base();
-    let mut modbus = ModulationBus::open().or_else(|_| ModulationBus::create()).ok();
+    let mut modbus = ModulationBus::open()
+        .or_else(|_| ModulationBus::create())
+        .ok();
 
     let slot_frames = out_rb.slot_frames() as usize;
     let slot_len = out_rb.slot_len();
@@ -498,7 +502,10 @@ fn audio_thread(shared: Arc<Mutex<DelayState>>, instance: usize) -> Result<()> {
     // and line lengths bake the rate in.
     let mut transport = ShmTransport::open().ok();
     let rate_of = |t: &Option<ShmTransport>| {
-        t.as_ref().map(|t| t.sample_rate() as f32).filter(|r| *r > 0.0).unwrap_or(FALLBACK_RATE)
+        t.as_ref()
+            .map(|t| t.sample_rate() as f32)
+            .filter(|r| *r > 0.0)
+            .unwrap_or(FALLBACK_RATE)
     };
     let mut sample_rate = rate_of(&transport);
     let mut slot_duration =
@@ -535,13 +542,15 @@ fn audio_thread(shared: Arc<Mutex<DelayState>>, instance: usize) -> Result<()> {
             let desired: Option<String> = {
                 let mut s = shared.lock().unwrap();
                 for i in 0..GSRC {
-                    s.gresolved[i] =
-                        s.gsrcs[i].as_ref().and_then(|a| routing::resolve(&entries, a));
+                    s.gresolved[i] = s.gsrcs[i]
+                        .as_ref()
+                        .and_then(|a| routing::resolve(&entries, a));
                 }
                 for t in s.tap.iter_mut() {
                     for k in 0..2 {
-                        t.resolved[k] =
-                            t.srcs[k].as_ref().and_then(|a| routing::resolve(&entries, a));
+                        t.resolved[k] = t.srcs[k]
+                            .as_ref()
+                            .and_then(|a| routing::resolve(&entries, a));
                     }
                 }
                 let desired = s.input.as_deref().and_then(|sel| {
@@ -613,7 +622,17 @@ fn audio_thread(shared: Arc<Mutex<DelayState>>, instance: usize) -> Result<()> {
                 phase[i] = phase_sign(t.phase);
                 t.eff = [pan[i], level[i]];
             }
-            dsp::BlockParams { time, regen, shim, wash, dry, taps: s.taps, level, pan, phase }
+            dsp::BlockParams {
+                time,
+                regen,
+                shim,
+                wash,
+                dry,
+                taps: s.taps,
+                level,
+                pan,
+                phase,
+            }
         };
 
         core.process_block(&mut block, &p, &mut fx);
@@ -630,7 +649,7 @@ fn audio_thread(shared: Arc<Mutex<DelayState>>, instance: usize) -> Result<()> {
         }
 
         while out_rb.write(&block).is_err() {
-            thread::yield_now();
+            thread::sleep(Duration::from_micros(500));
         }
 
         blocks += 1;
@@ -778,8 +797,17 @@ fn draw_ui(
             }
             spans.push(sep());
             spans.push(Span::styled(
-                if s.selected == GLOBAL_STRIP { " GLOBAL" } else { " global" }.to_string(),
-                if s.selected == GLOBAL_STRIP { theme::selected() } else { theme::chrome_hi() },
+                if s.selected == GLOBAL_STRIP {
+                    " GLOBAL"
+                } else {
+                    " global"
+                }
+                .to_string(),
+                if s.selected == GLOBAL_STRIP {
+                    theme::selected()
+                } else {
+                    theme::chrome_hi()
+                },
             ));
             lines.push(Line::from(spans));
 
@@ -837,7 +865,14 @@ fn draw_ui(
                     let (ch, style) = if ghost {
                         (theme::GHOST, theme::signal(theme::clock()))
                     } else if tick {
-                        ('█', if i == s.selected { theme::selected() } else { theme::value() })
+                        (
+                            '█',
+                            if i == s.selected {
+                                theme::selected()
+                            } else {
+                                theme::value()
+                            },
+                        )
                     } else if fill {
                         ('▓', theme::signal(theme::audio()))
                     } else {
@@ -856,8 +891,8 @@ fn draw_ui(
             for (i, t) in s.tap.iter().enumerate() {
                 let bound = t.srcs[1].is_some();
                 let shown = if bound { t.eff[1] } else { t.level };
-                let cursor = i == s.selected
-                    && TAP_ROWS[s.sel_row.min(TAP_ROWS.len() - 1)] == TapRow::Level;
+                let cursor =
+                    i == s.selected && TAP_ROWS[s.sel_row.min(TAP_ROWS.len() - 1)] == TapRow::Level;
                 let mut cell = format!(" {:>3.0}%", shown * 100.0);
                 while cell.chars().count() < TAP_W {
                     cell.push(' ');
@@ -886,7 +921,11 @@ fn draw_ui(
             for (row, r) in GLOBAL_ROWS.iter().enumerate() {
                 let cursor =
                     s.selected == GLOBAL_STRIP && s.sel_row.min(GLOBAL_ROWS.len() - 1) == row;
-                let style = if cursor { theme::selected() } else { theme::value() };
+                let style = if cursor {
+                    theme::selected()
+                } else {
+                    theme::value()
+                };
                 g.push(Span::styled(
                     format!("{} {}", global_label(*r), global_text(s, *r)),
                     style,
@@ -904,7 +943,11 @@ fn draw_ui(
                     theme::dim()
                 };
                 m.push(Span::styled(
-                    format!("t{} {} ", i + 1, theme::meter_char(s.followers[i + 1].min(1.0))),
+                    format!(
+                        "t{} {} ",
+                        i + 1,
+                        theme::meter_char(s.followers[i + 1].min(1.0))
+                    ),
                     style,
                 ));
                 let _ = t;
@@ -916,7 +959,11 @@ fn draw_ui(
                 let cell = |r: usize, txt: String| {
                     Span::styled(
                         txt,
-                        if r == row { theme::selected() } else { theme::value() },
+                        if r == row {
+                            theme::selected()
+                        } else {
+                            theme::value()
+                        },
                     )
                 };
                 lines.push(Line::from(vec![
@@ -977,7 +1024,11 @@ fn draw_ui(
                 .iter()
                 .enumerate()
                 .map(|(i, row)| {
-                    let style = if i == sel { theme::selected() } else { theme::value() };
+                    let style = if i == sel {
+                        theme::selected()
+                    } else {
+                        theme::value()
+                    };
                     ratatui::widgets::ListItem::new(row.clone()).style(style)
                 })
                 .collect();
@@ -1014,10 +1065,23 @@ pub fn run(instance: usize) -> Result<()> {
         apply_params(&mut shared.lock().unwrap(), &p);
     }
 
+    // The audio thread owns every RT resource. Its setup races the
+    // session's boot storm (a dozen modules registering into the CAS
+    // manifest at once), so a failure retries instead of dying silent —
+    // and persistent errors land in a tmp file the user can find.
     let audio_state = Arc::clone(&shared);
     thread::spawn(move || {
-        if let Err(e) = audio_thread(audio_state, instance) {
-            eprintln!("[delay {}] audio thread error: {}", instance, e);
+        let err_path = state::tmp_dir().join(format!("delay_{}.err", instance));
+        let _ = std::fs::remove_file(&err_path);
+        loop {
+            match audio_thread(Arc::clone(&audio_state), instance) {
+                Ok(()) => break,
+                Err(e) => {
+                    let _ = std::fs::write(&err_path, format!("{}", e));
+                    eprintln!("[delay {}] audio thread error (retrying): {}", instance, e);
+                    thread::sleep(Duration::from_millis(500));
+                }
+            }
         }
     });
 
@@ -1069,7 +1133,11 @@ pub fn run(instance: usize) -> Result<()> {
             ui_entries_at = Some(Instant::now());
         }
 
-        let overlay = if ex.is_active() { Some(ex.display()) } else { ex_msg.clone() };
+        let overlay = if ex.is_active() {
+            Some(ex.display())
+        } else {
+            ex_msg.clone()
+        };
         {
             let s = shared.lock().unwrap();
             let picker_rows = picker.is_active().then(|| picker.rows());
@@ -1095,7 +1163,11 @@ pub fn run(instance: usize) -> Result<()> {
             }
             match m.kind {
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                    let steps = if m.kind == MouseEventKind::ScrollUp { 1 } else { -1 };
+                    let steps = if m.kind == MouseEventKind::ScrollUp {
+                        1
+                    } else {
+                        -1
+                    };
                     use crate::undo::ParamUndo;
                     let mut s = shared.lock().unwrap();
                     let slot = slot_at(&s);
@@ -1187,7 +1259,12 @@ pub fn run(instance: usize) -> Result<()> {
                 match cmd {
                     ExCommand::Write(name) => {
                         ex_msg = Some(
-                            match crate::excmd::ex_write(name, &mut patch_name, &mut baseline, &params) {
+                            match crate::excmd::ex_write(
+                                name,
+                                &mut patch_name,
+                                &mut baseline,
+                                &params,
+                            ) {
                                 Ok(m) | Err(m) => m,
                             },
                         );
@@ -1238,7 +1315,9 @@ pub fn run(instance: usize) -> Result<()> {
         if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::CONTROL {
             let n = count.take();
             let mut s = shared.lock().unwrap();
-            ex_msg = Some(crate::undo::history_status("Redo", n, || history.redo(&mut *s)));
+            ex_msg = Some(crate::undo::history_status("Redo", n, || {
+                history.redo(&mut *s)
+            }));
             continue;
         }
         if key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL {
@@ -1332,8 +1411,7 @@ pub fn run(instance: usize) -> Result<()> {
                     // audio ring except our own output
                     let current = s.input.clone();
                     drop(s);
-                    let entries =
-                        Manifest::open().map(|m| m.entries()).unwrap_or_default();
+                    let entries = Manifest::open().map(|m| m.entries()).unwrap_or_default();
                     input_options = entries
                         .iter()
                         .filter(|e| e.audio_shm.is_some())
@@ -1383,7 +1461,11 @@ pub fn run(instance: usize) -> Result<()> {
                 let mut s = shared.lock().unwrap();
                 let on_input = s.selected == GLOBAL_STRIP
                     && GLOBAL_ROWS[s.sel_row.min(GLOBAL_ROWS.len() - 1)] == GlobalRow::Input;
-                let slot = if on_input { Some(GLOBAL_SLOT + 6) } else { src_slot_at(&s) };
+                let slot = if on_input {
+                    Some(GLOBAL_SLOT + 6)
+                } else {
+                    src_slot_at(&s)
+                };
                 if let Some(slot) = slot {
                     let old = s.get_param(slot);
                     if !matches!(old, Some(ParamValue::Src(None))) {
@@ -1398,7 +1480,9 @@ pub fn run(instance: usize) -> Result<()> {
             KeyCode::Char('u') => {
                 let n = count.take();
                 let mut s = shared.lock().unwrap();
-                ex_msg = Some(crate::undo::history_status("Undo", n, || history.undo(&mut *s)));
+                ex_msg = Some(crate::undo::history_status("Undo", n, || {
+                    history.undo(&mut *s)
+                }));
             }
             KeyCode::Char('g') => {
                 count.clear();
@@ -1527,7 +1611,10 @@ fn ex_set(
             }
             format!("input = {}", s.input.as_deref().unwrap_or("none"))
         }
-        _ => format!("Unknown setting: {} (time regen shim wash dry taps input)", key),
+        _ => format!(
+            "Unknown setting: {} (time regen shim wash dry taps input)",
+            key
+        ),
     }
 }
 
@@ -1545,7 +1632,11 @@ mod tests {
         // zero params on purpose (design doc §5): the host owns amounts
         let mut map = crate::faust::ParamMap::default();
         tap8fx::Tap8Fx::build_user_interface_static(&mut map);
-        assert!(map.params.is_empty(), "tap8fx declares no widgets: {:?}", map.params);
+        assert!(
+            map.params.is_empty(),
+            "tap8fx declares no widgets: {:?}",
+            map.params
+        );
         // an impulse must come out somewhere: run 100 blocks and look
         // for energy on either output (transposer grains + reverb tail)
         let mut impulse = vec![0.0_f32; 64];
@@ -1554,7 +1645,11 @@ mod tests {
         let mut shim = vec![0.0_f32; 64];
         let mut wash = vec![0.0_f32; 64];
         for i in 0..100 {
-            let input = if i == 0 { impulse.clone() } else { vec![0.0; 64] };
+            let input = if i == 0 {
+                impulse.clone()
+            } else {
+                vec![0.0; 64]
+            };
             let ins = [&input[..]];
             let mut outs = [&mut shim[..], &mut wash[..]];
             fx.compute(64, &ins, &mut outs);
@@ -1673,7 +1768,10 @@ mod tests {
         assert_eq!(ex_set(&mut s, &mut h, "regen", "35"), "regen = 35%");
         assert_eq!(ex_set(&mut s, &mut h, "taps", "4"), "taps = 4");
         assert!(ex_set(&mut s, &mut h, "taps", "12").contains("1–8"));
-        assert_eq!(ex_set(&mut s, &mut h, "input", "voice/0"), "input = voice/0");
+        assert_eq!(
+            ex_set(&mut s, &mut h, "input", "voice/0"),
+            "input = voice/0"
+        );
         assert!(ex_set(&mut s, &mut h, "input", "voice").contains("module/instance"));
         assert_eq!(ex_set(&mut s, &mut h, "input", "none"), "input = none");
         assert!(ex_set(&mut s, &mut h, "zoom", "1").contains("Unknown setting"));

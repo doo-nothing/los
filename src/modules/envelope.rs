@@ -61,7 +61,13 @@ struct EnvelopeChannel {
 
 impl Default for EnvelopeChannel {
     fn default() -> Self {
-        Self { stage: Stage::Off, phase: 0.0, output: 0.0, pluck_fast: 0.0, pluck_slow: 0.0 }
+        Self {
+            stage: Stage::Off,
+            phase: 0.0,
+            output: 0.0,
+            pluck_fast: 0.0,
+            pluck_slow: 0.0,
+        }
     }
 }
 
@@ -89,16 +95,18 @@ impl Trigger {
         match s {
             None => Trigger::Any,
             Some("off") => Trigger::Off,
-            Some(a) => SourceAddr::parse(a).map(Trigger::Source).unwrap_or(Trigger::Any),
+            Some(a) => SourceAddr::parse(a)
+                .map(Trigger::Source)
+                .unwrap_or(Trigger::Any),
         }
     }
 }
 
 #[derive(Clone)]
 struct ChannelParams {
-    rise_param: f32,   // 0.0-1.0 → 0.5ms to 25min (exponential taper)
+    rise_param: f32, // 0.0-1.0 → 0.5ms to 25min (exponential taper)
     fall_param: f32,
-    shape_param: f32,  // 0.0 log (RC) … 0.5 linear … 1.0 exponential
+    shape_param: f32, // 0.0 log (RC) … 0.5 linear … 1.0 exponential
     loop_mode: bool,
     attenuverter: f32, // -1.0 to 1.0
     offset: f32,       // -1.0 to 1.0, post-attenuverter DC offset
@@ -375,7 +383,9 @@ impl crate::undo::ParamUndo for EnvelopeState {
     fn set_param(&mut self, slot: usize, value: crate::undo::ParamValue) {
         use crate::undo::ParamValue as V;
         let (ch, row) = (slot / CH_SLOT_STRIDE, slot % CH_SLOT_STRIDE);
-        let Some(p) = self.params.get_mut(ch) else { return };
+        let Some(p) = self.params.get_mut(ch) else {
+            return;
+        };
         match (row, value) {
             (0, V::F32(v)) => p.rise_param = v,
             (1, V::F32(v)) => p.fall_param = v,
@@ -435,22 +445,26 @@ fn adjust(s: &mut EnvelopeState, row: usize, steps: i32, coarse: bool) {
 fn snapshot_params(s: &EnvelopeState) -> state::EnvelopeParams {
     state::EnvelopeParams {
         format: state::STATE_FORMAT,
-        channels: s.params.iter().map(|p| state::EnvelopeChannelParams {
-            rise: p.rise_param,
-            fall: p.fall_param,
-            shape: p.shape_param,
-            loop_mode: p.loop_mode,
-            attenuverter: p.attenuverter,
-            offset: p.offset,
-            pluck: p.pluck,
-            gate_mode: p.gate_mode,
-            signal_src: p.signal_src.as_ref().map(|a| a.to_string()),
-            trigger_src: p.trigger.to_param(),
-            rise_src: p.rise_src.as_ref().map(|a| a.to_string()),
-            fall_src: p.fall_src.as_ref().map(|a| a.to_string()),
-            shape_src: p.shape_src.as_ref().map(|a| a.to_string()),
-            atten_src: p.atten_src.as_ref().map(|a| a.to_string()),
-        }).collect(),
+        channels: s
+            .params
+            .iter()
+            .map(|p| state::EnvelopeChannelParams {
+                rise: p.rise_param,
+                fall: p.fall_param,
+                shape: p.shape_param,
+                loop_mode: p.loop_mode,
+                attenuverter: p.attenuverter,
+                offset: p.offset,
+                pluck: p.pluck,
+                gate_mode: p.gate_mode,
+                signal_src: p.signal_src.as_ref().map(|a| a.to_string()),
+                trigger_src: p.trigger.to_param(),
+                rise_src: p.rise_src.as_ref().map(|a| a.to_string()),
+                fall_src: p.fall_src.as_ref().map(|a| a.to_string()),
+                shape_src: p.shape_src.as_ref().map(|a| a.to_string()),
+                atten_src: p.atten_src.as_ref().map(|a| a.to_string()),
+            })
+            .collect(),
         logic_outputs: state::LogicOutputConfig {
             sum_enabled: true,
             or_enabled: true,
@@ -620,7 +634,9 @@ fn env_thread(
 ) -> Result<()> {
     let consumer_id = crate::shm::consumer_id("envelope", instance);
     let mut events = EventRingbuf::open(consumer_id).ok();
-    let mut modbus = ModulationBus::open().or_else(|_| ModulationBus::create()).ok();
+    let mut modbus = ModulationBus::open()
+        .or_else(|_| ModulationBus::create())
+        .ok();
     let mut manifest = Manifest::open().or_else(|_| Manifest::create())?;
     let _transport = ShmTransport::open().ok();
 
@@ -672,12 +688,23 @@ fn env_thread(
                     },
                 });
                 r.mods = [
-                    p.rise_src.as_ref().and_then(|a| routing::resolve(&entries, a)),
-                    p.fall_src.as_ref().and_then(|a| routing::resolve(&entries, a)),
-                    p.shape_src.as_ref().and_then(|a| routing::resolve(&entries, a)),
-                    p.atten_src.as_ref().and_then(|a| routing::resolve(&entries, a)),
+                    p.rise_src
+                        .as_ref()
+                        .and_then(|a| routing::resolve(&entries, a)),
+                    p.fall_src
+                        .as_ref()
+                        .and_then(|a| routing::resolve(&entries, a)),
+                    p.shape_src
+                        .as_ref()
+                        .and_then(|a| routing::resolve(&entries, a)),
+                    p.atten_src
+                        .as_ref()
+                        .and_then(|a| routing::resolve(&entries, a)),
                 ];
-                r.signal = p.signal_src.as_ref().and_then(|a| routing::resolve(&entries, a));
+                r.signal = p
+                    .signal_src
+                    .as_ref()
+                    .and_then(|a| routing::resolve(&entries, a));
             }
             // publish consumed channels + note-track triggers for the
             // sequencer's who's-listening markers
@@ -756,9 +783,7 @@ fn env_thread(
             let should_trigger = match r.trig {
                 Some(RTrig::AnyNote) | None => note_trigs != 0 || triggers[i],
                 Some(RTrig::Off) | Some(RTrig::Edge(_)) => triggers[i],
-                Some(RTrig::Note(want)) => {
-                    note_trigs & (1 << (want & 63)) != 0 || triggers[i]
-                }
+                Some(RTrig::Note(want)) => note_trigs & (1 << (want & 63)) != 0 || triggers[i],
             };
             // note_off only matters to a gate; a trig ignores it entirely.
             // Edge sources release on their falling edge — without this a
@@ -775,10 +800,18 @@ fn env_thread(
             // (computed before trigger handling: a retrigger needs the
             // live shape to continue the rise from the current level)
             let chan_val = |c: Option<usize>| c.and_then(|c| modbus.as_ref().map(|m| m.get(c)));
-            let rp = chan_val(r.mods[0]).map(|v| v.clamp(0.0, 1.0)).unwrap_or(params.rise_param);
-            let fp = chan_val(r.mods[1]).map(|v| v.clamp(0.0, 1.0)).unwrap_or(params.fall_param);
-            let sp = chan_val(r.mods[2]).map(|v| v.clamp(0.0, 1.0)).unwrap_or(params.shape_param);
-            let att = chan_val(r.mods[3]).map(|v| v.clamp(-1.0, 1.0)).unwrap_or(params.attenuverter);
+            let rp = chan_val(r.mods[0])
+                .map(|v| v.clamp(0.0, 1.0))
+                .unwrap_or(params.rise_param);
+            let fp = chan_val(r.mods[1])
+                .map(|v| v.clamp(0.0, 1.0))
+                .unwrap_or(params.fall_param);
+            let sp = chan_val(r.mods[2])
+                .map(|v| v.clamp(0.0, 1.0))
+                .unwrap_or(params.shape_param);
+            let att = chan_val(r.mods[3])
+                .map(|v| v.clamp(-1.0, 1.0))
+                .unwrap_or(params.attenuverter);
 
             if should_release && ch.stage != Stage::Off && ch.stage != Stage::Fall {
                 // fall FROM the current level too: the non-pluck fall
@@ -807,7 +840,11 @@ fn env_thread(
             // its fall time instead of snapping silent. Only unbinding
             // returns the channel to generator mode.
             let signal_target = if params.signal_src.is_some() {
-                Some(r.signal.and_then(|c| modbus.as_ref().map(|m| m.get(c))).unwrap_or(0.0))
+                Some(
+                    r.signal
+                        .and_then(|c| modbus.as_ref().map(|m| m.get(c)))
+                        .unwrap_or(0.0),
+                )
             } else {
                 None
             };
@@ -844,11 +881,22 @@ fn env_thread(
 
         // Buses + gates
         let sum = ch_final[..n].iter().sum::<f32>().clamp(-1.0, 1.0);
-        let or_val = ch_final[..n].iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let or_val = ch_final[..n]
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
         let and_val = ch_final[..n].iter().copied().fold(f32::INFINITY, f32::min);
         let invert = -ch_final[0];
-        let eor = if matches!(s.channels[0].stage, Stage::Sustain | Stage::Fall) { 1.0 } else { 0.0 };
-        let eoc = if s.channels[n - 1].stage == Stage::Off || eoc_pulse { 1.0 } else { 0.0 };
+        let eor = if matches!(s.channels[0].stage, Stage::Sustain | Stage::Fall) {
+            1.0
+        } else {
+            0.0
+        };
+        let eoc = if s.channels[n - 1].stage == Stage::Off || eoc_pulse {
+            1.0
+        } else {
+            0.0
+        };
 
         let mod_base = s.mod_base;
         drop(s);
@@ -942,7 +990,8 @@ fn draw_ui(
         };
         let _ = (bpm, playing);
         let mut hdr = theme::header("MATHs", "", "", w);
-        hdr.spans.insert(1, Span::styled(format!("·{}· ", ctx), theme::signal(page)));
+        hdr.spans
+            .insert(1, Span::styled(format!("·{}· ", ctx), theme::signal(page)));
         lines.push(hdr);
 
         // ── overview: every channel at a glance + the buses ─────────────
@@ -991,7 +1040,11 @@ fn draw_ui(
         ov.push(Span::styled(" ∨", theme::chrome()));
         ov.push(Span::styled(meter(or_v), theme::signal(theme::cv())));
         ov.push(Span::styled(
-            format!(" {}{}", if eor { theme::GATE_HI } else { theme::GATE_LO }, if eoc { theme::GATE_HI } else { theme::GATE_LO }),
+            format!(
+                " {}{}",
+                if eor { theme::GATE_HI } else { theme::GATE_LO },
+                if eoc { theme::GATE_HI } else { theme::GATE_LO }
+            ),
             theme::signal(theme::cv()),
         ));
         lines.push(Line::from(ov));
@@ -1027,14 +1080,63 @@ fn draw_ui(
         ]));
 
         // value rows: (row, label, set 0..1 for gauge, display, ghost, hue tag)
-        type ValueRow<'a> = (usize, &'a str, f32, String, Option<f32>, Option<&'a Option<SourceAddr>>);
+        type ValueRow<'a> = (
+            usize,
+            &'a str,
+            f32,
+            String,
+            Option<f32>,
+            Option<&'a Option<SourceAddr>>,
+        );
         let rows: [ValueRow; 6] = [
-            (0, "rise", p.rise_param, format_time(param_to_time(p.rise_param)), ghosts[0], Some(&p.rise_src)),
-            (1, "fall", p.fall_param, format_time(param_to_time(p.fall_param)), ghosts[1], Some(&p.fall_src)),
-            (2, "shap", p.shape_param, format!("{:.2}", p.shape_param), ghosts[2], Some(&p.shape_src)),
-            (3, "attn", bi(p.attenuverter), format!("{:+.2}", p.attenuverter), ghosts[3].map(bi), Some(&p.atten_src)),
-            (4, "offs", bi(p.offset), format!("{:+.2}", p.offset), None, None),
-            (ROW_PLUCK, "plck", p.pluck, format!("{:.2}", p.pluck), None, None),
+            (
+                0,
+                "rise",
+                p.rise_param,
+                format_time(param_to_time(p.rise_param)),
+                ghosts[0],
+                Some(&p.rise_src),
+            ),
+            (
+                1,
+                "fall",
+                p.fall_param,
+                format_time(param_to_time(p.fall_param)),
+                ghosts[1],
+                Some(&p.fall_src),
+            ),
+            (
+                2,
+                "shap",
+                p.shape_param,
+                format!("{:.2}", p.shape_param),
+                ghosts[2],
+                Some(&p.shape_src),
+            ),
+            (
+                3,
+                "attn",
+                bi(p.attenuverter),
+                format!("{:+.2}", p.attenuverter),
+                ghosts[3].map(bi),
+                Some(&p.atten_src),
+            ),
+            (
+                4,
+                "offs",
+                bi(p.offset),
+                format!("{:+.2}", p.offset),
+                None,
+                None,
+            ),
+            (
+                ROW_PLUCK,
+                "plck",
+                p.pluck,
+                format!("{:.2}", p.pluck),
+                None,
+                None,
+            ),
         ];
         for (row, name, set, disp, ghost, src) in rows {
             let mut spans = vec![row_label(row, name)];
@@ -1082,10 +1184,12 @@ fn draw_ui(
             let help_text = maths_help();
             let help = Paragraph::new(help_text)
                 .style(Style::default().fg(theme::ink()).bg(theme::bg()))
-                .block(Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(theme::chrome())
-                    .title(Span::styled(" MATHs ", theme::chrome_hi())));
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(theme::chrome())
+                        .title(Span::styled(" MATHs ", theme::chrome_hi())),
+                );
             f.render_widget(help, area);
         }
 
@@ -1167,7 +1271,10 @@ pub fn run(instance: usize) -> Result<()> {
                 if attempt < 19 {
                     std::thread::sleep(Duration::from_millis(200));
                 } else {
-                    return Err(anyhow::anyhow!("Failed to enable raw mode after 20 attempts: {}", e));
+                    return Err(anyhow::anyhow!(
+                        "Failed to enable raw mode after 20 attempts: {}",
+                        e
+                    ));
                 }
             }
         }
@@ -1202,7 +1309,8 @@ pub fn run(instance: usize) -> Result<()> {
     let mut ex = crate::excmd::ExLine::default();
     let mut ex_msg: Option<String> = None;
     let mut patch_name: Option<String> = None;
-    let mut baseline = state::to_toml_string(&snapshot_params(&state.lock().unwrap())).unwrap_or_default();
+    let mut baseline =
+        state::to_toml_string(&snapshot_params(&state.lock().unwrap())).unwrap_or_default();
     let mut should_quit = false;
     // Global transport handle for Space = play/pause (lazily reopened)
     let mut transport_ui: Option<ShmTransport> = ShmTransport::open().ok();
@@ -1217,7 +1325,9 @@ pub fn run(instance: usize) -> Result<()> {
             let _ = state::save_module_state("envelope", instance, &params);
         }
         if state::check_reload_signal() {
-            if let Ok(params) = state::load_module_state::<state::EnvelopeParams>("envelope", instance) {
+            if let Ok(params) =
+                state::load_module_state::<state::EnvelopeParams>("envelope", instance)
+            {
                 apply_params(&mut state.lock().unwrap(), &params);
             }
         }
@@ -1232,7 +1342,9 @@ pub fn run(instance: usize) -> Result<()> {
             }
         }
         ui_refresh -= 1;
-        let cur = current_state.current_channel.min(current_state.params.len() - 1);
+        let cur = current_state
+            .current_channel
+            .min(current_state.params.len() - 1);
         let cp = &current_state.params[cur];
         let live = |src: &Option<SourceAddr>| -> Option<f32> {
             src.as_ref()
@@ -1254,7 +1366,11 @@ pub fn run(instance: usize) -> Result<()> {
         } else {
             ex_msg.clone()
         };
-        let picker_rows = if picker.is_active() { Some(picker.rows()) } else { None };
+        let picker_rows = if picker.is_active() {
+            Some(picker.rows())
+        } else {
+            None
+        };
         let picker_colors: Vec<Option<ratatui::style::Color>> = if picker.is_active() {
             picker
                 .row_sources()
@@ -1264,13 +1380,26 @@ pub fn run(instance: usize) -> Result<()> {
         } else {
             Vec::new()
         };
-        draw_ui(&mut terminal, &current_state, selected, show_help, overlay.as_deref(), picker_rows, &ghosts, &ui_entries, &picker_colors, instance, bpm, playing)?;
+        draw_ui(
+            &mut terminal,
+            &current_state,
+            selected,
+            show_help,
+            overlay.as_deref(),
+            picker_rows,
+            &ghosts,
+            &ui_entries,
+            &picker_colors,
+            instance,
+            bpm,
+            playing,
+        )?;
 
         if event::poll(Duration::from_millis(50))? {
             let ev = event::read()?;
             if let Event::Mouse(m) = ev {
-                use crossterm::event::{MouseButton, MouseEventKind};
                 use crate::undo::{ParamUndo, ParamValue};
+                use crossterm::event::{MouseButton, MouseEventKind};
                 // y: 1 = overview (click selects channel); 3 = trig row;
                 // 4..=9 = rise/fall/shap/attn/offs/plck; 10 = sig
                 let row_at = |y: u16| -> Option<usize> {
@@ -1283,7 +1412,11 @@ pub fn run(instance: usize) -> Result<()> {
                 };
                 match m.kind {
                     MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                        let steps = if m.kind == MouseEventKind::ScrollUp { 1 } else { -1 };
+                        let steps = if m.kind == MouseEventKind::ScrollUp {
+                            1
+                        } else {
+                            -1
+                        };
                         let mut s = state.lock().unwrap();
                         let slot = row_slot(s.current_channel, selected);
                         let old = s.get_param(slot);
@@ -1356,36 +1489,56 @@ pub fn run(instance: usize) -> Result<()> {
                     continue;
                 }
                 if ex.is_active() {
-                    let completer = crate::excmd::standard_completer(
-                        crate::excmd::patch_names(&state::patches_dir()),
-                    );
-                    if let crate::excmd::ExEvent::Submit(cmd) = ex.handle_key(key.code, &completer) {
+                    let completer = crate::excmd::standard_completer(crate::excmd::patch_names(
+                        &state::patches_dir(),
+                    ));
+                    if let crate::excmd::ExEvent::Submit(cmd) = ex.handle_key(key.code, &completer)
+                    {
                         use crate::excmd::ExCommand;
                         let params = snapshot_params(&state.lock().unwrap());
                         match cmd {
                             ExCommand::Write(name) => {
-                                ex_msg = Some(match crate::excmd::ex_write(name, &mut patch_name, &mut baseline, &params) {
-                                    Ok(m) | Err(m) => m,
-                                });
+                                ex_msg = Some(
+                                    match crate::excmd::ex_write(
+                                        name,
+                                        &mut patch_name,
+                                        &mut baseline,
+                                        &params,
+                                    ) {
+                                        Ok(m) | Err(m) => m,
+                                    },
+                                );
                             }
-                            ExCommand::Edit(name) => match state::load_patch::<state::EnvelopeParams>(&name) {
-                                Ok(p) => {
-                                    apply_params(&mut state.lock().unwrap(), &p);
-                                    baseline = state::to_toml_string(&snapshot_params(&state.lock().unwrap())).unwrap_or_default();
-                                    patch_name = Some(name.clone());
-                                    ex_msg = Some(format!("Loaded {}", name));
+                            ExCommand::Edit(name) => {
+                                match state::load_patch::<state::EnvelopeParams>(&name) {
+                                    Ok(p) => {
+                                        apply_params(&mut state.lock().unwrap(), &p);
+                                        baseline = state::to_toml_string(&snapshot_params(
+                                            &state.lock().unwrap(),
+                                        ))
+                                        .unwrap_or_default();
+                                        patch_name = Some(name.clone());
+                                        ex_msg = Some(format!("Loaded {}", name));
+                                    }
+                                    Err(e) => ex_msg = Some(e.to_string()),
                                 }
-                                Err(e) => ex_msg = Some(e.to_string()),
-                            },
+                            }
                             ExCommand::Quit { force } => {
                                 if !force && crate::excmd::is_dirty(&params, &baseline) {
-                                    ex_msg = Some(String::from("Unsaved changes (:q! to discard, :w <name> to save)"));
+                                    ex_msg = Some(String::from(
+                                        "Unsaved changes (:q! to discard, :w <name> to save)",
+                                    ));
                                 } else {
                                     should_quit = true;
                                 }
                             }
                             ExCommand::WriteQuit(name) => {
-                                match crate::excmd::ex_write(name, &mut patch_name, &mut baseline, &params) {
+                                match crate::excmd::ex_write(
+                                    name,
+                                    &mut patch_name,
+                                    &mut baseline,
+                                    &params,
+                                ) {
                                     Ok(_) => should_quit = true,
                                     Err(m) => ex_msg = Some(m),
                                 }
@@ -1399,7 +1552,9 @@ pub fn run(instance: usize) -> Result<()> {
                                     "fall" => parse_time_param(&v).map(|p| (1, p)),
                                     "shape" => v.parse().ok().map(|p: f32| (2, p.clamp(0.0, 1.0))),
                                     "atten" => v.parse().ok().map(|p: f32| (3, p.clamp(-1.0, 1.0))),
-                                    "offset" => v.parse().ok().map(|p: f32| (4, p.clamp(-1.0, 1.0))),
+                                    "offset" => {
+                                        v.parse().ok().map(|p: f32| (4, p.clamp(-1.0, 1.0)))
+                                    }
                                     "pluck" => v.parse().ok().map(|p: f32| (6, p.clamp(0.0, 1.0))),
                                     "mode" => match v.as_str() {
                                         "trig" => Some((7, 0.0)),
@@ -1427,8 +1582,15 @@ pub fn run(instance: usize) -> Result<()> {
                                             history.record(slot, "Set", old, new_val);
                                         }
                                         ex_msg = Some(match row {
-                                            0 | 1 => format!("{} = {}", k, format_time(param_to_time(val))),
-                                            7 => format!("mode = {}", if val > 0.5 { "gate" } else { "trig" }),
+                                            0 | 1 => format!(
+                                                "{} = {}",
+                                                k,
+                                                format_time(param_to_time(val))
+                                            ),
+                                            7 => format!(
+                                                "mode = {}",
+                                                if val > 0.5 { "gate" } else { "trig" }
+                                            ),
                                             _ => format!("{} = {:.2}", k, val),
                                         });
                                     }
@@ -1449,7 +1611,9 @@ pub fn run(instance: usize) -> Result<()> {
                 if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::CONTROL {
                     let n = count.take();
                     let mut s = state.lock().unwrap();
-                    ex_msg = Some(crate::undo::history_status("Redo", n, || history.redo(&mut *s)));
+                    ex_msg = Some(crate::undo::history_status("Redo", n, || {
+                        history.redo(&mut *s)
+                    }));
                     continue;
                 }
                 if key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL {
@@ -1554,7 +1718,11 @@ pub fn run(instance: usize) -> Result<()> {
                         ex_msg = Some(format!(
                             "Ch{} note input: {}",
                             ch + 1,
-                            if !was { "gate (sustains)" } else { "trig (full AD)" }
+                            if !was {
+                                "gate (sustains)"
+                            } else {
+                                "trig (full AD)"
+                            }
                         ));
                     }
                     KeyCode::Char('c') => {
@@ -1594,7 +1762,9 @@ pub fn run(instance: usize) -> Result<()> {
                     KeyCode::Char('u') => {
                         let n = count.take();
                         let mut s = state.lock().unwrap();
-                        ex_msg = Some(crate::undo::history_status("Undo", n, || history.undo(&mut *s)));
+                        ex_msg = Some(crate::undo::history_status("Undo", n, || {
+                            history.undo(&mut *s)
+                        }));
                     }
                     KeyCode::Char('@') => {
                         count.clear();
@@ -1673,8 +1843,15 @@ mod tests {
 
     #[test]
     fn time_taper_spans_instant_to_25_min() {
-        assert_eq!(param_to_time(0.0), 0.0, "zero attack is allowed — plucks need it");
-        assert!((param_to_time(0.001) - 0.0005).abs() < 0.0001, "first step up is ~0.5ms");
+        assert_eq!(
+            param_to_time(0.0),
+            0.0,
+            "zero attack is allowed — plucks need it"
+        );
+        assert!(
+            (param_to_time(0.001) - 0.0005).abs() < 0.0001,
+            "first step up is ~0.5ms"
+        );
         assert!((param_to_time(1.0) - 1500.0).abs() < 1.0);
         // round trip
         for t in [0.001, 0.1, 2.5, 60.0, 900.0] {
@@ -1691,7 +1868,10 @@ mod tests {
         assert!(close(parse_time_param("100ms").unwrap(), 0.1));
         assert!(close(parse_time_param("2s").unwrap(), 2.0));
         assert!(close(parse_time_param("1.5m").unwrap(), 90.0));
-        assert!((parse_time_param("0.42").unwrap() - 0.42).abs() < 1e-6, "bare value = param");
+        assert!(
+            (parse_time_param("0.42").unwrap() - 0.42).abs() < 1e-6,
+            "bare value = param"
+        );
         assert!(parse_time_param("nope").is_none());
         assert!(parse_time_param("-2s").is_none());
         assert!(parse_time_param("1.7").is_none(), "bare params are 0-1");
@@ -1725,7 +1905,11 @@ mod tests {
         for _ in 0..4800 {
             out = slew_step(out, 1.0, dt, 0.1, 0.1, 0.5); // 100ms rise
         }
-        assert!((out - 1.0).abs() < 1e-3, "linear slew completes in time, got {}", out);
+        assert!(
+            (out - 1.0).abs() < 1e-3,
+            "linear slew completes in time, got {}",
+            out
+        );
 
         // never overshoots
         let mut out = 0.9999;
@@ -1756,7 +1940,10 @@ mod tests {
 
     #[test]
     fn adjust_steps_params_on_current_channel() {
-        let mut s = EnvelopeState { current_channel: 1, ..Default::default() };
+        let mut s = EnvelopeState {
+            current_channel: 1,
+            ..Default::default()
+        };
         let rise0 = s.params[1].rise_param;
         adjust(&mut s, 0, 2, false);
         assert!((s.params[1].rise_param - (rise0 + 0.01)).abs() < 1e-6);
@@ -1776,9 +1963,18 @@ mod tests {
         let mut s = EnvelopeState::default();
         s.set_param(row_slot(2, 4), ParamValue::F32(0.5));
         assert_eq!(s.params[2].offset, 0.5);
-        s.set_param(row_slot(1, ROW_SIGNAL), ParamValue::Src(Some("sequencer/0/t3".into())));
-        assert_eq!(s.params[1].signal_src.as_ref().unwrap().to_string(), "sequencer/0/t3");
-        s.set_param(row_slot(0, ROW_TRIGGER), ParamValue::Src(Some("off".into())));
+        s.set_param(
+            row_slot(1, ROW_SIGNAL),
+            ParamValue::Src(Some("sequencer/0/t3".into())),
+        );
+        assert_eq!(
+            s.params[1].signal_src.as_ref().unwrap().to_string(),
+            "sequencer/0/t3"
+        );
+        s.set_param(
+            row_slot(0, ROW_TRIGGER),
+            ParamValue::Src(Some("off".into())),
+        );
         assert_eq!(s.params[0].trigger, Trigger::Off);
         assert_eq!(
             s.get_param(row_slot(0, ROW_TRIGGER)),
@@ -1793,11 +1989,17 @@ mod tests {
         assert_eq!(Trigger::Any.to_param(), None);
         assert_eq!(Trigger::Off.to_param().as_deref(), Some("off"));
         let a = SourceAddr::parse("sequencer/0/t2").unwrap();
-        assert_eq!(Trigger::Source(a.clone()).to_param().as_deref(), Some("sequencer/0/t2"));
+        assert_eq!(
+            Trigger::Source(a.clone()).to_param().as_deref(),
+            Some("sequencer/0/t2")
+        );
 
         assert_eq!(Trigger::from_param(None), Trigger::Any);
         assert_eq!(Trigger::from_param(Some("off")), Trigger::Off);
-        assert_eq!(Trigger::from_param(Some("sequencer/0/t2")), Trigger::Source(a));
+        assert_eq!(
+            Trigger::from_param(Some("sequencer/0/t2")),
+            Trigger::Source(a)
+        );
     }
 
     #[test]
@@ -1813,7 +2015,11 @@ mod tests {
             matches!(s.params[0].trigger, Trigger::Source(_)),
             "old file must not reset the default trigger"
         );
-        assert_eq!(s.params.len(), DEFAULT_CHANNELS, "old file must not resize channels");
+        assert_eq!(
+            s.params.len(),
+            DEFAULT_CHANNELS,
+            "old file must not resize channels"
+        );
     }
 
     #[test]
@@ -1851,7 +2057,10 @@ mod tests {
         let mut back = EnvelopeState::default();
         apply_params(&mut back, &parsed);
         assert_eq!(back.params[1].offset, -0.4);
-        assert_eq!(back.params[1].signal_src.as_ref().unwrap().to_string(), "sequencer/0/t2");
+        assert_eq!(
+            back.params[1].signal_src.as_ref().unwrap().to_string(),
+            "sequencer/0/t2"
+        );
     }
 
     #[test]
@@ -1865,9 +2074,17 @@ mod tests {
     fn vari_response_reaches_extreme_curvature() {
         // τ ±9: at full exp the curve stays under 2% through half the
         // segment — the staccato spike territory the hardware lives in
-        assert!(vari_response(0.5, 1.0) < 0.02, "got {}", vari_response(0.5, 1.0));
+        assert!(
+            vari_response(0.5, 1.0) < 0.02,
+            "got {}",
+            vari_response(0.5, 1.0)
+        );
         // and the log mirror is correspondingly explosive at the start
-        assert!(vari_response(0.05, 0.0) > 0.3, "got {}", vari_response(0.05, 0.0));
+        assert!(
+            vari_response(0.05, 0.0) > 0.3,
+            "got {}",
+            vari_response(0.05, 0.0)
+        );
         // mirror symmetry: f_log(x) == 1 - f_exp(1-x)
         for x in [0.1, 0.3, 0.7] {
             let log = vari_response(x, 0.0);
@@ -1928,7 +2145,10 @@ mod tests {
                 }
             }
         };
-        assert!(time_to_silence(1.0) > time_to_silence(0.1) * 2.0, "pluck stretches the ring");
+        assert!(
+            time_to_silence(1.0) > time_to_silence(0.1) * 2.0,
+            "pluck stretches the ring"
+        );
     }
 
     fn sp(rise: f32, fall: f32, gate: bool, pluck: f32) -> StageParams {
@@ -1947,7 +2167,12 @@ mod tests {
         let s = EnvelopeState::default();
         assert_eq!(s.params.len(), 4);
         // odd channels feed the voices, even ones stay free
-        for (i, want) in [(0, Some("sequencer/0/t1")), (1, None), (2, Some("sequencer/0/t3")), (3, None)] {
+        for (i, want) in [
+            (0, Some("sequencer/0/t1")),
+            (1, None),
+            (2, Some("sequencer/0/t3")),
+            (3, None),
+        ] {
             match (&s.params[i].trigger, want) {
                 (Trigger::Source(a), Some(w)) => assert_eq!(a.to_string(), w),
                 (Trigger::Off, None) => {}
@@ -1969,7 +2194,10 @@ mod tests {
     fn trig_mode_fires_full_ad_without_note_off() {
         let dt = 1.0 / 48000.0;
         let p = sp(0.01, 0.01, false, 0.0); // 10ms / 10ms
-        let mut ch = EnvelopeChannel { stage: Stage::Rise, ..Default::default() };
+        let mut ch = EnvelopeChannel {
+            stage: Stage::Rise,
+            ..Default::default()
+        };
         let mut peaked = false;
         let mut finished = false;
         for _ in 0..48000 {
@@ -1990,7 +2218,10 @@ mod tests {
     fn gate_mode_sustains_at_top() {
         let dt = 1.0 / 48000.0;
         let p = sp(0.001, 0.01, true, 0.0);
-        let mut ch = EnvelopeChannel { stage: Stage::Rise, ..Default::default() };
+        let mut ch = EnvelopeChannel {
+            stage: Stage::Rise,
+            ..Default::default()
+        };
         for _ in 0..4800 {
             advance_stage(&mut ch, &p, dt);
         }
@@ -2001,14 +2232,22 @@ mod tests {
     #[test]
     fn sustain_releases_when_gate_mode_flips_to_trig() {
         let dt = 1.0 / 48000.0;
-        let mut ch = EnvelopeChannel { stage: Stage::Sustain, output: 1.0, ..Default::default() };
+        let mut ch = EnvelopeChannel {
+            stage: Stage::Sustain,
+            output: 1.0,
+            ..Default::default()
+        };
         // still a gate: sustain holds
         advance_stage(&mut ch, &sp(0.001, 0.005, true, 0.0), dt);
         assert_eq!(ch.stage, Stage::Sustain);
         // user flips the channel to trig mid-sustain: must fall, not hang
         let p = sp(0.001, 0.005, false, 0.0);
         advance_stage(&mut ch, &p, dt);
-        assert_eq!(ch.stage, Stage::Fall, "sustain with no possible release falls");
+        assert_eq!(
+            ch.stage,
+            Stage::Fall,
+            "sustain with no possible release falls"
+        );
         for _ in 0..480 {
             advance_stage(&mut ch, &p, dt);
         }
@@ -2020,7 +2259,10 @@ mod tests {
     fn instant_rise_and_fall_produce_silence() {
         let dt = 1.0 / 48000.0;
         let p = sp(0.0, 0.0, false, 0.0);
-        let mut ch = EnvelopeChannel { stage: Stage::Rise, ..Default::default() };
+        let mut ch = EnvelopeChannel {
+            stage: Stage::Rise,
+            ..Default::default()
+        };
         let eoc = advance_stage(&mut ch, &p, dt);
         // sample 1: instant rise -> straight into fall
         let eoc2 = advance_stage(&mut ch, &p, dt);
@@ -2033,7 +2275,10 @@ mod tests {
     fn trig_mode_pluck_rings_after_instant_strike() {
         let dt = 1.0 / 48000.0;
         let p = sp(0.0, 0.15, false, 0.9);
-        let mut ch = EnvelopeChannel { stage: Stage::Rise, ..Default::default() };
+        let mut ch = EnvelopeChannel {
+            stage: Stage::Rise,
+            ..Default::default()
+        };
         advance_stage(&mut ch, &p, dt); // strike
         let mut t = 0.0;
         let mut above_tenth_at_100ms = false;
@@ -2055,10 +2300,7 @@ mod tests {
                 let x = i as f32 / 20.0;
                 let y = vari_response(x, shape);
                 let back = vari_inverse(y, shape);
-                assert!(
-                    (back - x).abs() < 1e-3,
-                    "shape {shape} x {x}: {back}"
-                );
+                assert!((back - x).abs() < 1e-3, "shape {shape} x {x}: {back}");
             }
         }
     }
@@ -2076,7 +2318,10 @@ mod tests {
             gate_mode: false,
             pluck: 0.8,
         };
-        let mut ch = EnvelopeChannel { stage: Stage::Rise, ..Default::default() };
+        let mut ch = EnvelopeChannel {
+            stage: Stage::Rise,
+            ..Default::default()
+        };
         let mut prev = ch.output;
         let mut max_down = 0.0f32;
         // a 2-second trigger storm: retrigger every 50ms, exactly the way
@@ -2106,7 +2351,10 @@ mod tests {
             gate_mode: false,
             pluck: 0.8,
         };
-        let mut ch = EnvelopeChannel { stage: Stage::Rise, ..Default::default() };
+        let mut ch = EnvelopeChannel {
+            stage: Stage::Rise,
+            ..Default::default()
+        };
         let mut prev = ch.output;
         let mut max_down = 0.0f32;
         let mut cycles = 0;
@@ -2134,37 +2382,63 @@ mod tests {
             gate_mode: false,
             pluck: 0.8,
         };
-        let mut ch = EnvelopeChannel { stage: Stage::Rise, ..Default::default() };
+        let mut ch = EnvelopeChannel {
+            stage: Stage::Rise,
+            ..Default::default()
+        };
         let mut cycles = 0;
         for _ in 0..(48000 * 5) {
             if advance_stage(&mut ch, &p, dt) {
                 cycles += 1;
             }
         }
-        assert!(cycles >= 12, "5s at ~250ms/cycle should loop plenty: {cycles}");
+        assert!(
+            cycles >= 12,
+            "5s at ~250ms/cycle should loop plenty: {cycles}"
+        );
         // and WITHOUT cycling, the tail still rings long (unchanged)
-        let p2 = StageParams { loop_mode: false, ..p };
-        let mut ch2 = EnvelopeChannel { stage: Stage::Fall, output: 1.0, ..Default::default() };
+        let p2 = StageParams {
+            loop_mode: false,
+            ..p
+        };
+        let mut ch2 = EnvelopeChannel {
+            stage: Stage::Fall,
+            output: 1.0,
+            ..Default::default()
+        };
         let mut t = 0.0f32;
         while ch2.stage == Stage::Fall && t < 20.0 {
             advance_stage(&mut ch2, &p2, dt);
             t += dt;
         }
-        assert!(t > 0.4, "non-cycling pluck tail outlives the fall time: {t}");
+        assert!(
+            t > 0.4,
+            "non-cycling pluck tail outlives the fall time: {t}"
+        );
     }
 
     #[test]
     fn cycling_ignores_gate_mode() {
         let dt = 1.0 / 48000.0;
-        let p = StageParams { loop_mode: true, ..sp(0.005, 0.005, true, 0.0) };
-        let mut ch = EnvelopeChannel { stage: Stage::Rise, ..Default::default() };
+        let p = StageParams {
+            loop_mode: true,
+            ..sp(0.005, 0.005, true, 0.0)
+        };
+        let mut ch = EnvelopeChannel {
+            stage: Stage::Rise,
+            ..Default::default()
+        };
         let mut cycles = 0;
         for _ in 0..48000 {
             if advance_stage(&mut ch, &p, dt) {
                 cycles += 1;
             }
         }
-        assert!(cycles >= 90, "cycle mode keeps oscillating even in gate mode: {}", cycles);
+        assert!(
+            cycles >= 90,
+            "cycle mode keeps oscillating even in gate mode: {}",
+            cycles
+        );
     }
 
     #[test]

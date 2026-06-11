@@ -39,11 +39,28 @@ pub enum Param {
     Hi,
     /// master strip only (sits where pan does on a channel)
     Width,
+    /// fx send A — post-fader tap into the `/los_send_a` bus (`send/0`
+    /// in the fx modules' input pickers).
+    SendA,
+    /// fx send B — `/los_send_b`, `send/1`.
+    SendB,
 }
 
 /// Strip rows top → bottom (channel strips; master swaps Pan for Width).
-const STRIP_ROWS: [Param; 7] =
-    [Param::Drive, Param::Hi, Param::Mid, Param::Freq, Param::Lo, Param::Pan, Param::Level];
+const STRIP_ROWS: [Param; 9] = [
+    Param::Drive,
+    Param::Hi,
+    Param::Mid,
+    Param::Freq,
+    Param::Lo,
+    Param::Pan,
+    Param::SendA,
+    Param::SendB,
+    Param::Level,
+];
+
+/// Bindable params per strip (`srcs` array length).
+const N_SRC: usize = 9;
 
 impl Param {
     fn kind(self) -> usize {
@@ -56,6 +73,8 @@ impl Param {
             Param::Freq => 7,
             Param::Hi => 8,
             Param::Width => 1, // master reuses the pan kind slot
+            Param::SendA => 9,
+            Param::SendB => 10,
         }
     }
 
@@ -69,13 +88,17 @@ impl Param {
             Param::Freq => "frq",
             Param::Hi => "hi",
             Param::Width => "wid",
+            Param::SendA => "sa",
+            Param::SendB => "sb",
         }
     }
 
     /// Map a modbus value onto this param's range (bound replaces manual).
     fn map_mod(self, v: f32) -> f32 {
         match self {
-            Param::Level | Param::Drive | Param::Freq => v.clamp(0.0, 1.0),
+            Param::Level | Param::Drive | Param::Freq | Param::SendA | Param::SendB => {
+                v.clamp(0.0, 1.0)
+            }
             Param::Pan => v.clamp(-1.0, 1.0),
             Param::Lo | Param::Mid | Param::Hi => v.clamp(-1.0, 1.0) * 15.0,
             Param::Width => v.clamp(0.0, 1.0) * 2.0,
@@ -102,6 +125,8 @@ fn src_index(p: Param) -> usize {
         Param::Mid => 4,
         Param::Freq => 5,
         Param::Hi => 6,
+        Param::SendA => 7,
+        Param::SendB => 8,
     }
 }
 
@@ -116,10 +141,12 @@ struct Strip {
     eq_mid: f32,
     eq_freq: f32,
     eq_hi: f32,
-    srcs: [Option<SourceAddr>; 7],
-    resolved: [Option<usize>; 7],
+    send_a: f32,
+    send_b: f32,
+    srcs: [Option<SourceAddr>; N_SRC],
+    resolved: [Option<usize>; N_SRC],
     /// Live effective values, written by the audio thread (ghost display).
-    eff: [f32; 7],
+    eff: [f32; N_SRC],
 }
 
 impl Strip {
@@ -132,9 +159,23 @@ impl Strip {
             eq_mid: 0.0,
             eq_freq: 0.5,
             eq_hi: 0.0,
+            send_a: 0.0,
+            send_b: 0.0,
             srcs: Default::default(),
             resolved: Default::default(),
-            eff: [level, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0],
+            eff: [level, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0],
+        }
+    }
+
+    /// A strip with the house send defaults: voices get a taste of both
+    /// fx buses out of the box; everything else (fx returns! the
+    /// envelope's function out) starts dry — a return feeding its own
+    /// send is a feedback loop you should have to ask for.
+    fn with_sends(level: f32, send_a: f32, send_b: f32) -> Self {
+        Self {
+            send_a,
+            send_b,
+            ..Self::new(level)
         }
     }
 
@@ -147,6 +188,8 @@ impl Strip {
             Param::Mid => self.eq_mid,
             Param::Freq => self.eq_freq,
             Param::Hi => self.eq_hi,
+            Param::SendA => self.send_a,
+            Param::SendB => self.send_b,
         }
     }
 
@@ -160,6 +203,8 @@ impl Strip {
             Param::Mid => self.eq_mid = v.clamp(-15.0, 15.0),
             Param::Freq => self.eq_freq = v.clamp(0.0, 1.0),
             Param::Hi => self.eq_hi = v.clamp(-15.0, 15.0),
+            Param::SendA => self.send_a = v.clamp(0.0, 1.0),
+            Param::SendB => self.send_b = v.clamp(0.0, 1.0),
         }
     }
 
@@ -241,8 +286,7 @@ fn mixer_thread(
         eprintln!("[mixer] manifest registration failed (continuing): {}", e);
     }
 
-    let mut transport = ShmTransport::open()
-        .or_else(|_| ShmTransport::create(48000))?;
+    let mut transport = ShmTransport::open().or_else(|_| ShmTransport::create(48000))?;
 
     let host = cpal::default_host();
     let device = host
@@ -269,6 +313,26 @@ fn mixer_thread(
     let mut width_smooth = dsp::Smoother::new(1.0);
     let mut cb_bus: Option<ModulationBus> = ModulationBus::open().ok();
 
+    // ── fx send buses ──────────────────────────────────────────────────
+    // Two post-fader stereo buses, advertised in the manifest as
+    // `send/0` and `send/1` so fx modules can pick them as inputs (the
+    // classic send/return: send knobs on the strips, the fx module's
+    // own strip is the return). Each bus needs its own manifest slot
+    // (one audio ring per entry), so the mixer holds two extra
+    // registered handles for the session's lifetime.
+    let mut send_a_rb = AudioRingbuf::create("/los_send_a").ok();
+    let mut send_b_rb = AudioRingbuf::create("/los_send_b").ok();
+    let mut send_manifest_a = Manifest::open().ok();
+    let mut send_manifest_b = Manifest::open().ok();
+    if let Some(m) = send_manifest_a.as_mut() {
+        let _ = m.register("send", 0, Some("/los_send_a"), 0);
+    }
+    if let Some(m) = send_manifest_b.as_mut() {
+        let _ = m.register("send", 1, Some("/los_send_b"), 0);
+    }
+    let mut send_a_buf = vec![0.0f32; 128];
+    let mut send_b_buf = vec![0.0f32; 128];
+
     let stream = device
         .build_output_stream(
             &config.into(),
@@ -288,6 +352,8 @@ fn mixer_thread(
                     for sample in data[written..written + slot_len].iter_mut() {
                         *sample = 0.0;
                     }
+                    send_a_buf[..slot_len].iter_mut().for_each(|v| *v = 0.0);
+                    send_b_buf[..slot_len].iter_mut().for_each(|v| *v = 0.0);
 
                     let mut voice_buf = [0.0f32; 128];
                     let n = inner.audio_sources.len().min(inner.tracks.len());
@@ -307,6 +373,8 @@ fn mixer_thread(
                                 s.effective(Param::Mid, bus),
                                 s.effective(Param::Freq, bus),
                                 s.effective(Param::Hi, bus),
+                                s.effective(Param::SendA, bus),
+                                s.effective(Param::SendB, bus),
                             ];
                             (eff, t.mute || (any_solo && !t.solo))
                         };
@@ -316,6 +384,8 @@ fn mixer_thread(
                         dspc.level.target = if silent { 0.0 } else { eff[0] };
                         dspc.pan.target = eff[1];
                         dspc.drive_amt.target = eff[2];
+                        dspc.send_a.target = if silent { 0.0 } else { eff[7] };
+                        dspc.send_b.target = if silent { 0.0 } else { eff[8] };
 
                         let read_ok = inner.audio_sources[i]
                             .ringbuf
@@ -332,6 +402,14 @@ fn mixer_thread(
                             let (l, r) = (l * gl * lvl, r * gr * lvl);
                             data[written + j] += l;
                             data[written + j + 1] += r;
+                            // post-fader send taps (post-mute too: a
+                            // silent strip sends nothing)
+                            let sa = dspc.send_a.tick();
+                            let sb = dspc.send_b.tick();
+                            send_a_buf[j] += l * sa;
+                            send_a_buf[j + 1] += r * sa;
+                            send_b_buf[j] += l * sb;
+                            send_b_buf[j + 1] += r * sb;
                             track_peaks[i] = track_peaks[i].max(l.abs().max(r.abs()));
                         }
                     }
@@ -354,12 +432,18 @@ fn mixer_thread(
                                 m.effective(Param::Freq, bus),
                                 m.effective(Param::Hi, bus),
                                 m.effective(Param::Width, bus),
+                                m.effective(Param::SendA, bus),
+                                m.effective(Param::SendB, bus),
                             ],
                             m.effective(Param::Level, bus),
                         )
                     };
-                    inner.master.eff =
-                        [m_lvl, m_eff[5], m_eff[0], m_eff[1], m_eff[2], m_eff[3], m_eff[4]];
+                    inner.master.eff = [
+                        m_lvl, m_eff[5], m_eff[0], m_eff[1], m_eff[2], m_eff[3], m_eff[4],
+                        m_eff[6], m_eff[7],
+                    ];
+                    master_chain.send_a.target = m_eff[6];
+                    master_chain.send_b.target = m_eff[7];
                     master_chain.tune(fs, m_eff[1], m_eff[2], m_eff[3], m_eff[4]);
                     master_chain.drive_amt.target = m_eff[0];
                     master_chain.level.target = m_lvl;
@@ -371,7 +455,29 @@ fn mixer_thread(
                         let lvl = master_chain.level.tick();
                         data[j] = l * lvl;
                         data[j + 1] = r * lvl;
+                        // master sends tap the finished mix (returns
+                        // included — raising them invites feedback,
+                        // which is why they default to 0)
+                        let sa = master_chain.send_a.tick();
+                        let sb = master_chain.send_b.tick();
+                        send_a_buf[j - written] += data[j] * sa;
+                        send_a_buf[j - written + 1] += data[j + 1] * sa;
+                        send_b_buf[j - written] += data[j] * sb;
+                        send_b_buf[j - written + 1] += data[j + 1] * sb;
                         peak = peak.max(data[j].abs().max(data[j + 1].abs()));
+                    }
+
+                    // ship the send buses. When nothing is draining a
+                    // bus its ring fills once and writes simply skip —
+                    // never read our own ring to make room: the producer
+                    // touching read_index races the consumer (SPSC) and
+                    // corrupts it into serving stale slots. A consumer
+                    // that attaches later fast-forwards the backlog.
+                    if let Some(rb) = send_a_rb.as_mut() {
+                        let _ = rb.write(&send_a_buf[..slot_len]);
+                    }
+                    if let Some(rb) = send_b_rb.as_mut() {
+                        let _ = rb.write(&send_b_buf[..slot_len]);
                     }
 
                     if let Some(ref mut scope_rb) = inner.scope_rb {
@@ -406,7 +512,9 @@ fn mixer_thread(
         )
         .map_err(|e| anyhow::anyhow!("Failed to build output stream: {}", e))?;
 
-    stream.play().map_err(|e| anyhow::anyhow!("Failed to play stream: {}", e))?;
+    stream
+        .play()
+        .map_err(|e| anyhow::anyhow!("Failed to play stream: {}", e))?;
 
     loop {
         if shutdown.try_recv().is_ok() {
@@ -444,9 +552,9 @@ fn mixer_thread(
 
         let mut to_remove = Vec::new();
         for (i, source) in inner.audio_sources.iter().enumerate() {
-            let still_alive = entries.iter().any(|e| {
-                e.audio_shm.as_deref() == Some(&source.shm_name)
-            });
+            let still_alive = entries
+                .iter()
+                .any(|e| e.audio_shm.as_deref() == Some(&source.shm_name));
             if !still_alive || claimed.contains(&source.shm_name.as_str()) {
                 to_remove.push(i);
             }
@@ -461,11 +569,20 @@ fn mixer_thread(
 
         for entry in &entries {
             let has_shm = entry.audio_shm.is_some();
-            if !has_shm { continue; }
+            if !has_shm {
+                continue;
+            }
+            // the send buses are our own outputs — adopting one would
+            // feed the mix straight back into itself
+            if entry.module_name == "send" {
+                continue;
+            }
             let shm_name = entry.audio_shm.as_ref().unwrap();
 
             let already = inner.audio_sources.iter().any(|s| s.shm_name == *shm_name);
-            if already || claimed.contains(&shm_name.as_str()) { continue; }
+            if already || claimed.contains(&shm_name.as_str()) {
+                continue;
+            }
 
             if let Ok(ringbuf) = AudioRingbuf::open(shm_name) {
                 let label = format!("{} {}", capitalize(&entry.module_name), entry.instance);
@@ -473,14 +590,25 @@ fn mixer_thread(
                 // transients (zero-rise strikes = impulses). Its fader
                 // starts DOWN — like an unpatched cable on the hardware —
                 // so those clicks are opt-in, not the default mix.
-                let level = if entry.module_name == "envelope" { 0.0 } else { 0.8 };
+                let level = if entry.module_name == "envelope" {
+                    0.0
+                } else {
+                    0.8
+                };
+                // house send defaults: sound sources get a taste of both
+                // fx buses (A = the delay, B = the filterbank in the
+                // fresh session); fx returns and the envelope start dry
+                let (sa, sb) = match entry.module_name.as_str() {
+                    "voice" | "tone" | "template" => (0.25, 0.2),
+                    _ => (0.0, 0.0),
+                };
                 inner.audio_sources.push(AudioSource {
                     shm_name: shm_name.clone(),
                     ringbuf,
                 });
                 inner.tracks.push(TrackState {
                     name: label,
-                    strip: Strip::new(level),
+                    strip: Strip::with_sends(level, sa, sb),
                     mute: false,
                     solo: false,
                     meter: 0.0,
@@ -492,7 +620,7 @@ fn mixer_thread(
         // to (the sequencer's who's-listening markers)
         let mut consumed: u64 = 0;
         for t in inner.tracks.iter_mut() {
-            for k in 0..7 {
+            for k in 0..N_SRC {
                 t.strip.resolved[k] = t.strip.srcs[k]
                     .as_ref()
                     .and_then(|a| routing::resolve(&entries, a));
@@ -503,7 +631,7 @@ fn mixer_thread(
                 }
             }
         }
-        for k in 0..7 {
+        for k in 0..N_SRC {
             inner.master.resolved[k] = inner.master.srcs[k]
                 .as_ref()
                 .and_then(|a| routing::resolve(&entries, a));
@@ -517,7 +645,8 @@ fn mixer_thread(
 
         if inner.scope_rb.is_none() {
             inner.scope_rb = AudioRingbuf::open(SHM_NAME)
-                .or_else(|_| AudioRingbuf::create(SHM_NAME)).ok();
+                .or_else(|_| AudioRingbuf::create(SHM_NAME))
+                .ok();
         }
 
         drop(inner);
@@ -546,29 +675,41 @@ fn snapshot_params(s: &MixerInner) -> state::MixerParams {
         master_eq_freq: s.master.eq_freq,
         master_eq_hi: s.master.eq_hi,
         master_width: s.master.pan,
-        tracks: s.tracks.iter().map(|t| state::MixerTrackParam {
-            level: t.strip.level,
-            pan: t.strip.pan,
-            mute: t.mute,
-            solo: t.solo,
-            drive: t.strip.drive,
-            eq_lo: t.strip.eq_lo,
-            eq_mid: t.strip.eq_mid,
-            eq_freq: t.strip.eq_freq,
-            eq_hi: t.strip.eq_hi,
-            level_src: src(&t.strip.srcs[0]),
-            pan_src: src(&t.strip.srcs[1]),
-            drive_src: src(&t.strip.srcs[2]),
-            lo_src: src(&t.strip.srcs[3]),
-            mid_src: src(&t.strip.srcs[4]),
-            freq_src: src(&t.strip.srcs[5]),
-            hi_src: src(&t.strip.srcs[6]),
-        }).collect(),
+        master_send_a: s.master.send_a,
+        master_send_b: s.master.send_b,
+        tracks: s
+            .tracks
+            .iter()
+            .map(|t| state::MixerTrackParam {
+                level: t.strip.level,
+                pan: t.strip.pan,
+                mute: t.mute,
+                solo: t.solo,
+                drive: t.strip.drive,
+                eq_lo: t.strip.eq_lo,
+                eq_mid: t.strip.eq_mid,
+                eq_freq: t.strip.eq_freq,
+                eq_hi: t.strip.eq_hi,
+                send_a: t.strip.send_a,
+                send_b: t.strip.send_b,
+                level_src: src(&t.strip.srcs[0]),
+                pan_src: src(&t.strip.srcs[1]),
+                drive_src: src(&t.strip.srcs[2]),
+                lo_src: src(&t.strip.srcs[3]),
+                mid_src: src(&t.strip.srcs[4]),
+                freq_src: src(&t.strip.srcs[5]),
+                hi_src: src(&t.strip.srcs[6]),
+                send_a_src: src(&t.strip.srcs[7]),
+                send_b_src: src(&t.strip.srcs[8]),
+            })
+            .collect(),
     }
 }
 
 fn apply_params(s: &mut MixerInner, params: &state::MixerParams) {
-    if let Some(v) = params.master { s.master.level = v; }
+    if let Some(v) = params.master {
+        s.master.level = v;
+    }
     s.master.drive = params.master_drive;
     s.master.eq_lo = params.master_eq_lo;
     s.master.eq_mid = params.master_eq_mid;
@@ -587,6 +728,8 @@ fn apply_params(s: &mut MixerInner, params: &state::MixerParams) {
         t.strip.eq_mid = tp.eq_mid;
         t.strip.eq_freq = tp.eq_freq;
         t.strip.eq_hi = tp.eq_hi;
+        t.strip.send_a = tp.send_a;
+        t.strip.send_b = tp.send_b;
         t.strip.srcs = [
             parse(&tp.level_src),
             parse(&tp.pan_src),
@@ -595,15 +738,21 @@ fn apply_params(s: &mut MixerInner, params: &state::MixerParams) {
             parse(&tp.mid_src),
             parse(&tp.freq_src),
             parse(&tp.hi_src),
+            parse(&tp.send_a_src),
+            parse(&tp.send_b_src),
         ];
     }
+    s.master.send_a = params.master_send_a;
+    s.master.send_b = params.master_send_b;
 }
 
 /// Undo slots: strip*16 + kind (0 level, 1 pan/width, 2 mute, 3 solo,
 /// 4 drive, 5 lo, 6 mid, 7 freq, 8 hi, 9+srcIndex bindings); the master
 /// strip lives at MASTER_SLOT + kind.
 const MASTER_SLOT: usize = 1_000_000;
-const STRIDE: usize = 16;
+const STRIDE: usize = 32;
+/// First binding kind within a strip's slot stride.
+const SRC_KIND: usize = 16;
 
 impl crate::undo::ParamUndo for MixerInner {
     fn get_param(&self, slot: usize) -> Option<crate::undo::ParamValue> {
@@ -630,8 +779,10 @@ impl crate::undo::ParamUndo for MixerInner {
             6 => Some(V::F32(s.eq_mid)),
             7 => Some(V::F32(s.eq_freq)),
             8 => Some(V::F32(s.eq_hi)),
-            k if (9..16).contains(&k) => {
-                Some(V::Src(s.srcs[k - 9].as_ref().map(|a| a.to_string())))
+            9 => Some(V::F32(s.send_a)),
+            10 => Some(V::F32(s.send_b)),
+            k if (SRC_KIND..SRC_KIND + N_SRC).contains(&k) => {
+                Some(V::Src(s.srcs[k - SRC_KIND].as_ref().map(|a| a.to_string())))
             }
             _ => None,
         }
@@ -670,8 +821,10 @@ impl crate::undo::ParamUndo for MixerInner {
             (6, V::F32(v)) => s.eq_mid = v,
             (7, V::F32(v)) => s.eq_freq = v,
             (8, V::F32(v)) => s.eq_hi = v,
-            (k, V::Src(v)) if (9..16).contains(&k) => {
-                s.srcs[k - 9] = v.as_deref().and_then(SourceAddr::parse);
+            (9, V::F32(v)) => s.send_a = v,
+            (10, V::F32(v)) => s.send_b = v,
+            (k, V::Src(v)) if (SRC_KIND..SRC_KIND + N_SRC).contains(&k) => {
+                s.srcs[k - SRC_KIND] = v.as_deref().and_then(SourceAddr::parse);
             }
             _ => {}
         }
@@ -695,7 +848,9 @@ fn adjust_param(s: &mut MixerInner, steps: i32, coarse: bool) {
     let strip = s.strip_mut(sel);
     let v = strip.get(p);
     let new = match p {
-        Param::Level | Param::Drive => step_f32(v, steps, 0.05, coarse, 0.0, 1.0),
+        Param::Level | Param::Drive | Param::SendA | Param::SendB => {
+            step_f32(v, steps, 0.05, coarse, 0.0, 1.0)
+        }
         Param::Pan => step_f32(v, steps, 0.05, coarse, -1.0, 1.0),
         Param::Width => step_f32(v, steps, 0.05, coarse, 0.0, 2.0),
         Param::Freq => step_f32(v, steps, 0.02, coarse, 0.0, 1.0),
@@ -743,7 +898,9 @@ fn tape_writer(rx: std::sync::mpsc::Receiver<Vec<f32>>, path: &str, sample_rate:
 /// Value text for a param row ("+3.0", "1.2k", "‹40", "80%").
 fn param_text(p: Param, v: f32) -> String {
     match p {
-        Param::Level | Param::Drive => format!("{:.0}%", v * 100.0),
+        Param::Level | Param::Drive | Param::SendA | Param::SendB => {
+            format!("{:.0}%", v * 100.0)
+        }
         Param::Width => format!("{:.2}", v),
         Param::Freq => {
             let hz = dsp::mid_freq_hz(v);
@@ -804,7 +961,15 @@ fn draw_ui(
             .iter()
             .enumerate()
             .map(|(i, t)| {
-                (t.name.as_str(), &t.strip, t.mute, t.solo, t.meter, i == inner.selected, false)
+                (
+                    t.name.as_str(),
+                    &t.strip,
+                    t.mute,
+                    t.solo,
+                    t.meter,
+                    i == inner.selected,
+                    false,
+                )
             })
             .chain(std::iter::once((
                 "MASTER",
@@ -830,7 +995,11 @@ fn draw_ui(
                 }
                 name_spans.push(Span::styled(
                     nm,
-                    if *sel { theme::selected() } else { theme::chrome_hi() },
+                    if *sel {
+                        theme::selected()
+                    } else {
+                        theme::chrome_hi()
+                    },
                 ));
             }
             lines.push(Line::from(name_spans));
@@ -841,9 +1010,17 @@ fn draw_ui(
                 }
                 let mut spans: Vec<Span> = Vec::new();
                 for (_, strip, mute, _, _, sel, is_master) in &strips {
-                    let p = if *p0 == Param::Pan && *is_master { Param::Width } else { *p0 };
+                    let p = if *p0 == Param::Pan && *is_master {
+                        Param::Width
+                    } else {
+                        *p0
+                    };
                     let bound = strip.srcs[src_index(p)].is_some();
-                    let shown = if bound { strip.eff[src_index(p)] } else { strip.get(p) };
+                    let shown = if bound {
+                        strip.eff[src_index(p)]
+                    } else {
+                        strip.get(p)
+                    };
                     let mark = if bound { '▸' } else { ' ' };
                     let mut txt = format!(" {:<3}{}{}", p.label(), mark, param_text(p, shown));
                     txt.truncate(STRIP_W);
@@ -871,9 +1048,8 @@ fn draw_ui(
                 lines.push(Line::from(spans));
             }
             // fader rows: meter fill, level tick, ghost at the live level
-            let row_of = |v: f32| {
-                ((1.0 - v.clamp(0.0, 1.0)) * (fader_rows - 1) as f32).round() as usize
-            };
+            let row_of =
+                |v: f32| ((1.0 - v.clamp(0.0, 1.0)) * (fader_rows - 1) as f32).round() as usize;
             for fr in 0..fader_rows {
                 let mut spans: Vec<Span> = Vec::new();
                 for (_, strip, mute, _, meter, sel, _) in &strips {
@@ -886,7 +1062,14 @@ fn draw_ui(
                     let (ch, style) = if ghost {
                         (theme::GHOST, theme::signal(theme::clock()))
                     } else if tick {
-                        ('█', if *sel { theme::selected() } else { theme::value() })
+                        (
+                            '█',
+                            if *sel {
+                                theme::selected()
+                            } else {
+                                theme::value()
+                            },
+                        )
                     } else if meter_fill {
                         ('▓', theme::signal(theme::audio()))
                     } else {
@@ -901,9 +1084,13 @@ fn draw_ui(
             let mut ms: Vec<Span> = Vec::new();
             for (_, strip, mute, solo, _, sel, is_master) in &strips {
                 let bound = strip.srcs[0].is_some();
-                let shown = if bound { strip.eff[0] } else { strip.get(Param::Level) };
-                let cursor =
-                    *sel && STRIP_ROWS[inner.selected_param.min(6)] == Param::Level;
+                let shown = if bound {
+                    strip.eff[0]
+                } else {
+                    strip.get(Param::Level)
+                };
+                let cursor = *sel
+                    && STRIP_ROWS[inner.selected_param.min(STRIP_ROWS.len() - 1)] == Param::Level;
                 let mut txt = format!("  {:>4}", param_text(Param::Level, shown));
                 while txt.chars().count() < STRIP_W {
                     txt.push(' ');
@@ -926,11 +1113,19 @@ fn draw_ui(
                 } else {
                     ms.push(Span::styled(
                         "   M ",
-                        if *mute { theme::signal(theme::alert()) } else { theme::dim() },
+                        if *mute {
+                            theme::signal(theme::alert())
+                        } else {
+                            theme::dim()
+                        },
                     ));
                     ms.push(Span::styled(
                         "S   ",
-                        if *solo { theme::signal(theme::clock()) } else { theme::dim() },
+                        if *solo {
+                            theme::signal(theme::clock())
+                        } else {
+                            theme::dim()
+                        },
                     ));
                 }
             }
@@ -940,9 +1135,12 @@ fn draw_ui(
             // ── compact: dense rows + selected-strip console detail ─────
             let bar_w = theme::bar_width(w, 28);
             for (name, strip, mute, solo, meter, sel, _) in &strips {
-                let name_style = if *sel { theme::selected() } else { theme::chrome() };
-                let mut spans: Vec<Span> =
-                    vec![Span::styled(format!(" {:<9}", name), name_style)];
+                let name_style = if *sel {
+                    theme::selected()
+                } else {
+                    theme::chrome()
+                };
+                let mut spans: Vec<Span> = vec![Span::styled(format!(" {:<9}", name), name_style)];
                 let m = if *mute { 0.0 } else { *meter };
                 spans.push(Span::styled(
                     format!("{} ", theme::meter_char(m)),
@@ -974,10 +1172,18 @@ fn draw_ui(
             {
                 let mut detail: Vec<Span> = vec![Span::styled(" › ", theme::chrome_hi())];
                 for (row, p0) in STRIP_ROWS.iter().enumerate() {
-                    let p = if *p0 == Param::Pan && *is_master { Param::Width } else { *p0 };
+                    let p = if *p0 == Param::Pan && *is_master {
+                        Param::Width
+                    } else {
+                        *p0
+                    };
                     let bound = strip.srcs[src_index(p)].is_some();
-                    let shown = if bound { strip.eff[src_index(p)] } else { strip.get(p) };
-                    let style = if row == inner.selected_param.min(6) {
+                    let shown = if bound {
+                        strip.eff[src_index(p)]
+                    } else {
+                        strip.get(p)
+                    };
+                    let style = if row == inner.selected_param.min(STRIP_ROWS.len() - 1) {
                         theme::selected()
                     } else if bound {
                         theme::signal(theme::clock())
@@ -1022,10 +1228,12 @@ fn draw_ui(
             ];
             let help = Paragraph::new(help_text)
                 .style(Style::default().fg(theme::ink()).bg(theme::bg()))
-                .block(Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(theme::chrome())
-                    .title(Span::styled(" MIX ", theme::chrome_hi())));
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(theme::chrome())
+                        .title(Span::styled(" MIX ", theme::chrome_hi())),
+                );
             f.render_widget(help, area);
         }
 
@@ -1043,7 +1251,11 @@ fn draw_ui(
                 .iter()
                 .enumerate()
                 .map(|(i, row)| {
-                    let style = if i == sel { theme::selected() } else { theme::value() };
+                    let style = if i == sel {
+                        theme::selected()
+                    } else {
+                        theme::value()
+                    };
                     ratatui::widgets::ListItem::new(row.clone()).style(style)
                 })
                 .collect();
@@ -1075,7 +1287,10 @@ pub fn run() -> Result<()> {
                 if attempt < 19 {
                     std::thread::sleep(Duration::from_millis(200));
                 } else {
-                    return Err(anyhow::anyhow!("Failed to enable raw mode after 20 attempts: {}", e));
+                    return Err(anyhow::anyhow!(
+                        "Failed to enable raw mode after 20 attempts: {}",
+                        e
+                    ));
                 }
             }
         }
@@ -1088,11 +1303,14 @@ pub fn run() -> Result<()> {
     let inner = Arc::new(Mutex::new(MixerInner {
         tracks: Vec::new(),
         audio_sources: Vec::new(),
-        master: Strip { pan: 1.0, ..Strip::new(0.8) }, // pan = width on master
+        master: Strip {
+            pan: 1.0,
+            ..Strip::new(0.8)
+        }, // pan = width on master
         master_meter: 0.0,
         tape: None,
         selected: 0,
-        selected_param: 6, // the fader — the 90% case
+        selected_param: STRIP_ROWS.len() - 1, // the fader — the 90% case
         scope_rb: None,
     }));
 
@@ -1117,7 +1335,8 @@ pub fn run() -> Result<()> {
     let mut picker = crate::picker::Picker::default();
     let mut ex_msg: Option<String> = None;
     let mut patch_name: Option<String> = None;
-    let mut baseline = state::to_toml_string(&snapshot_params(&inner.lock().unwrap())).unwrap_or_default();
+    let mut baseline =
+        state::to_toml_string(&snapshot_params(&inner.lock().unwrap())).unwrap_or_default();
     let mut should_quit = false;
     // Global transport handle for Space = play/pause (lazily reopened)
     let mut transport_ui: Option<ShmTransport> = ShmTransport::open().ok();
@@ -1150,7 +1369,14 @@ pub fn run() -> Result<()> {
         {
             let s = inner.lock().unwrap();
             let picker_rows = picker.is_active().then(|| picker.rows());
-            draw_ui(&mut terminal, &s, show_help, overlay.as_deref(), picker_rows, &ui_entries)?;
+            draw_ui(
+                &mut terminal,
+                &s,
+                show_help,
+                overlay.as_deref(),
+                picker_rows,
+                &ui_entries,
+            )?;
         }
 
         if event::poll(Duration::from_millis(50))? {
@@ -1162,7 +1388,11 @@ pub fn run() -> Result<()> {
                 }
                 match m.kind {
                     MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                        let steps = if m.kind == MouseEventKind::ScrollUp { 1 } else { -1 };
+                        let steps = if m.kind == MouseEventKind::ScrollUp {
+                            1
+                        } else {
+                            -1
+                        };
                         use crate::undo::ParamUndo;
                         let mut s = inner.lock().unwrap();
                         let slot = slot_for(&s, s.current_param().kind());
@@ -1188,12 +1418,11 @@ pub fn run() -> Result<()> {
             if let Event::Key(key) = ev {
                 ex_msg = None;
                 if picker.is_active() {
-                    if let crate::picker::PickerEvent::Chosen(addr) = picker.handle_key(key.code)
-                    {
+                    if let crate::picker::PickerEvent::Chosen(addr) = picker.handle_key(key.code) {
                         use crate::undo::{ParamUndo, ParamValue};
                         let mut s = inner.lock().unwrap();
                         let p = s.current_param();
-                        let slot = slot_for(&s, 9 + src_index(p));
+                        let slot = slot_for(&s, SRC_KIND + src_index(p));
                         let old = s.get_param(slot);
                         let sel = s.selected;
                         s.strip_mut(sel).srcs[src_index(p)] = addr.clone();
@@ -1209,41 +1438,63 @@ pub fn run() -> Result<()> {
                     continue;
                 }
                 if ex.is_active() {
-                    let completer = crate::excmd::standard_completer(
-                        crate::excmd::patch_names(&state::patches_dir()),
-                    );
-                    if let crate::excmd::ExEvent::Submit(cmd) = ex.handle_key(key.code, &completer) {
+                    let completer = crate::excmd::standard_completer(crate::excmd::patch_names(
+                        &state::patches_dir(),
+                    ));
+                    if let crate::excmd::ExEvent::Submit(cmd) = ex.handle_key(key.code, &completer)
+                    {
                         use crate::excmd::ExCommand;
                         let params = snapshot_params(&inner.lock().unwrap());
                         match cmd {
                             ExCommand::Write(name) => {
-                                ex_msg = Some(match crate::excmd::ex_write(name, &mut patch_name, &mut baseline, &params) {
-                                    Ok(m) | Err(m) => m,
-                                });
+                                ex_msg = Some(
+                                    match crate::excmd::ex_write(
+                                        name,
+                                        &mut patch_name,
+                                        &mut baseline,
+                                        &params,
+                                    ) {
+                                        Ok(m) | Err(m) => m,
+                                    },
+                                );
                             }
-                            ExCommand::Edit(name) => match state::load_patch::<state::MixerParams>(&name) {
-                                Ok(p) => {
-                                    apply_params(&mut inner.lock().unwrap(), &p);
-                                    baseline = state::to_toml_string(&snapshot_params(&inner.lock().unwrap())).unwrap_or_default();
-                                    patch_name = Some(name.clone());
-                                    ex_msg = Some(format!("Loaded {}", name));
+                            ExCommand::Edit(name) => {
+                                match state::load_patch::<state::MixerParams>(&name) {
+                                    Ok(p) => {
+                                        apply_params(&mut inner.lock().unwrap(), &p);
+                                        baseline = state::to_toml_string(&snapshot_params(
+                                            &inner.lock().unwrap(),
+                                        ))
+                                        .unwrap_or_default();
+                                        patch_name = Some(name.clone());
+                                        ex_msg = Some(format!("Loaded {}", name));
+                                    }
+                                    Err(e) => ex_msg = Some(e.to_string()),
                                 }
-                                Err(e) => ex_msg = Some(e.to_string()),
-                            },
+                            }
                             ExCommand::Quit { force } => {
                                 if !force && crate::excmd::is_dirty(&params, &baseline) {
-                                    ex_msg = Some(String::from("Unsaved changes (:q! to discard, :w <name> to save)"));
+                                    ex_msg = Some(String::from(
+                                        "Unsaved changes (:q! to discard, :w <name> to save)",
+                                    ));
                                 } else {
                                     should_quit = true;
                                 }
                             }
                             ExCommand::WriteQuit(name) => {
-                                match crate::excmd::ex_write(name, &mut patch_name, &mut baseline, &params) {
+                                match crate::excmd::ex_write(
+                                    name,
+                                    &mut patch_name,
+                                    &mut baseline,
+                                    &params,
+                                ) {
                                     Ok(_) => should_quit = true,
                                     Err(m) => ex_msg = Some(m),
                                 }
                             }
-                            ExCommand::Set(k, _) => ex_msg = Some(format!("Unknown setting: {}", k)),
+                            ExCommand::Set(k, _) => {
+                                ex_msg = Some(format!("Unknown setting: {}", k))
+                            }
                             ExCommand::Unknown(c) => ex_msg = Some(format!("Not a command: {}", c)),
                         }
                     }
@@ -1258,7 +1509,9 @@ pub fn run() -> Result<()> {
                 if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::CONTROL {
                     let n = count.take();
                     let mut s = inner.lock().unwrap();
-                    ex_msg = Some(crate::undo::history_status("Redo", n, || history.redo(&mut *s)));
+                    ex_msg = Some(crate::undo::history_status("Redo", n, || {
+                        history.redo(&mut *s)
+                    }));
                     continue;
                 }
                 if key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL {
@@ -1278,12 +1531,14 @@ pub fn run() -> Result<()> {
                     KeyCode::Char('j') | KeyCode::Down => {
                         let n = count.take() as i32;
                         let mut s = inner.lock().unwrap();
-                        s.selected_param = crate::keys::cycle(s.selected_param, n, STRIP_ROWS.len());
+                        s.selected_param =
+                            crate::keys::cycle(s.selected_param, n, STRIP_ROWS.len());
                     }
                     KeyCode::Char('k') | KeyCode::Up => {
                         let n = count.take() as i32;
                         let mut s = inner.lock().unwrap();
-                        s.selected_param = crate::keys::cycle(s.selected_param, -n, STRIP_ROWS.len());
+                        s.selected_param =
+                            crate::keys::cycle(s.selected_param, -n, STRIP_ROWS.len());
                     }
                     // -/= adjust the selected param; _/+ (or H/L) coarse
                     KeyCode::Char(c @ ('-' | '=' | '_' | '+' | 'H' | 'L')) => {
@@ -1334,7 +1589,7 @@ pub fn run() -> Result<()> {
                         use crate::undo::{ParamUndo, ParamValue};
                         let mut s = inner.lock().unwrap();
                         let p = s.current_param();
-                        let slot = slot_for(&s, 9 + src_index(p));
+                        let slot = slot_for(&s, SRC_KIND + src_index(p));
                         let old = s.get_param(slot);
                         let sel = s.selected;
                         if s.strip(sel).srcs[src_index(p)].is_some() {
@@ -1348,7 +1603,9 @@ pub fn run() -> Result<()> {
                     KeyCode::Char('u') => {
                         let n = count.take();
                         let mut s = inner.lock().unwrap();
-                        ex_msg = Some(crate::undo::history_status("Undo", n, || history.undo(&mut *s)));
+                        ex_msg = Some(crate::undo::history_status("Undo", n, || {
+                            history.undo(&mut *s)
+                        }));
                     }
                     KeyCode::Char('g') => {
                         count.clear();
@@ -1371,13 +1628,22 @@ pub fn run() -> Result<()> {
                         let sel = s.selected;
                         if sel < s.tracks.len() {
                             let (kind, desc) = if c == 'm' { (2, "Mute") } else { (3, "Solo") };
-                            let was = if c == 'm' { s.tracks[sel].mute } else { s.tracks[sel].solo };
+                            let was = if c == 'm' {
+                                s.tracks[sel].mute
+                            } else {
+                                s.tracks[sel].solo
+                            };
                             if c == 'm' {
                                 s.tracks[sel].mute = !was;
                             } else {
                                 s.tracks[sel].solo = !was;
                             }
-                            history.record(sel * STRIDE + kind, desc, ParamValue::Bool(was), ParamValue::Bool(!was));
+                            history.record(
+                                sel * STRIDE + kind,
+                                desc,
+                                ParamValue::Bool(was),
+                                ParamValue::Bool(!was),
+                            );
                         }
                     }
                     KeyCode::Char(' ') => {
@@ -1428,11 +1694,14 @@ mod tests {
                 })
                 .collect(),
             audio_sources: vec![],
-            master: Strip { pan: 1.0, ..Strip::new(0.8) },
+            master: Strip {
+                pan: 1.0,
+                ..Strip::new(0.8)
+            },
             master_meter: 0.0,
             tape: None,
             selected: 0,
-            selected_param: 6,
+            selected_param: STRIP_ROWS.len() - 1,
             scope_rb: None,
         }
     }
@@ -1459,7 +1728,10 @@ mod tests {
         // walk to the mid band and boost
         s.selected_param = 2; // STRIP_ROWS[2] = Mid
         adjust_param(&mut s, 4, false);
-        assert!((s.tracks[0].strip.eq_mid - 2.0).abs() < 1e-6, "0.5 dB steps");
+        assert!(
+            (s.tracks[0].strip.eq_mid - 2.0).abs() < 1e-6,
+            "0.5 dB steps"
+        );
         adjust_param(&mut s, 100, true);
         assert_eq!(s.tracks[0].strip.eq_mid, 15.0, "clamps at +15");
         // master strip: the pan row reads as width
@@ -1468,6 +1740,15 @@ mod tests {
         assert_eq!(s.current_param(), Param::Width);
         adjust_param(&mut s, 100, true);
         assert_eq!(s.master.pan, 2.0, "width clamps at 2.0");
+        // the send rows sit between pan and the fader
+        s.selected = 0;
+        s.selected_param = 6; // SendA
+        assert_eq!(s.current_param(), Param::SendA);
+        adjust_param(&mut s, 3, false);
+        assert!((s.tracks[0].strip.send_a - 0.15).abs() < 1e-6);
+        s.selected_param = 7; // SendB
+        adjust_param(&mut s, 100, true);
+        assert_eq!(s.tracks[0].strip.send_b, 1.0, "clamps at 100%");
     }
 
     #[test]
@@ -1488,14 +1769,33 @@ mod tests {
     fn undo_slots_round_trip_every_param() {
         use crate::undo::{ParamUndo, ParamValue as V};
         let mut s = mixer_with_tracks(1);
-        for (kind, v) in
-            [(0usize, 0.5f32), (1, -0.3), (4, 0.4), (5, 3.0), (6, -6.0), (7, 0.8), (8, 12.0)]
-        {
+        for (kind, v) in [
+            (0usize, 0.5f32),
+            (1, -0.3),
+            (4, 0.4),
+            (5, 3.0),
+            (6, -6.0),
+            (7, 0.8),
+            (8, 12.0),
+        ] {
             s.set_param(kind, V::F32(v));
             assert_eq!(s.get_param(kind), Some(V::F32(v)), "kind {kind}");
         }
-        s.set_param(9, V::Src(Some("envelope/0/ch2".into())));
-        assert_eq!(s.get_param(9), Some(V::Src(Some("envelope/0/ch2".into()))));
+        s.set_param(9, V::F32(0.4));
+        assert_eq!(s.get_param(9), Some(V::F32(0.4)), "send a is kind 9");
+        s.set_param(10, V::F32(0.6));
+        assert_eq!(s.tracks[0].strip.send_b, 0.6, "send b is kind 10");
+        s.set_param(SRC_KIND, V::Src(Some("envelope/0/ch2".into())));
+        assert_eq!(
+            s.get_param(SRC_KIND),
+            Some(V::Src(Some("envelope/0/ch2".into())))
+        );
+        s.set_param(SRC_KIND + 7, V::Src(Some("envelope/0/ch1".into())));
+        assert_eq!(
+            s.tracks[0].strip.srcs[7].as_ref().map(|a| a.to_string()),
+            Some("envelope/0/ch1".into()),
+            "send a binding"
+        );
         s.set_param(2, V::Bool(true));
         assert_eq!(s.get_param(2), Some(V::Bool(true)), "mute");
         // master slots
@@ -1553,7 +1853,10 @@ mod tests {
 
     #[test]
     fn arm_request_round_trip() {
-        assert_eq!(parse_arm("16\n/tmp/out tape.wav"), Some((16.0, "/tmp/out tape.wav".into())));
+        assert_eq!(
+            parse_arm("16\n/tmp/out tape.wav"),
+            Some((16.0, "/tmp/out tape.wav".into()))
+        );
         assert_eq!(parse_arm("0\n/tmp/x.wav"), None, "zero seconds refused");
         assert_eq!(parse_arm("abc\n/tmp/x.wav"), None);
         assert_eq!(parse_arm("5"), None, "missing path refused");

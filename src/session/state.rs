@@ -27,7 +27,9 @@ pub fn check_save_signal() -> bool {
 }
 
 pub fn send_save_signal(pid: u32) {
-    unsafe { libc::kill(pid as i32, libc::SIGUSR1); }
+    unsafe {
+        libc::kill(pid as i32, libc::SIGUSR1);
+    }
 }
 
 // ── SIGUSR2 reload signal ────────────────────────────────────────────────────
@@ -50,7 +52,9 @@ pub fn check_reload_signal() -> bool {
 }
 
 pub fn send_reload_signal(pid: u32) {
-    unsafe { libc::kill(pid as i32, libc::SIGUSR2); }
+    unsafe {
+        libc::kill(pid as i32, libc::SIGUSR2);
+    }
 }
 
 // ── directory helpers ───────────────────────────────────────────────────────
@@ -74,8 +78,7 @@ pub fn tmp_dir() -> PathBuf {
 
 pub fn ensure_dirs() -> Result<()> {
     for d in &[los_dir(), states_dir(), patches_dir(), tmp_dir()] {
-        fs::create_dir_all(d)
-            .with_context(|| format!("creating directory {}", d.display()))?;
+        fs::create_dir_all(d).with_context(|| format!("creating directory {}", d.display()))?;
     }
     Ok(())
 }
@@ -121,8 +124,12 @@ pub struct TmuxState {
     pub window_size: String,
 }
 
-fn default_session_name() -> String { "los".into() }
-fn default_window_size() -> String { "largest".into() }
+fn default_session_name() -> String {
+    "los".into()
+}
+fn default_window_size() -> String {
+    "largest".into()
+}
 
 impl Default for TmuxState {
     fn default() -> Self {
@@ -310,6 +317,12 @@ pub struct MixerParams {
     pub master_eq_hi: f32,
     #[serde(default = "default_width")]
     pub master_width: f32,
+    // fx send taps on the master bus (default 0: the master includes
+    // the fx returns, so master sends invite feedback — on purpose only)
+    #[serde(default)]
+    pub master_send_a: f32,
+    #[serde(default)]
+    pub master_send_b: f32,
 }
 
 fn default_mid_freq() -> f32 {
@@ -336,6 +349,11 @@ pub struct MixerTrackParam {
     pub eq_freq: f32,
     #[serde(default)]
     pub eq_hi: f32,
+    // per-strip fx send levels (post-fader taps into send/0 + send/1)
+    #[serde(default)]
+    pub send_a: f32,
+    #[serde(default)]
+    pub send_b: f32,
     // mod-input bindings, one per bindable param ("module/inst/output")
     #[serde(default)]
     pub level_src: Option<String>,
@@ -351,6 +369,10 @@ pub struct MixerTrackParam {
     pub freq_src: Option<String>,
     #[serde(default)]
     pub hi_src: Option<String>,
+    #[serde(default)]
+    pub send_a_src: Option<String>,
+    #[serde(default)]
+    pub send_b_src: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -393,6 +415,52 @@ pub struct TemplateParams {
     pub pitch_src: Option<String>,
     #[serde(default)]
     pub level_src: Option<String>,
+}
+
+/// The filterbank module (modules/filterbank.rs —
+/// docs/plans/filterbank-296e.md).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FilterbankParams {
+    #[serde(default)]
+    pub format: u32,
+    /// The two stored spectra, 16 faders each.
+    #[serde(default)]
+    pub bank_a: Vec<f32>,
+    #[serde(default)]
+    pub bank_b: Vec<f32>,
+    pub morph: Option<f32>,
+    /// Transfer mode by name: "off" | "o→e" | "e→o" | "both".
+    pub xfer: Option<String>,
+    pub freeze: Option<bool>,
+    pub wcent: Option<f32>,
+    pub wwidth: Option<f32>,
+    pub spread: Option<f32>,
+    pub split: Option<f32>,
+    pub dry: Option<f32>,
+    pub decay: Option<f32>,
+    /// Consumed audio source as "module/instance" (e.g. "send/1").
+    #[serde(default)]
+    pub input: Option<String>,
+    /// Per-band CV-in bindings, 16 entries; "" = unbound (TOML arrays
+    /// cannot hold nulls).
+    #[serde(default)]
+    pub band_srcs: Vec<String>,
+    #[serde(default)]
+    pub morph_src: Option<String>,
+    #[serde(default)]
+    pub freeze_src: Option<String>,
+    #[serde(default)]
+    pub wcent_src: Option<String>,
+    #[serde(default)]
+    pub wwidth_src: Option<String>,
+    #[serde(default)]
+    pub spread_src: Option<String>,
+    #[serde(default)]
+    pub split_src: Option<String>,
+    #[serde(default)]
+    pub dry_src: Option<String>,
+    #[serde(default)]
+    pub decay_src: Option<String>,
 }
 
 /// The delay module (modules/delay.rs — docs/plans/delay-288.md).
@@ -570,7 +638,10 @@ impl CycleMode {
     }
 
     pub fn parse(s: &str) -> Option<CycleMode> {
-        CycleMode::ALL.iter().copied().find(|m| m.name() == s.to_lowercase())
+        CycleMode::ALL
+            .iter()
+            .copied()
+            .find(|m| m.name() == s.to_lowercase())
     }
 }
 
@@ -690,24 +761,70 @@ impl FillKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MacroCmd {
-    SwitchPattern { track: usize, slot: usize },
-    SetMute { track: usize, muted: bool },
-    SetCycle { track: usize, mode: CycleMode },
-    TransposeTrack { track: usize, by: i32 },
-    RotateTrack { track: usize, by: i32 },
+    SwitchPattern {
+        track: usize,
+        slot: usize,
+    },
+    SetMute {
+        track: usize,
+        muted: bool,
+    },
+    SetCycle {
+        track: usize,
+        mode: CycleMode,
+    },
+    TransposeTrack {
+        track: usize,
+        by: i32,
+    },
+    RotateTrack {
+        track: usize,
+        by: i32,
+    },
     /// Empty string = scale off.
-    SetScale { track: usize, scale: String },
-    Fill { track: usize, kind: FillKind, arg: f32 },
-    SetBpm { bpm: f64 },
+    SetScale {
+        track: usize,
+        scale: String,
+    },
+    Fill {
+        track: usize,
+        kind: FillKind,
+        arg: f32,
+    },
+    SetBpm {
+        bpm: f64,
+    },
     /// Absolute step rewrite — how recorded edits replay exactly.
-    SetSteps { track: usize, start: usize, steps: Vec<StepParam> },
+    SetSteps {
+        track: usize,
+        start: usize,
+        steps: Vec<StepParam>,
+    },
     /// A single trigger set absolutely (recorded step toggles).
-    SetActive { track: usize, step: usize, active: bool },
+    SetActive {
+        track: usize,
+        step: usize,
+        active: bool,
+    },
     /// Euclidean params, re-applied on replay.
-    SetEuclid { track: usize, pulses: usize, length: usize, rotation: usize },
-    SetMode { track: usize, mode: TrackMode },
+    SetEuclid {
+        track: usize,
+        pulses: usize,
+        length: usize,
+        rotation: usize,
+    },
+    SetMode {
+        track: usize,
+        mode: TrackMode,
+    },
     /// Track timing knobs, absolute (empty groove = straight).
-    SetTiming { track: usize, swing: u8, groove: String, humanize: f32, decay: i8 },
+    SetTiming {
+        track: usize,
+        swing: u8,
+        groove: String,
+        humanize: f32,
+        decay: i8,
+    },
 }
 
 /// A saved macro: single-letter id, quantize, command list.
@@ -738,8 +855,8 @@ pub struct SlotParam {
 /// Atomically write a TOML string to a file (write .tmp, rename).
 pub fn write_state_file(path: &Path, toml_str: &str) -> Result<()> {
     let tmp_path = path.with_extension("tmp");
-    let mut f = fs::File::create(&tmp_path)
-        .with_context(|| format!("creating {}", tmp_path.display()))?;
+    let mut f =
+        fs::File::create(&tmp_path).with_context(|| format!("creating {}", tmp_path.display()))?;
     f.write_all(toml_str.as_bytes())?;
     f.sync_all()?;
     fs::rename(&tmp_path, path)
@@ -754,8 +871,8 @@ pub fn to_toml_string<T: Serialize>(val: &T) -> Result<String> {
 
 /// Deserialize from a TOML file path.
 pub fn from_toml_file<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let content =
+        fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     toml::from_str(&content).with_context(|| format!("parsing {}", path.display()))
 }
 
@@ -917,9 +1034,24 @@ mod state_tests {
             layout: "tiled".into(),
             active_pane: 2,
             panes: vec![
-                PaneState { module: "a".into(), instance: 0, patch: None, patch_inline: None },
-                PaneState { module: "b".into(), instance: 1, patch: None, patch_inline: None },
-                PaneState { module: "c".into(), instance: 0, patch: None, patch_inline: None },
+                PaneState {
+                    module: "a".into(),
+                    instance: 0,
+                    patch: None,
+                    patch_inline: None,
+                },
+                PaneState {
+                    module: "b".into(),
+                    instance: 1,
+                    patch: None,
+                    patch_inline: None,
+                },
+                PaneState {
+                    module: "c".into(),
+                    instance: 0,
+                    patch: None,
+                    patch_inline: None,
+                },
             ],
         };
 

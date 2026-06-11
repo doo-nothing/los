@@ -67,7 +67,13 @@ impl ParamHistory {
             }
         }
         self.entries.truncate(self.index);
-        self.entries.push(Edit { desc, slot, old, new, at: Instant::now() });
+        self.entries.push(Edit {
+            desc,
+            slot,
+            old,
+            new,
+            at: Instant::now(),
+        });
         if self.entries.len() > HISTORY_CAP {
             self.entries.remove(0);
         }
@@ -103,7 +109,11 @@ impl ParamHistory {
 /// Run an undo or redo op up to `count` times, stopping early when history
 /// runs out; returns the status-bar message (same contract as the
 /// sequencer's history_status).
-pub fn history_status(label: &str, count: usize, mut op: impl FnMut() -> Option<&'static str>) -> String {
+pub fn history_status(
+    label: &str,
+    count: usize,
+    mut op: impl FnMut() -> Option<&'static str>,
+) -> String {
     let mut done = 0;
     let mut last_desc = "";
     while done < count {
@@ -234,9 +244,15 @@ mod tests {
     fn history_status_messages() {
         let mut s = Fake::default();
         let mut h = ParamHistory::default();
-        assert_eq!(history_status("Undo", 1, || h.undo(&mut s)), "Nothing to undo");
+        assert_eq!(
+            history_status("Undo", 1, || h.undo(&mut s)),
+            "Nothing to undo"
+        );
         edit(&mut s, &mut h, 0, 0.5);
         edit(&mut s, &mut h, 1, 0.5);
-        assert_eq!(history_status("Undo", 5, || h.undo(&mut s)), "Undo ×2: Adjust");
+        assert_eq!(
+            history_status("Undo", 5, || h.undo(&mut s)),
+            "Undo ×2: Adjust"
+        );
     }
 }

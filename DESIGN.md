@@ -358,6 +358,13 @@ Total size: 64 bytes
 
 ### 7.4 ModulationBus (`/los_mod`)
 
+> **v2:** 64 → 128 channels (a full fx rack outgrew 64); header
+> version = 2, total size 64 + 128×4 bytes. `open()` validates the
+> header (size checks don't work — macOS page-rounds SHM objects).
+> The `consumes_channels` who's-listening bitmap stays u64, so
+> channels ≥ 64 simply don't display listening markers (display-only).
+
+
 > **v2 (dynamic allocation):** the bus has **64 channels** and no fixed map.
 > Modules claim a channel range at registration (`Manifest::register` with a
 > channel count; a monotonic allocator in the manifest header hands out
@@ -583,6 +590,8 @@ by a trait or framework. The sections below describe what each phase must do and
 | scope     | Open `/los_mix_in` (peek)   | —                   | —                  | Open (read all)       | Register  |
 | template  | Create `/los_audio_template_N` | —                | Open (play/pause)  | Open (write 1 ch)     | Register  |
 | delay     | Create `/los_audio_delay_N`; consumes one claimed ring | — | Open (play/pause) | Open (write 9 ch) | Register + publish_input |
+| filterbank| Create `/los_audio_filterbank_N`; consumes one claimed ring | — | Open (play/pause) | Open (write 16 ch) | Register + publish_input |
+| (mixer) sends | Create `/los_send_a` + `/los_send_b` (post-fader buses) | — | — | — | 2 extra entries: send/0, send/1 |
 | conductor | —                           | —                   | —                  | —                     | Create+Open |
 
 **Consumer ID assignment:** A module that opens EventRingbuf as a consumer needs

@@ -83,10 +83,15 @@ src/
   session/    save/load state, house layout, tmux wrapper
 ```
 
-The delay is the first **fx module**: `los add delay`, then pick its
-input on the GLOBAL strip (`@` on the input row) — the source's strip
-leaves the console and the delay's takes its place. Its DSP is part
-Rust, part Faust ([docs/writing-dsp.md](docs/writing-dsp.md)).
+Fx modules (the **delay**, after the Buchla 288, and the
+**filterbank**, after the 296e) consume any audio source you point them
+at — a voice directly (insert: that strip leaves the console), or one
+of the mixer's two **send buses** (`sa`/`sb` rows on every strip; the
+fx module's own strip is the return). Fresh sessions open with the fx
+rack pre-cabled on a second tmux window: sends feeding the delay and
+the filterbank, a MATHs LFO breathing the bank's spectrum, and a second
+sequencer whose tracks can step fx params without touching the voices.
+Their DSP is part Rust, part Faust ([docs/writing-dsp.md](docs/writing-dsp.md)).
 
 Adding a module touches `src/modules/` plus a few registration points —
 [docs/writing-a-module.md](docs/writing-a-module.md) is the guide and

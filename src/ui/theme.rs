@@ -35,14 +35,42 @@ macro_rules! token {
 token!(bg, 0x0d, 0x0b, 0x08, 232, "background: warm near-black");
 token!(ink, 0xe8, 0xdc, 0xc8, 223, "values & content: warm bone");
 token!(ink_dim, 0x7d, 0x73, 0x63, 101, "inactive content");
-token!(amber, 0x9a, 0x7b, 0x2d, 136, "chrome: wordmarks, labels, rules");
-token!(amber_hi, 0xe3, 0xa8, 0x18, 172, "chrome emphasis: active headers");
+token!(
+    amber,
+    0x9a,
+    0x7b,
+    0x2d,
+    136,
+    "chrome: wordmarks, labels, rules"
+);
+token!(
+    amber_hi,
+    0xe3,
+    0xa8,
+    0x18,
+    172,
+    "chrome emphasis: active headers"
+);
 
 // ── signal hues (the promises) ──────────────────────────────────────────────
-token!(note, 0xe0, 0x76, 0x3a, 166, "NOTE: pitch, velocity, note steps");
+token!(
+    note,
+    0xe0,
+    0x76,
+    0x3a,
+    166,
+    "NOTE: pitch, velocity, note steps"
+);
 token!(cv, 0x3f, 0xc9, 0xb0, 79, "CV: modulation, bindings, ghosts");
 token!(audio, 0x8f, 0xbf, 0x4d, 107, "AUDIO: meters, waveforms");
-token!(clock, 0xc4, 0x5d, 0xd4, 170, "CLOCK: transport, playhead, BPM");
+token!(
+    clock,
+    0xc4,
+    0x5d,
+    0xd4,
+    170,
+    "CLOCK: transport, playhead, BPM"
+);
 token!(alert, 0xd4, 0x50, 0x2e, 160, "errors, clipping — sparingly");
 
 // ── styles ──────────────────────────────────────────────────────────────────
@@ -166,7 +194,11 @@ pub fn pitch_color(note: u8) -> Color {
     if truecolor() {
         // brightness rises with octave: 0.65 at the bottom → 1.0 up top
         let f = 0.65 + 0.35 * ((note / 12) as f32 / 10.0).min(1.0);
-        Color::Rgb((r as f32 * f) as u8, (g as f32 * f) as u8, (b as f32 * f) as u8)
+        Color::Rgb(
+            (r as f32 * f) as u8,
+            (g as f32 * f) as u8,
+            (b as f32 * f) as u8,
+        )
     } else {
         Color::Indexed(idx)
     }
@@ -248,7 +280,10 @@ pub fn bar(set: f32, live: Option<f32>, width: usize, hue: Color) -> Vec<Span<'s
 
 /// Plain-string form of [`bar`] for tests.
 pub fn bar_str(set: f32, live: Option<f32>, width: usize) -> String {
-    bar(set, live, width, amber()).iter().map(|s| s.content.clone()).collect()
+    bar(set, live, width, amber())
+        .iter()
+        .map(|s| s.content.clone())
+        .collect()
 }
 
 /// A segmented switch:/// A segmented switch: every option visible, the active one carved out in
@@ -260,7 +295,10 @@ pub fn segments(options: &[&str], active: usize) -> Vec<Span<'static>> {
             spans.push(Span::styled("·".to_string(), dim()));
         }
         if i == active {
-            spans.push(Span::styled(format!("▐{}▌", opt), Style::default().fg(bg()).bg(ink())));
+            spans.push(Span::styled(
+                format!("▐{}▌", opt),
+                Style::default().fg(bg()).bg(ink()),
+            ));
         } else {
             spans.push(Span::styled(format!(" {} ", opt), dim()));
         }
@@ -270,9 +308,11 @@ pub fn segments(options: &[&str], active: usize) -> Vec<Span<'static>> {
 
 /// Plain-string form of [`segments`] for tests.
 pub fn segments_str(options: &[&str], active: usize) -> String {
-    segments(options, active).iter().map(|s| s.content.clone()).collect()
+    segments(options, active)
+        .iter()
+        .map(|s| s.content.clone())
+        .collect()
 }
-
 
 // ── pane anatomy ────────────────────────────────────────────────────────────
 
@@ -305,7 +345,10 @@ pub fn transport_echo(bpm: f32, playing: bool, position: Option<&str>) -> String
 
 /// Section rule: a dim amber hairline.
 pub fn rule(width: usize) -> Line<'static> {
-    Line::from(Span::styled("─".repeat(width), Style::default().fg(amber())))
+    Line::from(Span::styled(
+        "─".repeat(width),
+        Style::default().fg(amber()),
+    ))
 }
 
 /// Status line: mode label + message left, right-aligned tail.
@@ -332,7 +375,10 @@ mod tests {
 
     #[test]
     fn segments_carve_out_the_active_option() {
-        assert_eq!(segments_str(&["main", "sub", "mix"], 0), "▐main▌· sub · mix ");
+        assert_eq!(
+            segments_str(&["main", "sub", "mix"], 0),
+            "▐main▌· sub · mix "
+        );
         assert_eq!(segments_str(&["a", "b"], 1), " a ·▐b▌");
     }
 
@@ -357,7 +403,11 @@ mod tests {
         let distinct: std::collections::HashSet<String> =
             (0..12).map(|c| format!("{:?}", channel_color(c))).collect();
         assert_eq!(distinct.len(), 12, "12 slots, 12 hues, zero collisions");
-        assert_eq!(channel_color(0), channel_color(12), "wraps past the palette");
+        assert_eq!(
+            channel_color(0),
+            channel_color(12),
+            "wraps past the palette"
+        );
     }
 
     #[test]
@@ -367,22 +417,35 @@ mod tests {
         let (c3, c5) = (pitch_color(48), pitch_color(72));
         assert_ne!(format!("{:?}", c3), format!("{:?}", c5));
         // different classes differ
-        assert_ne!(format!("{:?}", pitch_color(60)), format!("{:?}", pitch_color(67)));
+        assert_ne!(
+            format!("{:?}", pitch_color(60)),
+            format!("{:?}", pitch_color(67))
+        );
     }
 
     #[test]
     fn cv_ramp_scales_with_value() {
-        assert_ne!(format!("{:?}", cv_ramp(-1.0)), format!("{:?}", cv_ramp(1.0)));
+        assert_ne!(
+            format!("{:?}", cv_ramp(-1.0)),
+            format!("{:?}", cv_ramp(1.0))
+        );
         assert_eq!(format!("{:?}", cv_ramp(0.5)), format!("{:?}", cv_ramp(0.5)));
     }
 
     #[test]
     fn source_colors_are_stable_and_spread() {
-        assert_eq!(source_color("sequencer/0/t1"), source_color("sequencer/0/t1"));
+        assert_eq!(
+            source_color("sequencer/0/t1"),
+            source_color("sequencer/0/t1")
+        );
         let distinct: std::collections::HashSet<String> = (1..=8)
             .map(|i| format!("{:?}", source_color(&format!("sequencer/0/t{}", i))))
             .collect();
-        assert!(distinct.len() >= 4, "neighboring tracks mostly differ: {}", distinct.len());
+        assert!(
+            distinct.len() >= 4,
+            "neighboring tracks mostly differ: {}",
+            distinct.len()
+        );
     }
 
     #[test]

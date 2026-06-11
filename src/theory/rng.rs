@@ -146,7 +146,10 @@ mod tests {
         for _ in 0..200 {
             seen[r.below(4) as usize] = true;
         }
-        assert!(seen.iter().all(|&s| s), "below(4) never produced some value");
+        assert!(
+            seen.iter().all(|&s| s),
+            "below(4) never produced some value"
+        );
     }
 
     #[test]

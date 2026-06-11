@@ -77,8 +77,26 @@ pub trait UI<T> {
     // active widgets: values you push into the core
     fn add_button(&mut self, label: &str, param: ParamIndex) {}
     fn add_check_button(&mut self, label: &str, param: ParamIndex) {}
-    fn add_vertical_slider(&mut self, label: &str, param: ParamIndex, init: T, min: T, max: T, step: T) {}
-    fn add_horizontal_slider(&mut self, label: &str, param: ParamIndex, init: T, min: T, max: T, step: T) {}
+    fn add_vertical_slider(
+        &mut self,
+        label: &str,
+        param: ParamIndex,
+        init: T,
+        min: T,
+        max: T,
+        step: T,
+    ) {
+    }
+    fn add_horizontal_slider(
+        &mut self,
+        label: &str,
+        param: ParamIndex,
+        init: T,
+        min: T,
+        max: T,
+        step: T,
+    ) {
+    }
     fn add_num_entry(&mut self, label: &str, param: ParamIndex, init: T, min: T, max: T, step: T) {}
     // passive widgets: values the core computes for you to read back
     fn add_horizontal_bargraph(&mut self, label: &str, param: ParamIndex, min: T, max: T) {}
@@ -134,10 +152,26 @@ impl UI<FaustFloat> for ParamMap {
     fn add_check_button(&mut self, label: &str, param: ParamIndex) {
         self.params.push((label.into(), param.0, false));
     }
-    fn add_vertical_slider(&mut self, label: &str, param: ParamIndex, _: f32, _: f32, _: f32, _: f32) {
+    fn add_vertical_slider(
+        &mut self,
+        label: &str,
+        param: ParamIndex,
+        _: f32,
+        _: f32,
+        _: f32,
+        _: f32,
+    ) {
         self.params.push((label.into(), param.0, false));
     }
-    fn add_horizontal_slider(&mut self, label: &str, param: ParamIndex, _: f32, _: f32, _: f32, _: f32) {
+    fn add_horizontal_slider(
+        &mut self,
+        label: &str,
+        param: ParamIndex,
+        _: f32,
+        _: f32,
+        _: f32,
+        _: f32,
+    ) {
         self.params.push((label.into(), param.0, false));
     }
     fn add_num_entry(&mut self, label: &str, param: ParamIndex, _: f32, _: f32, _: f32, _: f32) {

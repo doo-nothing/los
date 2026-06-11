@@ -29,8 +29,8 @@ pub const LIBRARY: &[Groove] = &[
         hint: "sine push/pull across the bar — gentle sway",
         // half-cycle sine: rushes the front of the bar, drags the back
         offsets: [
-            0.0, 0.04, 0.07, 0.09, 0.10, 0.09, 0.07, 0.04, 0.0, -0.04, -0.07, -0.09, -0.10,
-            -0.09, -0.07, -0.04,
+            0.0, 0.04, 0.07, 0.09, 0.10, 0.09, 0.07, 0.04, 0.0, -0.04, -0.07, -0.09, -0.10, -0.09,
+            -0.07, -0.04,
         ],
     },
     Groove {

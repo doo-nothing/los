@@ -251,6 +251,29 @@ picks the audio source to consume (the patch cable into the module) ·
 voice/0` · undo, `:` patches, `?`, Space, mouse as everywhere. Followers
 publish as `delay/N/in` + `t1`–`t8`. All ✅
 
+### Filterbank
+The spectral processor (after the Buchla 296e —
+[the design doc](plans/filterbank-296e.md)). The slider wall: strips
+b1–b16 (one fader each; the meter inside is that band's envelope
+follower) plus GLOBAL (input · morph · xfer · frz · wcent · wwide ·
+sprd · split · dry · decay). Mixer dialect: `h/l` strip · `j/k` global
+row · `-`/`=` adjust (coarse/counts as everywhere) · `0` reset · `b`
+edit bank A ↔ B (morph crossfades the two spectra) · `f` freeze (latch
+the followers — spectral hold) · `@` bind (band fader: its CV in; input
+row: pick the audio source) · `x` unbind/unpatch · `gg/G` · `:set morph
+50|xfer oe|freeze on|input send/1` · undo, `:` patches, `?`, Space,
+mouse. Followers publish as `filterbank/N/b1`–`b16`. All ✅
+
+### Mixer sends (fx routing)
+Every strip (master included) has `sa`/`sb` rows between pan and the
+fader: post-fader taps into the two send buses, which appear as
+`send/0` and `send/1` in every fx module's input picker. The classic
+patch is strips → send → fx → the fx module's own strip (the return).
+Inserts skip the bus: point the fx input at a voice directly and its
+strip leaves the console. Fx-into-fx chains work the same way. Master
+sends default to 0 — the master already contains the returns, so
+raising them is deliberate feedback.
+
 ### Conductor
 Two views, `Tab` switches. **States**: `j/k` nav (counts) · `gg/G` ·
 `Enter` load (`l` alias) · `s` save session · `dd` + y/n confirm to delete.

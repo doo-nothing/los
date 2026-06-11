@@ -8,7 +8,8 @@
 
 use anyhow::Result;
 use los::{
-    badge, conductor, delay, envelope, mixer, scope, sequencer, shm, state, template, tone, voice,
+    badge, conductor, delay, envelope, filterbank, mixer, scope, sequencer, shm, state, template,
+    tone, voice,
 };
 
 /// `los ctl <action>` — control the global transport from any shell
@@ -62,8 +63,12 @@ fn usage() {
     eprintln!("  los ctl [play|stop|toggle|status]  Control the global transport");
     eprintln!("  los add <module> [instance]   Spawn a module in the running session");
     eprintln!("  los ps                        Inspect the live session (manifest, ring, clock)");
-    eprintln!("  los relayout                  Re-apply the house layout sizes (runs on client resize)");
-    eprintln!("  los record <secs> <out.wav>   Tape out: record the master mix of the running session");
+    eprintln!(
+        "  los relayout                  Re-apply the house layout sizes (runs on client resize)"
+    );
+    eprintln!(
+        "  los record <secs> <out.wav>   Tape out: record the master mix of the running session"
+    );
     eprintln!("  los --help                    Show this help");
     eprintln!();
     eprintln!("Modules:");
@@ -76,6 +81,7 @@ fn usage() {
     eprintln!("  tone [freq]        Test tone generator (for testing)");
     eprintln!("  template           Worked example module (LFO + drone) — read the source!");
     eprintln!("  delay              8-tap time domain processor (fx: patch a source into it)");
+    eprintln!("  filterbank         16-band spectral processor (fx, 296e-style)");
     eprintln!("  badge              Los faceplate (beat-synced animation, session info)");
     eprintln!();
     eprintln!("Aliases:");
@@ -98,6 +104,7 @@ fn dispatch_module(name: &str, instance: usize) -> Result<()> {
         "tone" => tone::run(440.0, instance),
         "template" => template::run(instance),
         "delay" => delay::run(instance),
+        "filterbank" => filterbank::run(instance),
         "badge" => badge::run(instance),
         other => anyhow::bail!("unknown module: {other}"),
     }
@@ -212,7 +219,10 @@ fn main() -> Result<()> {
             "relayout" => conductor::relayout(),
             "record" => {
                 let secs: f32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(10.0);
-                let path = args.get(3).cloned().unwrap_or_else(|| "los-tape.wav".into());
+                let path = args
+                    .get(3)
+                    .cloned()
+                    .unwrap_or_else(|| "los-tape.wav".into());
                 let abs = if std::path::Path::new(&path).is_absolute() {
                     std::path::PathBuf::from(&path)
                 } else {
@@ -221,9 +231,13 @@ fn main() -> Result<()> {
                 let abs = abs.to_string_lossy().to_string();
                 let done = format!("{abs}.done");
                 let _ = std::fs::remove_file(&done);
-                std::fs::write(state::tmp_dir().join("record.arm"), format!("{secs}\n{abs}"))?;
+                std::fs::write(
+                    state::tmp_dir().join("record.arm"),
+                    format!("{secs}\n{abs}"),
+                )?;
                 eprintln!("[los] tape armed: {secs}s -> {abs} (starts when the mixer sees it)");
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f32(secs + 20.0);
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_secs_f32(secs + 20.0);
                 loop {
                     if std::path::Path::new(&done).exists() {
                         let _ = std::fs::remove_file(&done);
@@ -241,7 +255,11 @@ fn main() -> Result<()> {
                 let m = shm::Manifest::open()
                     .map_err(|_| anyhow::anyhow!("no manifest found — is a session running?"))?;
                 let entries = m.entries();
-                println!("manifest: {} live entries, next free modbus channel: {}", entries.len(), m.next_channel());
+                println!(
+                    "manifest: {} live entries, next free modbus channel: {}",
+                    entries.len(),
+                    m.next_channel()
+                );
                 for e in &entries {
                     let alive = unsafe { libc::kill(e.pid as i32, 0) == 0 };
                     let outputs = match e.mod_base {
@@ -254,7 +272,11 @@ fn main() -> Result<()> {
                         e.instance,
                         e.pid,
                         if alive { "" } else { "  [DEAD]" },
-                        if e.audio_shm.is_some() { "  [audio]" } else { "" },
+                        if e.audio_shm.is_some() {
+                            "  [audio]"
+                        } else {
+                            ""
+                        },
                         outputs
                     );
                 }
@@ -277,9 +299,7 @@ fn main() -> Result<()> {
                 let instance = args.get(3).and_then(|s| s.parse().ok());
                 conductor::add_module(module, instance)
             }
-            _ if args[1].ends_with(".toml") => {
-                conductor::load_session(&args[1])
-            }
+            _ if args[1].ends_with(".toml") => conductor::load_session(&args[1]),
             _ => {
                 let instance = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
                 dispatch_module(&args[1], instance)

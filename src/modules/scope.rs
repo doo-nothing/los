@@ -32,9 +32,9 @@ struct ScopeState {
     zoom: f32,
     gain: f32,
     trigger_level: f32,
-    source: usize,        // 0=audio, 1=modbus
+    source: usize, // 0=audio, 1=modbus
     modbus_channel: usize,
-    selected: usize,      // selected param row (not persisted)
+    selected: usize,              // selected param row (not persisted)
     modbus_label: Option<String>, // live source label for modbus_channel
 }
 
@@ -126,13 +126,27 @@ fn snapshot_params(s: &ScopeState) -> state::ScopeParams {
 }
 
 fn apply_params(s: &mut ScopeState, params: &state::ScopeParams) {
-    if let Some(v) = params.mode { s.mode = v; }
-    if let Some(v) = params.channel { s.channel = v; }
-    if let Some(v) = params.zoom { s.zoom = v; }
-    if let Some(v) = params.gain { s.gain = v; }
-    if let Some(v) = params.source { s.source = v; }
-    if let Some(v) = params.modbus_channel { s.modbus_channel = v; }
-    if let Some(v) = params.trigger_level { s.trigger_level = v; }
+    if let Some(v) = params.mode {
+        s.mode = v;
+    }
+    if let Some(v) = params.channel {
+        s.channel = v;
+    }
+    if let Some(v) = params.zoom {
+        s.zoom = v;
+    }
+    if let Some(v) = params.gain {
+        s.gain = v;
+    }
+    if let Some(v) = params.source {
+        s.source = v;
+    }
+    if let Some(v) = params.modbus_channel {
+        s.modbus_channel = v;
+    }
+    if let Some(v) = params.trigger_level {
+        s.trigger_level = v;
+    }
 }
 
 impl crate::undo::ParamUndo for ScopeState {
@@ -175,7 +189,9 @@ fn scope_thread(
     // garbage). The mixer creates it up to 500ms after we spawn — keep
     // retrying instead of giving up at startup.
     let mut ringbuf: Option<AudioRingbuf> = None;
-    let modbus = ModulationBus::open().or_else(|_| ModulationBus::create()).ok();
+    let modbus = ModulationBus::open()
+        .or_else(|_| ModulationBus::create())
+        .ok();
     let mut local_buffer = vec![0.0f32; 128];
 
     loop {
@@ -247,7 +263,7 @@ fn draw_ui(
 ) -> Result<()> {
     terminal.draw(|f| {
         let area = f.area();
-        
+
         // the scope is the picture: chrome auto-hides when you're not
         // touching it, leaving a full-bleed waveform
         let chunks = Layout::default()
@@ -310,23 +326,15 @@ fn draw_ui(
             .data(&data)];
 
         let chart = Chart::new(datasets)
-            .x_axis(
-                Axis::default()
-                    .bounds([0.0, x_max])
-                    .labels(vec![
-                        ratatui::text::Line::from("0"),
-                        ratatui::text::Line::from(format!("{:.0}", x_max)),
-                    ]),
-            )
-            .y_axis(
-                Axis::default()
-                    .bounds([-1.0, 1.0])
-                    .labels(vec![
-                        ratatui::text::Line::from("-1"),
-                        ratatui::text::Line::from("0"),
-                        ratatui::text::Line::from("1"),
-                    ]),
-            );
+            .x_axis(Axis::default().bounds([0.0, x_max]).labels(vec![
+                ratatui::text::Line::from("0"),
+                ratatui::text::Line::from(format!("{:.0}", x_max)),
+            ]))
+            .y_axis(Axis::default().bounds([-1.0, 1.0]).labels(vec![
+                ratatui::text::Line::from("-1"),
+                ratatui::text::Line::from("0"),
+                ratatui::text::Line::from("1"),
+            ]));
 
         f.render_widget(chart, chunks[0]);
 
@@ -354,10 +362,12 @@ fn draw_ui(
             ];
             let help = Paragraph::new(help_text)
                 .style(Style::default().fg(Color::White).bg(Color::Black))
-                .block(Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Cyan))
-                    .title("Help"));
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Cyan))
+                        .title("Help"),
+                );
             f.render_widget(help, area);
         }
 
@@ -410,7 +420,10 @@ pub fn run(instance: usize) -> Result<()> {
                 if attempt < 19 {
                     std::thread::sleep(Duration::from_millis(200));
                 } else {
-                    return Err(anyhow::anyhow!("Failed to enable raw mode after 20 attempts: {}", e));
+                    return Err(anyhow::anyhow!(
+                        "Failed to enable raw mode after 20 attempts: {}",
+                        e
+                    ));
                 }
             }
         }
@@ -421,12 +434,12 @@ pub fn run(instance: usize) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let state = Arc::new(Mutex::new(ScopeState::default()));
-    
+
     // Load saved state if available
     if let Ok(params) = state::load_module_state::<state::ScopeParams>("scope", instance) {
         apply_params(&mut state.lock().unwrap(), &params);
     }
-    
+
     let state_clone = Arc::clone(&state);
 
     let (_tx, rx) = std::sync::mpsc::channel();
@@ -447,7 +460,8 @@ pub fn run(instance: usize) -> Result<()> {
     let mut menu_until = std::time::Instant::now() + Duration::from_secs(4);
     let mut ex_msg: Option<String> = None;
     let mut patch_name: Option<String> = None;
-    let mut baseline = state::to_toml_string(&snapshot_params(&state.lock().unwrap())).unwrap_or_default();
+    let mut baseline =
+        state::to_toml_string(&snapshot_params(&state.lock().unwrap())).unwrap_or_default();
     let mut should_quit = false;
     // Global transport handle for Space = play/pause (lazily reopened)
     let mut transport_ui: Option<ShmTransport> = ShmTransport::open().ok();
@@ -458,14 +472,14 @@ pub fn run(instance: usize) -> Result<()> {
             let params = snapshot_params(&state.lock().unwrap());
             let _ = state::save_module_state("scope", instance, &params);
         }
-        
+
         // Check for reload-on-signal
         if state::check_reload_signal() {
             if let Ok(params) = state::load_module_state::<state::ScopeParams>("scope", instance) {
                 apply_params(&mut state.lock().unwrap(), &params);
             }
         }
-        
+
         {
             // refresh the live label for the selected modbus channel
             let entries = manifest.entries();
@@ -479,18 +493,36 @@ pub fn run(instance: usize) -> Result<()> {
         } else {
             ex_msg.clone()
         };
-        let picker_rows = if picker.is_active() { Some(picker.rows()) } else { None };
+        let picker_rows = if picker.is_active() {
+            Some(picker.rows())
+        } else {
+            None
+        };
         let show_menu = std::time::Instant::now() < menu_until || overlay.is_some();
-        draw_ui(&mut terminal, &current_state, show_help, overlay.as_deref(), picker_rows, show_menu)?;
+        draw_ui(
+            &mut terminal,
+            &current_state,
+            show_help,
+            overlay.as_deref(),
+            picker_rows,
+            show_menu,
+        )?;
 
         if event::poll(Duration::from_millis(50))? {
             let ev = event::read()?;
             if let Event::Mouse(m) = ev {
-                use crossterm::event::MouseEventKind;
                 use crate::undo::ParamUndo;
-                if matches!(m.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+                use crossterm::event::MouseEventKind;
+                if matches!(
+                    m.kind,
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                ) {
                     menu_until = std::time::Instant::now() + Duration::from_secs(4);
-                    let steps = if m.kind == MouseEventKind::ScrollUp { 1 } else { -1 };
+                    let steps = if m.kind == MouseEventKind::ScrollUp {
+                        1
+                    } else {
+                        -1
+                    };
                     let mut s = state.lock().unwrap();
                     let slot = s.selected;
                     let old = s.get_param(slot);
@@ -505,7 +537,9 @@ pub fn run(instance: usize) -> Result<()> {
             if let Event::Key(key) = ev {
                 ex_msg = None;
                 if picker.is_active() {
-                    if let crate::picker::PickerEvent::Chosen(Some(addr)) = picker.handle_key(key.code) {
+                    if let crate::picker::PickerEvent::Chosen(Some(addr)) =
+                        picker.handle_key(key.code)
+                    {
                         let entries = manifest.entries();
                         if let Some(ch) = crate::routing::resolve(&entries, &addr) {
                             use crate::undo::{ParamUndo, ParamValue};
@@ -513,48 +547,75 @@ pub fn run(instance: usize) -> Result<()> {
                             let old = s.get_param(ROW_MODBUS_CH);
                             s.modbus_channel = ch;
                             if let Some(old) = old {
-                                history.record(ROW_MODBUS_CH, "View source", old, ParamValue::Usize(ch));
+                                history.record(
+                                    ROW_MODBUS_CH,
+                                    "View source",
+                                    old,
+                                    ParamValue::Usize(ch),
+                                );
                             }
                         }
                     }
                     continue;
                 }
                 if ex.is_active() {
-                    let completer = crate::excmd::standard_completer(
-                        crate::excmd::patch_names(&state::patches_dir()),
-                    );
-                    if let crate::excmd::ExEvent::Submit(cmd) = ex.handle_key(key.code, &completer) {
+                    let completer = crate::excmd::standard_completer(crate::excmd::patch_names(
+                        &state::patches_dir(),
+                    ));
+                    if let crate::excmd::ExEvent::Submit(cmd) = ex.handle_key(key.code, &completer)
+                    {
                         use crate::excmd::ExCommand;
                         let params = snapshot_params(&state.lock().unwrap());
                         match cmd {
                             ExCommand::Write(name) => {
-                                ex_msg = Some(match crate::excmd::ex_write(name, &mut patch_name, &mut baseline, &params) {
-                                    Ok(m) | Err(m) => m,
-                                });
+                                ex_msg = Some(
+                                    match crate::excmd::ex_write(
+                                        name,
+                                        &mut patch_name,
+                                        &mut baseline,
+                                        &params,
+                                    ) {
+                                        Ok(m) | Err(m) => m,
+                                    },
+                                );
                             }
-                            ExCommand::Edit(name) => match state::load_patch::<state::ScopeParams>(&name) {
-                                Ok(p) => {
-                                    apply_params(&mut state.lock().unwrap(), &p);
-                                    baseline = state::to_toml_string(&snapshot_params(&state.lock().unwrap())).unwrap_or_default();
-                                    patch_name = Some(name.clone());
-                                    ex_msg = Some(format!("Loaded {}", name));
+                            ExCommand::Edit(name) => {
+                                match state::load_patch::<state::ScopeParams>(&name) {
+                                    Ok(p) => {
+                                        apply_params(&mut state.lock().unwrap(), &p);
+                                        baseline = state::to_toml_string(&snapshot_params(
+                                            &state.lock().unwrap(),
+                                        ))
+                                        .unwrap_or_default();
+                                        patch_name = Some(name.clone());
+                                        ex_msg = Some(format!("Loaded {}", name));
+                                    }
+                                    Err(e) => ex_msg = Some(e.to_string()),
                                 }
-                                Err(e) => ex_msg = Some(e.to_string()),
-                            },
+                            }
                             ExCommand::Quit { force } => {
                                 if !force && crate::excmd::is_dirty(&params, &baseline) {
-                                    ex_msg = Some(String::from("Unsaved changes (:q! to discard, :w <name> to save)"));
+                                    ex_msg = Some(String::from(
+                                        "Unsaved changes (:q! to discard, :w <name> to save)",
+                                    ));
                                 } else {
                                     should_quit = true;
                                 }
                             }
                             ExCommand::WriteQuit(name) => {
-                                match crate::excmd::ex_write(name, &mut patch_name, &mut baseline, &params) {
+                                match crate::excmd::ex_write(
+                                    name,
+                                    &mut patch_name,
+                                    &mut baseline,
+                                    &params,
+                                ) {
                                     Ok(_) => should_quit = true,
                                     Err(m) => ex_msg = Some(m),
                                 }
                             }
-                            ExCommand::Set(k, _) => ex_msg = Some(format!("Unknown setting: {}", k)),
+                            ExCommand::Set(k, _) => {
+                                ex_msg = Some(format!("Unknown setting: {}", k))
+                            }
                             ExCommand::Unknown(c) => ex_msg = Some(format!("Not a command: {}", c)),
                         }
                     }
@@ -574,7 +635,9 @@ pub fn run(instance: usize) -> Result<()> {
                 if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::CONTROL {
                     let n = count.take();
                     let mut s = state.lock().unwrap();
-                    ex_msg = Some(crate::undo::history_status("Redo", n, || history.redo(&mut *s)));
+                    ex_msg = Some(crate::undo::history_status("Redo", n, || {
+                        history.redo(&mut *s)
+                    }));
                     continue;
                 }
                 if key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL {
@@ -642,7 +705,9 @@ pub fn run(instance: usize) -> Result<()> {
                     KeyCode::Char('u') => {
                         let n = count.take();
                         let mut s = state.lock().unwrap();
-                        ex_msg = Some(crate::undo::history_status("Undo", n, || history.undo(&mut *s)));
+                        ex_msg = Some(crate::undo::history_status("Undo", n, || {
+                            history.undo(&mut *s)
+                        }));
                     }
                     KeyCode::Char('@') => {
                         count.clear();
@@ -650,7 +715,8 @@ pub fn run(instance: usize) -> Result<()> {
                         if s.selected == ROW_MODBUS_CH || s.selected == ROW_SOURCE {
                             s.source = 1; // switch to modbus viewing
                             let entries = manifest.entries();
-                            let current = crate::routing::label_for_channel(&entries, s.modbus_channel);
+                            let current =
+                                crate::routing::label_for_channel(&entries, s.modbus_channel);
                             let sources = crate::routing::live_sources(&entries);
                             drop(s);
                             picker.open(sources, current.as_ref());
@@ -686,7 +752,10 @@ mod tests {
 
     #[test]
     fn adjust_cycles_enum_rows() {
-        let mut s = ScopeState { selected: ROW_MODE, ..Default::default() };
+        let mut s = ScopeState {
+            selected: ROW_MODE,
+            ..Default::default()
+        };
         adjust(&mut s, 1, false);
         assert_eq!(s.mode, 1);
         adjust(&mut s, -2, false);
@@ -703,7 +772,10 @@ mod tests {
 
     #[test]
     fn adjust_clamps_continuous_rows() {
-        let mut s = ScopeState { selected: ROW_ZOOM, ..Default::default() };
+        let mut s = ScopeState {
+            selected: ROW_ZOOM,
+            ..Default::default()
+        };
         adjust(&mut s, -100, false);
         assert_eq!(s.zoom, 0.5);
         adjust(&mut s, 100, false);
@@ -715,18 +787,30 @@ mod tests {
 
     #[test]
     fn coarse_is_ten_times_fine() {
-        let mut fine = ScopeState { selected: ROW_GAIN, ..Default::default() };
+        let mut fine = ScopeState {
+            selected: ROW_GAIN,
+            ..Default::default()
+        };
         adjust(&mut fine, 1, false);
-        let mut coarse = ScopeState { selected: ROW_GAIN, ..Default::default() };
+        let mut coarse = ScopeState {
+            selected: ROW_GAIN,
+            ..Default::default()
+        };
         adjust(&mut coarse, 1, true);
         assert!((coarse.gain - 1.0) > (fine.gain - 1.0) * 9.9);
     }
 
     #[test]
     fn counted_adjust_equals_repeated() {
-        let mut a = ScopeState { selected: ROW_ZOOM, ..Default::default() };
+        let mut a = ScopeState {
+            selected: ROW_ZOOM,
+            ..Default::default()
+        };
         adjust(&mut a, 5, false);
-        let mut b = ScopeState { selected: ROW_ZOOM, ..Default::default() };
+        let mut b = ScopeState {
+            selected: ROW_ZOOM,
+            ..Default::default()
+        };
         for _ in 0..5 {
             adjust(&mut b, 1, false);
         }
@@ -747,7 +831,11 @@ mod tests {
     #[test]
     fn trigger_picks_earliest_fitting_crossing() {
         let buf = [-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0];
-        assert_eq!(trigger_window(&buf, 0.0, 3), Some(1), "earliest crossing wins");
+        assert_eq!(
+            trigger_window(&buf, 0.0, 3),
+            Some(1),
+            "earliest crossing wins"
+        );
         assert_eq!(trigger_window(&buf, 0.0, 7), Some(1));
     }
 

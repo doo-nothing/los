@@ -26,7 +26,11 @@ impl SourceAddr {
         if module.is_empty() || output.is_empty() || parts.next().is_some() {
             return None;
         }
-        Some(Self { module, instance, output })
+        Some(Self {
+            module,
+            instance,
+            output,
+        })
     }
 }
 
@@ -45,6 +49,10 @@ pub fn output_labels(module: &str) -> &'static [&'static str] {
         ],
         "template" => &["lfo"],
         "delay" => &["in", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"],
+        "filterbank" => &[
+            "b1", "b2", "b3", "b4", "b5", "b6", "b7", "b8", "b9", "b10", "b11", "b12", "b13",
+            "b14", "b15", "b16",
+        ],
         _ => &[],
     }
 }
@@ -74,7 +82,9 @@ pub fn note_source_track(addr: &SourceAddr) -> Option<u8> {
     let off = output_labels("sequencer")
         .iter()
         .position(|l| *l == addr.output)?;
-    Some(off as u8)
+    // instance-aware: sequencer N emits its tracks as sources N*8…N*8+7,
+    // so two sequencers never collide on a voice's note filter
+    Some((addr.instance * output_labels("sequencer").len() + off).min(255) as u8)
 }
 
 /// All live, claimable sources in the session, sorted — feeds the `@` picker
@@ -129,7 +139,12 @@ pub fn cable_color(entries: &[ManifestEntry], addr: &SourceAddr) -> ratatui::sty
 mod tests {
     use super::*;
 
-    fn entry(module: &str, instance: usize, mod_base: Option<usize>, mod_count: usize) -> ManifestEntry {
+    fn entry(
+        module: &str,
+        instance: usize,
+        mod_base: Option<usize>,
+        mod_count: usize,
+    ) -> ManifestEntry {
         ManifestEntry {
             module_name: module.to_string(),
             instance,
@@ -152,7 +167,10 @@ mod tests {
         assert_eq!(a.to_string(), "sequencer/0/t3");
 
         assert!(SourceAddr::parse("nope").is_none());
-        assert!(SourceAddr::parse("a/b/c").is_none(), "instance must be a number");
+        assert!(
+            SourceAddr::parse("a/b/c").is_none(),
+            "instance must be a number"
+        );
         assert!(SourceAddr::parse("a/0/c/d").is_none(), "too many segments");
         assert!(SourceAddr::parse("a/0/").is_none(), "empty output");
     }
@@ -167,11 +185,23 @@ mod tests {
         let t3 = SourceAddr::parse("sequencer/0/t3").unwrap();
         assert_eq!(resolve(&entries, &t3), Some(2));
         let sum = SourceAddr::parse("envelope/0/sum").unwrap();
-        assert_eq!(resolve(&entries, &sum), Some(14), "sum at offset 6 of the claim");
+        assert_eq!(
+            resolve(&entries, &sum),
+            Some(14),
+            "sum at offset 6 of the claim"
+        );
         let eor = SourceAddr::parse("envelope/0/eor").unwrap();
-        assert_eq!(resolve(&entries, &eor), None, "eor (offset 10) is beyond an 8-channel claim");
+        assert_eq!(
+            resolve(&entries, &eor),
+            None,
+            "eor (offset 10) is beyond an 8-channel claim"
+        );
         let full = vec![entry("envelope", 0, Some(8), 12)];
-        assert_eq!(resolve(&full, &eor), Some(18), "eor resolves under a full 12-output claim");
+        assert_eq!(
+            resolve(&full, &eor),
+            Some(18),
+            "eor resolves under a full 12-output claim"
+        );
         let missing = SourceAddr::parse("envelope/1/ch1").unwrap();
         assert_eq!(resolve(&entries, &missing), None, "instance not running");
         let bad = SourceAddr::parse("voice/0/out").unwrap();
@@ -184,7 +214,11 @@ mod tests {
         let before = vec![entry("envelope", 0, Some(8), 8)];
         let after = vec![entry("envelope", 0, Some(16), 8)]; // restarted, new claim
         assert_eq!(resolve(&before, &addr), Some(9));
-        assert_eq!(resolve(&after, &addr), Some(17), "same address, new channel");
+        assert_eq!(
+            resolve(&after, &addr),
+            Some(17),
+            "same address, new channel"
+        );
     }
 
     #[test]
@@ -203,8 +237,14 @@ mod tests {
     #[test]
     fn label_for_channel_reverse_lookup() {
         let entries = vec![entry("envelope", 0, Some(8), 12)];
-        assert_eq!(label_for_channel(&entries, 14).unwrap().to_string(), "envelope/0/sum");
-        assert_eq!(label_for_channel(&entries, 19).unwrap().to_string(), "envelope/0/eoc");
+        assert_eq!(
+            label_for_channel(&entries, 14).unwrap().to_string(),
+            "envelope/0/sum"
+        );
+        assert_eq!(
+            label_for_channel(&entries, 19).unwrap().to_string(),
+            "envelope/0/eoc"
+        );
         assert!(label_for_channel(&entries, 3).is_none());
     }
 
@@ -229,6 +269,12 @@ mod tests {
     fn note_source_track_from_address() {
         let t5 = SourceAddr::parse("sequencer/0/t5").unwrap();
         assert_eq!(note_source_track(&t5), Some(4));
+        let seq1 = SourceAddr::parse("sequencer/1/t3").unwrap();
+        assert_eq!(
+            note_source_track(&seq1),
+            Some(10),
+            "instance 1 offsets by 8"
+        );
         let env = SourceAddr::parse("envelope/0/ch1").unwrap();
         assert_eq!(note_source_track(&env), None);
     }
