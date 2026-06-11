@@ -640,6 +640,14 @@ fn audio_thread(shared: Arc<Mutex<BankState>>, instance: usize) -> Result<()> {
         };
 
         core.process_block(&mut block, &p, &mut fx);
+        // NaN watchdog: feedback lines latch NaN forever once poisoned
+        // (one bad upstream block is enough). Ship silence and rebuild.
+        if block.iter().any(|s| !s.is_finite()) {
+            block.fill(0.0);
+            core = dsp::FilterCore::new(sample_rate, slot_frames);
+            fx = bank16::Bank16::new();
+            fx.init(sample_rate as i32);
+        }
 
         let f = core.followers();
         if let (Some(base), Some(bus)) = (mod_base, modbus.as_mut()) {

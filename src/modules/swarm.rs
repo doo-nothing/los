@@ -90,8 +90,10 @@ const CHORDS: [(&str, [f32; TONES]); 8] = [
 /// earning its row.
 const PAN: [(f32, f32); TONES] = [(0.707, 0.707), (0.84, 0.44), (0.44, 0.84)];
 
-/// Post-sum scale: three tones at pan ≈ unity each.
-const MIX_SCALE: f32 = 0.45;
+/// Post-sum scale: three tones at pan ≈ unity each. Tuned live against
+/// the stock voices — the saw bank averages /7 and the ladder eats more,
+/// so this runs hotter than instinct suggests.
+const MIX_SCALE: f32 = 0.9;
 
 // ── parameters ─────────────────────────────────────────────────────────────
 
@@ -175,10 +177,15 @@ impl Param {
 
     /// A plugged cable replaces the knob (los-wide convention). All five
     /// bindable knobs are plain 0..1.
+    // not clamp(): clamp(NaN) is NaN, max/min sanitize it to 0.0
+    #[allow(clippy::manual_clamp)]
     fn map_mod(self, v: f32) -> f32 {
         match self {
+            // max/min instead of clamp: clamp(NaN) is NaN, and a NaN
+            // from a stale modbus channel must die here, not ride into
+            // the filter coefficients (NaN.max(0.0) is 0.0).
             Param::Detune | Param::Cutoff | Param::Res | Param::Swell | Param::Level => {
-                v.clamp(0.0, 1.0)
+                v.max(0.0).min(1.0)
             }
             Param::Chord | Param::Glide | Param::Amp | Param::Notes => v,
         }
@@ -562,7 +569,9 @@ fn audio_thread(state: Arc<Mutex<SwarmState>>, instance: usize) -> Result<()> {
                 }
                 let mut s = state.lock().unwrap();
                 if event.is_note_on() {
-                    s.freq = event.value;
+                    if event.value.is_finite() && event.value > 0.0 {
+                        s.freq = event.value;
+                    }
                     s.velocity = event.param as f32 / 127.0;
                     s.gate = true;
                 } else if event.is_note_off() {
@@ -671,6 +680,14 @@ fn audio_thread(state: Arc<Mutex<SwarmState>>, instance: usize) -> Result<()> {
             }
         }
 
+        // NaN watchdog: a poisoned ladder latches NaN in its state
+        // forever. Ship silence for this block and rebuild the cores —
+        // self-healing beats a permanently dead voice.
+        if block.iter().any(|s| !s.is_finite()) {
+            block.fill(0.0);
+            cores = (0..TONES).map(|_| core::Swarm::new()).collect();
+            init_cores(&mut cores, sample_rate);
+        }
         while ringbuf.write(&block).is_err() {
             thread::sleep(Duration::from_micros(500));
         }
@@ -1381,6 +1398,11 @@ fn ex_set(
 // ── tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+mod probe {
+    include!("/tmp/swarm_probe.rs");
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1559,6 +1581,17 @@ mod tests {
         }
         assert_eq!(param_text(Param::Chord, 1.0), "oct");
         assert_eq!(param_text(Param::Detune, 0.35), "35%");
+    }
+
+    #[test]
+    fn map_mod_kills_nan() {
+        // clamp(NaN) is NaN — the mapping must sanitize, because one NaN
+        // in a filter coefficient poisons the whole print bus downstream.
+        for p in BINDABLE {
+            assert_eq!(p.map_mod(f32::NAN), 0.0, "{:?} lets NaN through", p);
+            assert_eq!(p.map_mod(f32::INFINITY), 1.0);
+            assert_eq!(p.map_mod(2.5), 1.0);
+        }
     }
 
     #[test]

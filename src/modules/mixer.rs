@@ -409,6 +409,18 @@ fn mixer_thread(
                         if !read_ok {
                             voice_buf[..slot_len].iter_mut().for_each(|v| *v = 0.0);
                         }
+                        // One sick producer must never poison the rig: a
+                        // single NaN here would ride the += sums into the
+                        // master, the sends, and the print bus, then latch
+                        // forever inside the fx modules' feedback loops
+                        // (f32::max ignores NaN, so every meter reads 0.0
+                        // while the whole mix is silently dead — found the
+                        // hard way).
+                        for v in voice_buf[..slot_len].iter_mut() {
+                            if !v.is_finite() {
+                                *v = 0.0;
+                            }
+                        }
                         for j in (0..slot_len).step_by(2) {
                             let drv = dspc.drive_amt.tick();
                             let (l, r) = dspc.process(voice_buf[j], voice_buf[j + 1], drv);
@@ -501,7 +513,6 @@ fn mixer_thread(
                     if let Some(rb) = print_rb.as_mut() {
                         let _ = rb.write(&print_buf[..slot_len]);
                     }
-
                     if let Some(ref mut scope_rb) = inner.scope_rb {
                         let _ = scope_rb.write(&data[written..written + slot_len]);
                     }
