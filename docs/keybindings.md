@@ -238,6 +238,18 @@ The worked example module (an LFO you can hear — see
 unbind · `u`/`Ctrl-r` · `:set rate|shape|depth|pitch|level|polar <v>` ·
 `:` patches · `?` · mouse wheel/click. Its LFO publishes as
 `template/N/lfo`. All ✅
+### Delay
+The time domain processor (after the Buchla 288 —
+[the design doc](plans/delay-288.md)). A little console: strips T1–T8
+(rows pan · phase · level, the fader's meter is that tap's envelope
+follower) plus GLOBAL (input · time · regen · shim · wash · dry ·
+taps). Mixer dialect: `h/l` strip · `j/k` row · `-`/`=` adjust
+(`_`/`+`/`H`/`L` coarse, counts) · `0` reset · `m` cycle tap phase
+(+ · −, off is the mute) · `@` bind a mod source — on the input row it
+picks the audio source to consume (the patch cable into the module) ·
+`x` unbind/unpatch · `gg/G` · `:set time 120ms|regen 35|taps 4|input
+voice/0` · undo, `:` patches, `?`, Space, mouse as everywhere. Followers
+publish as `delay/N/in` + `t1`–`t8`. All ✅
 
 ### Conductor
 Two views, `Tab` switches. **States**: `j/k` nav (counts) · `gg/G` ·

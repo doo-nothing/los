@@ -13,6 +13,12 @@ check:
 build:
     cargo build --release
 
+# regenerate the committed Faust DSP cores (requires `brew install faust`;
+# building los itself never does — see docs/writing-dsp.md)
+dsp:
+    faust -lang rust -cn Tap8Fx src/modules/delay/tap8fx.dsp -o src/modules/delay/tap8fx_gen.rs
+    cargo fmt --version >/dev/null 2>&1 && cargo fmt || true
+
 # install to ~/.cargo/bin
 install:
     cargo install --path .

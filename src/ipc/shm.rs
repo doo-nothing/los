@@ -1114,9 +1114,9 @@ impl ModulationBus {
 // ── Manifest ────────────────────────────────────────────────────────────
 
 const MANIFEST_MAX_ENTRIES: usize = 16;
-const MANIFEST_ENTRY_SIZE: usize = 96; // v2: grew from 64 for modbus claims
+const MANIFEST_ENTRY_SIZE: usize = 128; // v3: grew from 96 for fx input claims
 const MANIFEST_HEADER_SIZE: usize = 64;
-const MANIFEST_VERSION: u32 = 2;
+const MANIFEST_VERSION: u32 = 3;
 /// Total modbus channels available to the allocator.
 pub const MODBUS_CHANNELS: usize = MODBUS_NUM_CHANNELS;
 
@@ -1441,6 +1441,10 @@ impl Manifest {
                         // occupant's listening claims
                         ptr::write_unaligned(data.add(64) as *mut u64, 0u64);
                         ptr::write_unaligned(data.add(72), 0u8);
+                        // …or its audio-input claim (v3): a stale claim
+                        // would make the mixer skip a source nobody is
+                        // actually consuming
+                        std::ptr::write_bytes(data.add(80), 0u8, 32);
                     }
                     valid.store(1, Ordering::Release);
                     self.my_slot = Some(slot);
@@ -1467,6 +1471,23 @@ impl Manifest {
             unsafe {
                 ptr::write_unaligned(data.add(64) as *mut u64, channels);
                 ptr::write_unaligned(data.add(72), note_tracks);
+            }
+        }
+    }
+
+    /// Publish (or clear) this module's audio-input claim: the SHM name
+    /// of the audio ringbuffer it is consuming (v3, fx modules). The mixer
+    /// skips claimed sources — the cable has left the console — and
+    /// re-adopts them when the claim clears or the claimant dies.
+    pub fn publish_input(&mut self, input_shm: Option<&str>) {
+        let Some(slot) = self.my_slot else { return };
+        let data = self.entry_data_ptr(slot);
+        unsafe {
+            std::ptr::write_bytes(data.add(80), 0u8, 32);
+            if let Some(shm) = input_shm {
+                let bytes = shm.as_bytes();
+                let n = bytes.len().min(31);
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), data.add(80), n);
             }
         }
     }
@@ -1515,6 +1536,14 @@ impl Manifest {
             let consumes_channels =
                 unsafe { ptr::read_unaligned(data.as_ptr().add(64) as *const u64) };
             let consumes_notes = data[72];
+            let input_shm = {
+                let end = data[80..112].iter().position(|&b| b == 0).unwrap_or(32);
+                if end == 0 {
+                    None
+                } else {
+                    Some(String::from_utf8_lossy(&data[80..80 + end]).to_string())
+                }
+            };
             result.push(ManifestEntry {
                 module_name,
                 instance,
@@ -1524,6 +1553,7 @@ impl Manifest {
                 mod_count: mod_count as usize,
                 consumes_channels,
                 consumes_notes,
+                input_shm,
             });
         }
         result
@@ -1543,6 +1573,9 @@ pub struct ManifestEntry {
     pub consumes_channels: u64,
     /// Bitmap of sequencer note tracks this module plays.
     pub consumes_notes: u8,
+    /// Audio ringbuffer this module is consuming (fx modules, v3) — the
+    /// mixer leaves claimed sources alone.
+    pub input_shm: Option<String>,
 }
 
 #[cfg(test)]
@@ -1924,6 +1957,40 @@ mod shm_tests {
 
         m.unregister();
         assert!(m.entries().is_empty(), "after unregister, entries should be empty");
+    }
+
+    #[test]
+    fn manifest_input_claim_round_trips() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ = unsafe { libc::shm_unlink(CString::new(SHM_MANIFEST_NAME).unwrap().as_ptr()) };
+        let mut m = Manifest::create().expect("create manifest");
+        m.register("delay", 7, Some("/los_audio_delay_7"), 0).expect("register");
+
+        let find = |m: &Manifest, name: &str| {
+            m.entries().into_iter().find(|e| e.module_name == name).unwrap()
+        };
+        assert_eq!(find(&m, "delay").input_shm, None, "no claim at registration");
+
+        m.publish_input(Some("/los_audio_voice_0"));
+        assert_eq!(find(&m, "delay").input_shm.as_deref(), Some("/los_audio_voice_0"));
+        m.publish_input(Some("/los_audio_tone_1"));
+        assert_eq!(
+            find(&m, "delay").input_shm.as_deref(),
+            Some("/los_audio_tone_1"),
+            "re-claim overwrites"
+        );
+        m.publish_input(None);
+        assert_eq!(find(&m, "delay").input_shm, None, "claim cleared");
+
+        // A reused slot must not leak the previous occupant's claim.
+        m.publish_input(Some("/los_audio_voice_0"));
+        let slot = m.my_slot.expect("registered");
+        m.force_entry_pid(slot, 4_000_000); // simulate the claimant dying
+        m.my_slot = None; // abandon without unregistering (no Drop cleanup)
+        let mut m2 = Manifest::open().expect("open");
+        m2.reap_dead();
+        m2.register("scope", 0, None, 0).expect("register into reused slot");
+        assert_eq!(find(&m2, "scope").input_shm, None, "reused slot starts clean");
     }
 
     #[test]

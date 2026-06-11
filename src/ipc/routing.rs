@@ -44,6 +44,7 @@ pub fn output_labels(module: &str) -> &'static [&'static str] {
             "ch1", "ch2", "ch3", "ch4", "ch5", "ch6", "sum", "or", "and", "inv", "eor", "eoc",
         ],
         "template" => &["lfo"],
+        "delay" => &["in", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"],
         _ => &[],
     }
 }
@@ -138,6 +139,7 @@ mod tests {
             mod_count,
             consumes_channels: 0,
             consumes_notes: 0,
+            input_shm: None,
         }
     }
 
