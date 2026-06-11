@@ -112,6 +112,14 @@ the filterbank, a MATHs LFO breathing the bank's spectrum, and a second
 sequencer whose tracks can step fx params without touching the voices.
 Their DSP is part Rust, part Faust ([docs/writing-dsp.md](docs/writing-dsp.md)).
 
+Patches are code, too: `cargo run --example worldends` rebuilds a
+complete four-voice session from typed Rust — a glacial E♭-minor fugue
+on Britney Spears' *Till the World Ends* (46 BPM, the chant hook as
+subject, an answer a fifth below, a tenor in augmentation, a pedal that
+breathes via pattern slots and macros). Every knob is a serde field, so
+the compiler type-checks the composition. `examples/worldends.rs` is
+the worked example of composing for the rig from outside it.
+
 Adding a module touches `src/modules/` plus a few registration points —
 [docs/writing-a-module.md](docs/writing-a-module.md) is the guide and
 `src/modules/template.rs` the worked example ([CONTRIBUTING.md](CONTRIBUTING.md)
