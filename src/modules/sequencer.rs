@@ -6497,6 +6497,32 @@ pub fn run(instance: usize) -> Result<()> {
                             undo_msg = Some(history_status("Undo", count, || history.undo(&mut s)));
                             undo_time = Some(Instant::now());
                         }
+                        // `%` flips the delay unit in normal mode too —
+                        // same handler as insert (the layer keys' twin)
+                        KeyCode::Char('%') => {
+                            pending_count = None;
+                            pending_g = false;
+                            let unit = {
+                                let s = state.lock().unwrap();
+                                if s.layer != state::BindTarget::Delay {
+                                    None
+                                } else {
+                                    s.track()
+                                        .steps
+                                        .get(s.selected)
+                                        .map(|st| match st.delay_unit {
+                                            state::DelayUnit::Ms => state::DelayUnit::Pct,
+                                            state::DelayUnit::Pct => state::DelayUnit::Ms,
+                                        })
+                                }
+                            };
+                            if let Some(unit) = unit {
+                                let action = Action::SetDelayUnit { unit, convert: true };
+                                undo_msg = exec_action(&state, &mut history, &action);
+                                undo_time = Some(Instant::now());
+                                last_change = Some(action);
+                            }
+                        }
 
                         _ => {
                             pending_count = None;
