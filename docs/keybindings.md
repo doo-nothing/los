@@ -279,6 +279,20 @@ strip leaves the console. Fx-into-fx chains work the same way. Master
 sends default to 0 — the master already contains the returns, so
 raising them is deliberate feedback.
 
+### Tape
+The record window's deck ([the design doc](plans/tape-deck.md)): six
+tracks on a three-minute tape, recording **the mix** (the mixer's print
+bus) unless armed to a claimed source. `j/k` track (then GLOBAL) ·
+`h/l` column (input · lvl · pan) · `K/J` or `=/-` adjust 1% (`_/+` 5%)
+· `r` ● record (transport must roll at 1×) · `a` arm · `o` monitor
+(GLOBAL: loop-out) · `i`/`O` loop in/out at the playhead · `L` loop ·
+`m`/`v` mute/reverse · `w`/`W` write/clear the fader automation lane ·
+`X X` erase track · `n` RAVE a take (optional helper; `N` restores) ·
+`B` bounce to an empty track · `E` export `~/Music/los/` · `@` bind
+(input col: pick the source) · mouse: click a waveform to seek. Speed
+(GLOBAL) is the varispeed knob, 0.25×–2×, bindable. Overdubs layer —
+the tape never erases until you `X`. All ✅
+
 ### Conductor
 Two views, `Tab` switches. **States**: `j/k` nav (counts) · `gg/G` ·
 `Enter` load (`l` alias) · `s` save session · `dd` + y/n confirm to delete.

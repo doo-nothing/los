@@ -1,0 +1,95 @@
+#!/usr/bin/env -S uv run --script --quiet
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["torch", "soundfile", "numpy"]
+# ///
+"""los-rave — offline RAVE processing for the los tape deck.
+
+RAVE (github.com/acids-ircam/rave) models are TorchScript exports; this
+helper runs a recorded take through one (encode→decode = the model's
+timbre/character) entirely offline. The tape deck shells out to it when
+present — los itself never depends on Python.
+
+  los-rave process --model ~/.config/los/rave/vintage.ts in.wav out.wav
+  los-rave fetch vintage        # download a pretrained model
+  los-rave models               # list installed models
+
+Pretrained models (IRCAM): vintage (80s music — the closest stock
+"cassette/lofi" character), percussion, darbouka_onnx, nasa, VCTK.
+"""
+import argparse
+import pathlib
+import sys
+import urllib.request
+
+MODEL_DIR = pathlib.Path.home() / ".config" / "los" / "rave"
+PRETRAINED = {
+    name: f"https://play.forum.ircam.fr/rave-vst-api/get_model/{name}"
+    for name in ["vintage", "percussion", "darbouka_onnx", "nasa", "VCTK"]
+}
+
+
+def fetch(name: str) -> None:
+    url = PRETRAINED.get(name)
+    if not url:
+        sys.exit(f"unknown model {name!r} (have: {', '.join(PRETRAINED)})")
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    dest = MODEL_DIR / f"{name}.ts"
+    print(f"fetching {name} → {dest}")
+    urllib.request.urlretrieve(url, dest)  # noqa: S310 — fixed IRCAM hosts
+    print("done")
+
+
+def process(model_path: str, wav_in: str, wav_out: str) -> None:
+    import numpy as np
+    import soundfile as sf
+    import torch
+
+    torch.set_grad_enabled(False)
+    model = torch.jit.load(model_path).eval()
+
+    audio, rate = sf.read(wav_in, dtype="float32", always_2d=True)
+    mono = torch.from_numpy(audio.mean(axis=1))[None, None, :]
+
+    # RAVE models are trained at a fixed rate (usually 44.1/48k); feed as
+    # is — the character matters more than transposition exactness here.
+    chunk = rate * 10  # ten-second chunks keep memory flat
+    outs = []
+    total = mono.shape[-1]
+    for start in range(0, total, chunk):
+        piece = mono[..., start : start + chunk]
+        out = model.forward(piece)
+        outs.append(out.squeeze().numpy())
+        print(f"PROGRESS {min(1.0, (start + chunk) / total):.2f}", flush=True)
+    y = np.concatenate(outs)[: total]
+    # back to stereo, normalized only if it clipped
+    peak = float(np.abs(y).max() or 1.0)
+    if peak > 1.0:
+        y = y / peak
+    sf.write(wav_out, np.stack([y, y], axis=1), rate, subtype="PCM_16")
+    print("DONE")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(prog="los-rave")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("process", help="run a wav through a RAVE model")
+    p.add_argument("--model", required=True)
+    p.add_argument("wav_in")
+    p.add_argument("wav_out")
+    f = sub.add_parser("fetch", help="download a pretrained model")
+    f.add_argument("name")
+    sub.add_parser("models", help="list installed models")
+    args = ap.parse_args()
+
+    if args.cmd == "fetch":
+        fetch(args.name)
+    elif args.cmd == "models":
+        for m in sorted(MODEL_DIR.glob("*.ts")):
+            print(m.stem)
+    else:
+        process(args.model, args.wav_in, args.wav_out)
+
+
+if __name__ == "__main__":
+    main()
