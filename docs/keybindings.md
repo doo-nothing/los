@@ -120,6 +120,8 @@ The full feature tour lives in [sequencer.md](sequencer.md).
 | `v` | visual mode: motions extend a step selection; `y`/`d`/`c`/`~` act on it; `Esc` cancels |
 | `V` | visual line over **tracks**: `j`/`k` extend; `d`/`x` delete the span, `c` clears it, `~` toggles every step, `m`/`M` mute/mode it, `y` yanks the current track. One undo entry per fan-out |
 | `'n` `'v` `'p` `'m` | value layer: what the grid shows and what k/j/N edit (note / velocity / probability / mod) |
+| `'d` `'D` `'r` `'R` | timing layers: per-step delay / delay prob / repeats 1–8 / repeat prob |
+| `%` | delay layer: flip the step's unit ms ↔ % of step (value converts at the current bpm) |
 | `B` / `gB` | patch a mod source into the step's active-layer param (picker) / unplug it |
 | `(` / `)` | dial the bound source's amount ±0.05 (counts; clamp ±2) |
 | `F` | re-run the last `:fill` with a fresh seed (`.` repeats the same seed) |
@@ -159,6 +161,10 @@ The full feature tour lives in [sequencer.md](sequencer.md).
 | `:scale <name>` | retune track(s): 139 built-ins, `off` = chromatic, `root <note>`, or a `.scl` file path (Scala import) — sequencer |
 | `:fill <kind> [arg]` | auto-fill: `mutate density markov cantor thuemorse fibonacci sierpinski` — sequencer |
 | `:macro [a] [= …]` | list / show / write macros (`pat 2 b \| mute 3 \| quant beat`) — sequencer |
+| `:swing 50-75` | MPC swing on the track(s): odd 16ths pushed, 66 = shuffle — sequencer |
+| `:groove <name>` | per-bar timing template (`straight lilt drag3 push24 sway limp rushin molasses`) — sequencer |
+| `:humanize <ms>` | ±ms timing jitter per fire, deterministic per cycle (0–30) — sequencer |
+| `:decay <±%>` | ratchet velocity shape: + fades repeats, − swells them — sequencer |
 
 Requires a per-module dirty flag (changed since last save) for `:q` vs `:q!`.
 

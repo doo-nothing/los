@@ -220,11 +220,27 @@ pub struct StepParam {
     pub prob: u8,
     #[serde(default)]
     pub bind: Option<StepBindParam>,
+    /// Micro-timing push, interpreted via `delay_unit` (timing pass).
+    #[serde(default)]
+    pub delay: f32,
+    #[serde(default)]
+    pub delay_unit: DelayUnit,
+    #[serde(default = "default_prob")]
+    pub delay_prob: u8,
+    #[serde(default = "default_repeats")]
+    pub repeats: u8,
+    #[serde(default = "default_prob")]
+    pub repeat_prob: u8,
 }
 
 /// Steps in saves that predate probability always fire.
 fn default_prob() -> u8 {
     100
+}
+
+/// Steps in saves that predate ratchets play once.
+fn default_repeats() -> u8 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,6 +273,23 @@ pub struct TrackParam {
     /// Inactive non-empty pattern slots.
     #[serde(default)]
     pub slots: Vec<SlotParam>,
+    /// MPC swing 50–75 (% of an 8th-note pair; 50 = straight).
+    #[serde(default = "default_swing")]
+    pub swing: u8,
+    /// Groove template name from `theory::groove`; `None` = straight.
+    #[serde(default)]
+    pub groove: Option<String>,
+    /// Timing jitter ± ms, re-rolled per cycle (0 = off).
+    #[serde(default)]
+    pub humanize: f32,
+    /// Ratchet velocity shape −100..=100: + = decay, − = crescendo.
+    #[serde(default)]
+    pub ratchet_decay: i8,
+}
+
+/// Tracks in saves that predate swing play straight.
+fn default_swing() -> u8 {
+    50
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -474,6 +507,25 @@ pub enum BindTarget {
     Velocity,
     Prob,
     Mod,
+    /// Micro-timing push (docs/plans/sequencer-timing.md).
+    Delay,
+    /// Chance the delay applies as a random amount up to the set value.
+    DelayProb,
+    /// Ratchet count 1–8.
+    Repeats,
+    /// Coin flip per repeat beyond the first.
+    RepeatProb,
+}
+
+/// How a step's delay value is interpreted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DelayUnit {
+    /// Literal milliseconds — tempo changes the feel (quirk is a feature).
+    #[default]
+    Ms,
+    /// Percent of the step window — the groove survives tempo changes.
+    Pct,
 }
 
 /// A per-step mod-in binding: `source`'s modbus value offsets `target`
@@ -578,6 +630,8 @@ pub enum MacroCmd {
     /// Euclidean params, re-applied on replay.
     SetEuclid { track: usize, pulses: usize, length: usize, rotation: usize },
     SetMode { track: usize, mode: TrackMode },
+    /// Track timing knobs, absolute (empty groove = straight).
+    SetTiming { track: usize, swing: u8, groove: String, humanize: f32, decay: i8 },
 }
 
 /// A saved macro: single-letter id, quantize, command list.

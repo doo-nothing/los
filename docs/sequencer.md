@@ -50,6 +50,10 @@ that decides what the grid displays and what the value keys edit:
 | `'v` | velocity | meters ▁▃▅█ | ±4 | ±16 |
 | `'p` | probability | meters, clock-hued under 100% | ±5 | ±25 |
 | `'m` | mod value | cv ramp | ±0.01 | ±0.1 |
+| `'d` | delay | meters, clock-hued when pushed | ±1 ms or % | ±10 |
+| `'D` | delay prob | meters | ±5 | ±25 |
+| `'r` | repeats | the count itself: ·2345678 | ±1 | min/max |
+| `'R` | repeat prob | meters | ±5 | ±25 |
 
 Everything else is layer-independent: motions, operators, visual mode,
 yank/paste all move whole steps. The modeline shows `'v`/`'p`/`'m` when
@@ -65,6 +69,50 @@ channel reads 0. On a modulation track a failed roll **holds** the bus at
 its last value: set a mod track's steps to 50% and you have a free
 sample-and-hold. Rolls are deterministic per (track, global step), so
 pausing and resuming replays identically.
+
+## Timing — delay, swing, ratchets (the Varigate pass)
+
+Every step can leave the grid line, and every leaving has its own dice.
+
+**Per-step delay** (`'d` layer) pushes a step late. The value is literal
+milliseconds by default — change the tempo and the feel changes, which
+is a feature — or `%` flips that step to **percent of the step window**
+so the groove survives tempo changes (the value converts in place; `N`
+accepts `30ms` or `25%` directly). **Delay probability** (`'D`) makes it
+rubbery: at 100 the delay is exact every cycle; below that, it's the
+chance the step gets a *random push up to the set delay* this cycle,
+else it plays straight.
+
+**Repeats** (`'r` layer) ratchet a step 1–8 times, evenly subdividing
+the step from wherever its (possibly delayed) start landed. **Repeat
+probability** (`'R`) is a coin flip per repeat beyond the first — 100
+always plays all of them, 50 gives you a different burst length every
+bar, 0 is a single hit. `:decay 60` fades successive repeats out like a
+real roll; `:decay -40` swells them into the next beat. Repeats are
+pure retriggers (no gate-off between), which the envelope's
+anti-click continuity was built for.
+
+**The track-level groove section** (all `:` commands, all auditioning
+live from the menu — arrow through values and *hear* them):
+
+- `:swing 66` — classic MPC swing; every odd global 16th pushed.
+  50 = straight, 66 = triplet shuffle, 75 = maximum drag.
+- `:groove lilt` — per-bar timing templates (`straight`, `lilt`,
+  `drag3`, `push24`, `sway`, `limp`, `rushin`, `molasses`). A groove is
+  16 per-16th offsets applied on top of swing.
+- `:humanize 8` — ±8ms of jitter on every fire, re-rolled per cycle
+  but deterministic (pause and resume replays the same "performance").
+- `:decay 60` — the ratchet velocity shape above.
+
+Non-default settings show in the track info column (`S66 ≈lilt ±8`).
+All of it lands on top of the existing step probability: step prob
+decides *if*, repeat prob decides *how many*, delay prob decides
+*when*. Every per-step timing value is also a `B` cable target — CV
+over ratchet count is exactly as unreasonable as it sounds.
+
+All the dice are deterministic splitmix keyed by (track, global step,
+purpose): the same session seed replays the same groove, cycles differ
+because the global step does.
 
 ## Cycle modes
 

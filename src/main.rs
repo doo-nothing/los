@@ -152,8 +152,8 @@ fn main() -> Result<()> {
                 let bus = shm::ModulationBus::open().ok();
                 // skip the backlog; we only want what happens from now on
                 while events.read_event().is_some() {}
-                let deadline =
-                    std::time::Instant::now() + std::time::Duration::from_secs_f32(secs);
+                let start = std::time::Instant::now();
+                let deadline = start + std::time::Duration::from_secs_f32(secs);
                 println!("tapping {secs}s… (sequencer modbus base: {seq_base:?})");
                 let mut last_bus = String::new();
                 while std::time::Instant::now() < deadline {
@@ -167,8 +167,13 @@ fn main() -> Result<()> {
                             }
                         };
                         println!(
-                            "{} src={} value={:.2}Hz vel/note={} step={}",
-                            kind, ev.source, ev.value, ev.param, ev.step
+                            "{:9.1} {} src={} value={:.2}Hz vel/note={} step={}",
+                            start.elapsed().as_secs_f64() * 1000.0,
+                            kind,
+                            ev.source,
+                            ev.value,
+                            ev.param,
+                            ev.step
                         );
                     }
                     if let Some(ref bus) = bus {
@@ -192,7 +197,9 @@ fn main() -> Result<()> {
                             last_bus = row;
                         }
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    // tight poll: the timestamps above are only as good
+                    // as this granularity (ratchets land ~15ms apart)
+                    std::thread::sleep(std::time::Duration::from_millis(2));
                 }
                 Ok(())
             }
