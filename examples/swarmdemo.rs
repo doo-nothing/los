@@ -143,13 +143,17 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     // ── mute the house voices: the swarm is the whole show ─────────────
+    // The voice rule: a bound-but-unresolvable amp source means SILENCE
+    // (level isn't a voice UI row, and an unbound amp is a drone — the
+    // one thing a mute must never be). envelope/7 doesn't exist.
     for i in 0..2 {
         state::save_module_state(
             "voice",
             i,
             &state::VoiceParams {
                 format: state::STATE_FORMAT,
-                level: Some(0.0),
+                amp_src: Some("envelope/7/ch1".into()),
+                notes_src: Some("sequencer/0/t8".into()),
                 ..Default::default()
             },
         )?;
