@@ -1250,7 +1250,7 @@ mod tests {
         }
         // and the SEQ snap is DERIVED from the sequencer's real content:
         // 8 default tracks + header + detail strip + rules + modeline
-        assert_eq!(crate::sequencer::CONTENT_LINES, crate::NUM_TRACKS + 7);
+        assert_eq!(crate::sequencer::CONTENT_LINES, crate::NUM_TRACKS + 8);
     }
 
     #[test]
@@ -1258,7 +1258,7 @@ mod tests {
         // tall window: SEQ snaps to content; rows 1 and 2 share the rest
         // about evenly; badge + scope stack to the voices' height
         let (row1, seq, _, badge) = house_dims(180, 80);
-        assert_eq!(seq, 15, "SEQ snaps to its content");
+        assert_eq!(seq, 16, "SEQ snaps to its content");
         assert_eq!(row1, 28, "voices row takes a real share");
         assert_eq!(badge, 10, "badge caps at content height");
         let scope_h = row1 - badge - 1;

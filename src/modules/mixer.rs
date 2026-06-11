@@ -203,13 +203,18 @@ fn mixer_thread(
 
             if let Ok(ringbuf) = AudioRingbuf::open(shm_name) {
                 let label = format!("{} {}", capitalize(&entry.module_name), entry.instance);
+                // The envelope's function out carries raw control
+                // transients (zero-rise strikes = impulses). Its fader
+                // starts DOWN — like an unpatched cable on the hardware —
+                // so those clicks are opt-in, not the default mix.
+                let level = if entry.module_name == "envelope" { 0.0 } else { 0.8 };
                 inner.audio_sources.push(AudioSource {
                     shm_name: shm_name.clone(),
                     ringbuf,
                 });
                 inner.tracks.push(TrackState {
                     name: label,
-                    level: 0.8,
+                    level,
                     pan: 0.0,
                     mute: false,
                     solo: false,
@@ -638,8 +643,10 @@ pub fn run() -> Result<()> {
             if let Event::Key(key) = ev {
                 ex_msg = None;
                 if ex.is_active() {
-                    let candidates = crate::excmd::patch_names(&state::patches_dir());
-                    if let crate::excmd::ExEvent::Submit(cmd) = ex.handle_key(key.code, &candidates) {
+                    let completer = crate::excmd::standard_completer(
+                        crate::excmd::patch_names(&state::patches_dir()),
+                    );
+                    if let crate::excmd::ExEvent::Submit(cmd) = ex.handle_key(key.code, &completer) {
                         use crate::excmd::ExCommand;
                         let params = snapshot_params(&inner.lock().unwrap());
                         match cmd {

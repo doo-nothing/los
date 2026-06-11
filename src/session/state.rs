@@ -200,15 +200,31 @@ pub struct SequencerParams {
     pub steps: Vec<StepParam>,
     #[serde(default)]
     pub tracks: Vec<TrackParam>,
+    #[serde(default)]
+    pub macros: Vec<MacroParam>,
+    /// Macro lane slots: one bar each, "" = empty, "a"–"z" = fire that macro.
+    #[serde(default)]
+    pub lane: Vec<String>,
+    #[serde(default)]
+    pub lane_len: Option<usize>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StepParam {
     pub active: bool,
     pub note: u8,
     pub velocity: u8,
     #[serde(default)]
     pub mod_value: f32,
+    #[serde(default = "default_prob")]
+    pub prob: u8,
+    #[serde(default)]
+    pub bind: Option<StepBindParam>,
+}
+
+/// Steps in saves that predate probability always fire.
+fn default_prob() -> u8 {
+    100
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -222,6 +238,25 @@ pub struct TrackParam {
     pub muted: bool,
     #[serde(default)]
     pub mode: TrackMode,
+    #[serde(default)]
+    pub cycle: CycleMode,
+    /// Library scale name; `scale_cents` is authoritative when non-empty
+    /// (covers `.scl` imports whose name isn't in the library).
+    #[serde(default)]
+    pub scale: Option<String>,
+    #[serde(default)]
+    pub scale_cents: Vec<f64>,
+    #[serde(default)]
+    pub scale_period: Option<f64>,
+    /// MIDI root note for the scale (default 60).
+    #[serde(default)]
+    pub root: Option<u8>,
+    /// Active pattern slot 0–7 (`a`–`h`).
+    #[serde(default)]
+    pub active_slot: usize,
+    /// Inactive non-empty pattern slots.
+    #[serde(default)]
+    pub slots: Vec<SlotParam>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -334,6 +369,192 @@ pub struct ModDest {
     pub target_module: String,
     pub target_instance: usize,
     pub target_param: String,
+}
+
+/// Per-track playhead direction (docs/plans/sequencer-v2.md §3). Lives here
+/// so the runtime and the save file share one type, like [`TrackMode`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CycleMode {
+    #[default]
+    Forward,
+    Reverse,
+    PingPong,
+    Random,
+    Drunk,
+    EveryOther,
+    Spiral,
+    PrimeJump,
+}
+
+impl CycleMode {
+    /// Every mode, in `gc` cycling order.
+    pub const ALL: [CycleMode; 8] = [
+        CycleMode::Forward,
+        CycleMode::Reverse,
+        CycleMode::PingPong,
+        CycleMode::Random,
+        CycleMode::Drunk,
+        CycleMode::EveryOther,
+        CycleMode::Spiral,
+        CycleMode::PrimeJump,
+    ];
+
+    /// The `:set cycle <name>` spelling (also what saves serialize).
+    pub fn name(&self) -> &'static str {
+        match self {
+            CycleMode::Forward => "forward",
+            CycleMode::Reverse => "reverse",
+            CycleMode::PingPong => "pingpong",
+            CycleMode::Random => "random",
+            CycleMode::Drunk => "drunk",
+            CycleMode::EveryOther => "everyother",
+            CycleMode::Spiral => "spiral",
+            CycleMode::PrimeJump => "primejump",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<CycleMode> {
+        CycleMode::ALL.iter().copied().find(|m| m.name() == s.to_lowercase())
+    }
+}
+
+/// Which step parameter a value layer or a per-step mod binding targets.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BindTarget {
+    #[default]
+    Note,
+    Velocity,
+    Prob,
+    Mod,
+}
+
+/// A per-step mod-in binding: `source`'s modbus value offsets `target`
+/// by up to `amount` of the parameter's range at trigger time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StepBindParam {
+    pub target: BindTarget,
+    pub source: String,
+    pub amount: f32,
+}
+
+/// When a fired macro takes effect (docs/plans/sequencer-v2.md §7).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Quant {
+    Now,
+    Beat,
+    #[default]
+    Bar,
+    PatternEnd,
+}
+
+impl Quant {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Quant::Now => "now",
+            Quant::Beat => "beat",
+            Quant::Bar => "bar",
+            Quant::PatternEnd => "end",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Quant> {
+        match s.to_lowercase().as_str() {
+            "now" | "immediate" => Some(Quant::Now),
+            "beat" => Some(Quant::Beat),
+            "bar" => Some(Quant::Bar),
+            "end" | "patternend" | "pattern-end" => Some(Quant::PatternEnd),
+            _ => None,
+        }
+    }
+}
+
+/// Auto-fill generator families (`:fill`, macro Fill commands).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FillKind {
+    Mutate,
+    Density,
+    Markov,
+    Cantor,
+    ThueMorse,
+    Fibonacci,
+    Sierpinski,
+}
+
+impl FillKind {
+    pub fn name(&self) -> &'static str {
+        match self {
+            FillKind::Mutate => "mutate",
+            FillKind::Density => "density",
+            FillKind::Markov => "markov",
+            FillKind::Cantor => "cantor",
+            FillKind::ThueMorse => "thuemorse",
+            FillKind::Fibonacci => "fibonacci",
+            FillKind::Sierpinski => "sierpinski",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<FillKind> {
+        match s.to_lowercase().as_str() {
+            "mutate" | "evolve" => Some(FillKind::Mutate),
+            "density" => Some(FillKind::Density),
+            "markov" => Some(FillKind::Markov),
+            "cantor" => Some(FillKind::Cantor),
+            "thuemorse" | "thue-morse" | "tm" => Some(FillKind::ThueMorse),
+            "fibonacci" | "fib" => Some(FillKind::Fibonacci),
+            "sierpinski" | "sierp" => Some(FillKind::Sierpinski),
+            _ => None,
+        }
+    }
+}
+
+/// One semantic command inside a macro — the unit `q{a-z}` records and
+/// `@{a-z}` replays. Absolute (not toggling) so replays are predictable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MacroCmd {
+    SwitchPattern { track: usize, slot: usize },
+    SetMute { track: usize, muted: bool },
+    SetCycle { track: usize, mode: CycleMode },
+    TransposeTrack { track: usize, by: i32 },
+    RotateTrack { track: usize, by: i32 },
+    /// Empty string = scale off.
+    SetScale { track: usize, scale: String },
+    Fill { track: usize, kind: FillKind, arg: f32 },
+    SetBpm { bpm: f64 },
+    /// Absolute step rewrite — how recorded edits replay exactly.
+    SetSteps { track: usize, start: usize, steps: Vec<StepParam> },
+    /// A single trigger set absolutely (recorded step toggles).
+    SetActive { track: usize, step: usize, active: bool },
+    /// Euclidean params, re-applied on replay.
+    SetEuclid { track: usize, pulses: usize, length: usize, rotation: usize },
+    SetMode { track: usize, mode: TrackMode },
+}
+
+/// A saved macro: single-letter id, quantize, command list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MacroParam {
+    pub id: String,
+    #[serde(default)]
+    pub quant: Quant,
+    #[serde(default)]
+    pub cmds: Vec<MacroCmd>,
+}
+
+/// An inactive pattern slot's saved contents (active slot data lives
+/// inline in [`TrackParam`]). Only non-empty slots are saved.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlotParam {
+    /// Slot index 0–7 (`a`–`h`).
+    pub slot: usize,
+    #[serde(default)]
+    pub steps: Vec<StepParam>,
+    pub length: Option<usize>,
+    pub pulses: Option<usize>,
+    pub rotation: Option<usize>,
 }
 
 // ── write helpers ────────────────────────────────────────────────────────────

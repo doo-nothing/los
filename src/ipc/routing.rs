@@ -135,6 +135,8 @@ mod tests {
             audio_shm: None,
             mod_base,
             mod_count,
+            consumes_channels: 0,
+            consumes_notes: 0,
         }
     }
 

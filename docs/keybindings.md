@@ -17,7 +17,7 @@ Status markers: **✅ today** · **🔜 v1** (see `docs/plans/v1-polish.md`) ·
 | `Ctrl-s` | Save module state. ✅ |
 | `Space` | Global transport play/pause (except sequencer insert mode); also `Ctrl-b p`/`Ctrl-b s` and `los ctl`. ✅ |
 | `u` / `Ctrl-r` | Undo / redo, count-prefixed; value sweeps coalesce into one entry. ✅ |
-| `@` | Open the source picker on a bindable param (live sources from the manifest; Enter binds, x unbinds). ✅ |
+| `@` | Open the source picker on a bindable param (live sources from the manifest; Enter binds, x unbinds). **Sequencer exception:** `@` fires macros there; its picker key is `B` (per-step bindings). ✅ |
 | `:` | Ex command line (`:w :e :q :q! :x :set`); not in conductor (session save/load lives there). ✅ |
 | `gg` / `G` | First / last of the module's primary collection (sequencer tracks, envelope/mixer channels, voice/scope params, conductor states). ✅ |
 
@@ -40,8 +40,9 @@ Status markers: **✅ today** · **🔜 v1** (see `docs/plans/v1-polish.md`) ·
 ## Sequencer
 
 Modes: **normal** (operators, track ops, transport), **insert** (direct step
-entry/tuning), **visual** / **visual-line** (`v`/`V`; visual-line covers the
-current track only in v1), **operator-pending**, **ex**. All ✅.
+entry/tuning), **visual** (`v`, steps) / **visual-line** (`V`, tracks —
+`j`/`k` extend the span), **operator-pending**, **ex**. All ✅.
+The full feature tour lives in [sequencer.md](sequencer.md).
 
 ### Motions (normal, insert, visual, after operators)
 
@@ -54,9 +55,9 @@ current track only in v1), **operator-pending**, **ex**. All ✅.
 | `0` / `$` | first / last step | ✅ |
 | `f#` | to step # (inclusive under an operator) | ✅ |
 | `t#` | till step # (exclusive under an operator) | ✅ |
-| `j` / `k` | next / previous track (normal mode; counts) | ✅ |
+| `j` / `k` | next / previous track (normal mode; counts); `k` from track 1 reaches the **macro lane**, `j` leaves it | ✅ |
 | `gg` / `G` | first / last track (normal); first step (insert) | ✅ |
-| `gt#` | go to track # (both modes) | ✅ |
+| `gt#` | go to track # (normal mode) | ✅ |
 
 ### Operators (normal & visual modes) ✅
 
@@ -66,6 +67,7 @@ current track only in v1), **operator-pending**, **ex**. All ✅.
 | `d{motion}` | clear step range (deactivate), range into register |
 | `c{motion}` | clear range, move to range start, enter insert mode |
 | `yy` / `dd` / `cc` | whole track: yank / delete / clear+insert |
+| `Y` / `D` / `C` | shorthand to end of pattern: `y$` / `d$` / `c$` |
 
 ### Register & paste
 
@@ -73,9 +75,10 @@ current track only in v1), **operator-pending**, **ex**. All ✅.
 |-----|--------|--------|
 | `x` | cut current step into register (normal + insert) | ✅ |
 | `y` | yank current step (insert mode; in normal mode `y` is the operator) | ✅ |
-| `p` | paste register at cursor — steps **overwrite** from cursor (fixed grid, no shifting); a track **inserts after** current | ✅ |
-| `P` | paste before — track inserts before current; step range overwrites ending at cursor | ✅ |
-| `#p` | paste # times (vi idiom) | ✅ |
+| `p` | paste register **into** the row(s) at the cursor — steps overwrite on the fixed grid; a multi-track yank **block-pastes** down successive rows | ✅ |
+| `P` | paste before — the overwrite ends at the cursor | ✅ |
+| `gp` / `gP` | materialize the register as a **new track** after / before (a 3-step yank becomes a 3-step polymeter track) | ✅ |
+| `#p` / `#gp` | paste # times / insert # tracks (vi idiom) | ✅ |
 
 > **The `#P` quirk:** counted `#P` / `#L` / `#R` set Euclidean
 > pulses/length/rotation (los idiom) and do **not** mean "paste # times
@@ -88,9 +91,10 @@ current track only in v1), **operator-pending**, **ex**. All ✅.
 |-----|--------|--------|
 | `Enter` / `Space` | toggle step | ✅ |
 | `~` | toggle step (normal mode; flips each step of a visual selection) | ✅ |
-| `k` / `j` | note +1 / −1 semitone (or mod value ±0.01) | ✅ |
-| `K` / `J` | note +1 / −1 octave (or mod value ±0.1) | ✅ |
-| `N<num>` | set MIDI note directly | ✅ |
+| `k` / `j` | active layer value ± fine — note ±1 semitone/degree, velocity ±4, prob ±5, mod ±0.01 | ✅ |
+| `K` / `J` | active layer value ± coarse — note ±octave/period, velocity ±16, prob ±25, mod ±0.1 | ✅ |
+| `N<num>` | set the active layer's value directly (note 0–127, vel 1–127, prob 0–100, mod −1…1) | ✅ |
+| `1`–`9`, `0` | **prob layer only:** set 10–90% / 100% directly (Orca-style) | ✅ |
 
 ### Tracks (normal mode)
 
@@ -98,8 +102,12 @@ current track only in v1), **operator-pending**, **ex**. All ✅.
 |-----|--------|--------|
 | `o` / `O` | new track after / before current (`n` = alias of `o`) | ✅ |
 | `dd` / `yy` / `P`/`p` | delete / yank / paste track (unified register) | ✅ |
-| `m` | toggle mute | ✅ |
-| `@` | toggle track mode (note ↔ modulation) | ✅ |
+| `m` | toggle mute (kills gates AND the track's mod output) | ✅ |
+| `M` | toggle track mode (note ↔ modulation) — `@` moved to macros | ✅ |
+| `X` / `gX` | mark track / clear all marks — marked tracks (`t3*`) receive every fanned-out edit | ✅ |
+| `"a`–`"h` | switch to pattern slot a–h (per track; swap-based, undoable) | ✅ |
+| `"A`–`"H` | save the current pattern into a slot without switching | ✅ |
+| `gc` / `gC` | next / previous cycle mode (forward reverse pingpong random drunk everyother spiral primejump) | ✅ |
 | `>>` / `<<` | rotate the actual step pattern right / left (counts: `3>>`); preserves hand-edits, unlike Euclid `R` | ✅ |
 | `#P` / `#L` / `#R` | Euclidean pulses / length / rotation | ✅ |
 | `P`/`L`/`R` (insert, bare) | re-apply / clamp / rotate+1 | ✅ |
@@ -108,9 +116,23 @@ current track only in v1), **operator-pending**, **ex**. All ✅.
 
 | Key | Action |
 |-----|--------|
-| `.` | repeat last change at cursor (toggle, transpose, paste, euclidean tweak) |
+| `.` | repeat last change at cursor (toggle, adjust, paste, fill, slot switch, …) |
 | `v` | visual mode: motions extend a step selection; `y`/`d`/`c`/`~` act on it; `Esc` cancels |
-| `V` | visual line: select whole track(s) for `y`/`d` |
+| `V` | visual line over **tracks**: `j`/`k` extend; `d`/`x` delete the span, `c` clears it, `~` toggles every step, `m`/`M` mute/mode it, `y` yanks the current track. One undo entry per fan-out |
+| `'n` `'v` `'p` `'m` | value layer: what the grid shows and what k/j/N edit (note / velocity / probability / mod) |
+| `B` / `gB` | patch a mod source into the step's active-layer param (picker) / unplug it |
+| `(` / `)` | dial the bound source's amount ±0.05 (counts; clamp ±2) |
+| `F` | re-run the last `:fill` with a fresh seed (`.` repeats the same seed) |
+
+### Macros & the lane ✅
+
+| Key | Action |
+|-----|--------|
+| `q{a-z}` … `q` | record a macro: EVERYTHING undoable records as absolute state (step edits, sweeps merged, euclid, mute, slots, cycle, scale, fill, bpm); track lifecycle + lane edits don't |
+| `@{a-z}` / `@@` | fire a macro (quantized per its `quant`: now/beat/bar/end; immediate when stopped) / refire the last |
+| lane `@a` | assign macro a to the lane slot under the cursor |
+| lane `x`/`d` `y` `p` `D` | cut / yank / paste (counts tile — `4p` = four bars) / wipe the lane |
+| lane `#L` | lane length in bars (1–128) |
 
 ### Transport & misc
 
@@ -132,7 +154,11 @@ current track only in v1), **operator-pending**, **ex**. All ✅.
 | `:q` | quit module (refuses if unsaved changes) |
 | `:q!` | quit, discard changes |
 | `:x` / `:wq` | save patch and quit |
-| `:set <key> <value>` | module settings: sequencer `bpm`, `pulses`, `length`, `rotation`; others as they grow |
+| `:set <key> <value>` | module settings: sequencer `bpm`, `pulses`, `length`, `rotation`, `cycle <mode>`, `root <note>`; others as they grow |
+| ex line extras | command/value completion menus (`Tab` cycles, `↓`/`↑` browse + AUDITION in the sequencer), `↑` history when no menu row is selected — all modules |
+| `:scale <name>` | retune track(s): 139 built-ins, `off` = chromatic, `root <note>`, or a `.scl` file path (Scala import) — sequencer |
+| `:fill <kind> [arg]` | auto-fill: `mutate density markov cantor thuemorse fibonacci sierpinski` — sequencer |
+| `:macro [a] [= …]` | list / show / write macros (`pat 2 b \| mute 3 \| quant beat`) — sequencer |
 
 Requires a per-module dirty flag (changed since last save) for `:q` vs `:q!`.
 
@@ -224,13 +250,13 @@ Defined in `docs/plans/design-language.md` §2.5. The short version:
 
 ## Future (🔮 post-v1, documented so the grammar reserves space)
 
-- **Sequencer depth (orca-inspired):** per-step chance/probability,
-  ratcheting (substep repeats), per-track clock division, swing. Likely
-  surface: extra insert-mode rows per step + `:set div 2` style commands.
+- **Sequencer depth:** ratcheting (substep repeats), per-track clock
+  division, swing. (Probability, cycle modes, scales, macros: shipped ✅.)
 - `;` / `,` — repeat last `f`/`t` motion forward / back.
 - `J` — join: merge next track's pattern into current (OR steps).
-- `m{a-z}` / `` `{a-z} `` — marks: save/jump cursor (track, step).
+- `m{a-z}` / `` `{a-z} `` — cursor marks (track marks `X` shipped; these
+  would be position marks).
 - `/` — search (next step with note N / velocity above X).
-- `q{a-z}` — macros. Far future, deeply vi.
 - `r` — replace-one (set note without leaving normal mode); evaluate against
   `N` overlap.
+- A dedicated macro-sequencer pane (the lane's engine is UI-independent).

@@ -63,6 +63,12 @@ impl VoiceState {
             notes_src: (n <= 8)
                 .then(|| SourceAddr::parse(&format!("sequencer/0/t{n}")))
                 .flatten(),
+            // voice 1 ships as an audibly different instrument (sub-heavy,
+            // darker): with identical patches, "which voice is playing?"
+            // was unanswerable by ear and made routing look broken
+            shape: if instance == 1 { 0.25 } else { 0.5 },
+            sub: if instance == 1 { 0.7 } else { 0.0 },
+            lpg: if instance == 1 { 0.35 } else { 0.0 },
             ..Default::default()
         }
     }
@@ -162,6 +168,15 @@ fn voice_thread(
             ch_fm = s.fm_src.as_ref().and_then(|a| routing::resolve(&entries, a));
             ch_amp = s.amp_src.as_ref().and_then(|a| routing::resolve(&entries, a));
             note_filter = s.notes_src.as_ref().and_then(routing::note_source_track);
+            // publish what this voice listens to (the sequencer's
+            // who's-listening markers read it back)
+            let channels = [ch_shape, ch_sub, ch_fm, ch_amp]
+                .iter()
+                .flatten()
+                .filter(|&&c| c < 64)
+                .fold(0u64, |m, &c| m | (1 << c));
+            let notes = note_filter.filter(|&t| t < 8).map_or(0u8, |t| 1 << t);
+            manifest.publish_consumes(channels, notes);
         }
         refresh_in -= 1;
 
@@ -774,8 +789,10 @@ pub fn run(instance: usize) -> Result<()> {
                     continue;
                 }
                 if ex.is_active() {
-                    let candidates = crate::excmd::patch_names(&state::patches_dir());
-                    if let crate::excmd::ExEvent::Submit(cmd) = ex.handle_key(key.code, &candidates) {
+                    let completer = crate::excmd::standard_completer(
+                        crate::excmd::patch_names(&state::patches_dir()),
+                    );
+                    if let crate::excmd::ExEvent::Submit(cmd) = ex.handle_key(key.code, &completer) {
                         use crate::excmd::ExCommand;
                         let params = snapshot_params(&state.lock().unwrap());
                         match cmd {

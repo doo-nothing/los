@@ -8,13 +8,15 @@
 
 //! Los — a modular groovebox that lives in your terminal (see DESIGN.md).
 //!
-//! The crate is organized into four groups:
+//! The crate is organized into five groups:
 //!
 //! - [`modules`] — the runnable pane processes (sequencer, voice, mixer, …).
 //!   Start here to contribute a new module.
 //! - [`ui`] — shared TUI components (theme, vi keys, `:` command line, …).
 //! - [`ipc`] — shared-memory plumbing between module processes.
 //! - [`session`] — persistence and the tmux rack.
+//! - [`theory`] — scales (microtonal included), Scala `.scl` import, and
+//!   pattern generators.
 //!
 //! Every module is also re-exported at the crate root (`los::sequencer`,
 //! `crate::shm`, …) so call sites stay short and moving a file between
@@ -23,6 +25,7 @@
 pub mod ipc;
 pub mod modules;
 pub mod session;
+pub mod theory;
 pub mod ui;
 
 pub use ipc::{routing, shm};

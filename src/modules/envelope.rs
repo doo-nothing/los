@@ -218,6 +218,19 @@ fn vari_response(x: f32, shape: f32) -> f32 {
     }
 }
 
+/// Inverse of [`vari_response`]: the phase at which the curve outputs `y`.
+/// Retriggers and cycle restarts use it to CONTINUE the rise from the
+/// current level — output must never step down in one sample (the click).
+fn vari_inverse(y: f32, shape: f32) -> f32 {
+    let y = y.clamp(0.0, 1.0);
+    let tau = (shape.clamp(0.0, 1.0) - 0.5) * 18.0;
+    if tau.abs() < 0.01 {
+        y
+    } else {
+        (1.0 + y * tau.exp_m1()).ln() / tau
+    }
+}
+
 /// One sample of slew limiting toward `target` (signal-input mode).
 /// Rate comes from the rise/fall time for the movement direction; the
 /// response blends a constant-rate (linear) ramp with an RC proportional
@@ -556,12 +569,22 @@ fn advance_stage(ch: &mut EnvelopeChannel, p: &StageParams, dt: f32) -> bool {
                     ch.pluck_slow = ch.output;
                     ch.phase = 0.5; // initialized marker
                 }
+                // a cycle clock rides alongside the tail: phase walks
+                // 0.5 → 1.5 over one fall_time
+                ch.phase += dt / p.fall_time.max(TIME_MIN);
                 let (f2, s2, out) =
                     pluck_decay(ch.pluck_fast, ch.pluck_slow, dt, p.fall_time, p.pluck);
                 ch.pluck_fast = f2;
                 ch.pluck_slow = s2;
                 ch.output = out;
-                out < 0.001
+                if p.loop_mode {
+                    // cycling restarts on TIME (the EOC), not at -60dB of
+                    // vactrol tail — with pluck up, waiting for the tail
+                    // made one "cycle" take ~10 seconds and read as frozen
+                    out < 0.001 || ch.phase >= 1.5
+                } else {
+                    out < 0.001
+                }
             } else if p.fall_time <= 0.0 {
                 true
             } else {
@@ -572,13 +595,16 @@ fn advance_stage(ch: &mut EnvelopeChannel, p: &StageParams, dt: f32) -> bool {
                 ch.phase >= 1.0
             };
             if done {
-                ch.phase = 1.0;
-                ch.output = 0.0;
                 cycle_done = true;
                 if p.loop_mode {
+                    // restart the rise FROM the remaining tail (time-based
+                    // restarts land while the vactrol ring is still
+                    // audible — zeroing it clicked once per cycle)
                     ch.stage = Stage::Rise;
-                    ch.phase = 0.0;
+                    ch.phase = vari_inverse(ch.output, p.shape);
                 } else {
+                    ch.phase = 1.0;
+                    ch.output = 0.0;
                     ch.stage = Stage::Off;
                 }
             }
@@ -595,7 +621,7 @@ fn env_thread(
     let consumer_id = crate::shm::consumer_id("envelope", instance);
     let mut events = EventRingbuf::open(consumer_id).ok();
     let mut modbus = ModulationBus::open().or_else(|_| ModulationBus::create()).ok();
-    let manifest = Manifest::open().or_else(|_| Manifest::create())?;
+    let mut manifest = Manifest::open().or_else(|_| Manifest::create())?;
     let _transport = ShmTransport::open().ok();
 
     // Audio-rate output: a cycling channel is a sound source. The mixer
@@ -653,20 +679,41 @@ fn env_thread(
                 ];
                 r.signal = p.signal_src.as_ref().and_then(|a| routing::resolve(&entries, a));
             }
+            // publish consumed channels + note-track triggers for the
+            // sequencer's who's-listening markers
+            let mut channels = 0u64;
+            let mut notes = 0u8;
+            for r in resolved.iter().take(s.params.len()) {
+                for ch in r.mods.iter().flatten().chain(r.signal.iter()) {
+                    if *ch < 64 {
+                        channels |= 1 << ch;
+                    }
+                }
+                match r.trig {
+                    Some(RTrig::Edge(ch)) if ch < 64 => channels |= 1 << ch,
+                    Some(RTrig::Note(t)) if t < 8 => notes |= 1 << t,
+                    _ => {}
+                }
+            }
+            manifest.publish_consumes(channels, notes);
         }
         refresh_in -= 1;
 
         // Note events + manual TRIGGER events
         let mut triggers = [false; MAX_CHANNELS];
-        let mut track_trigger: Option<u8> = None;
-        let mut release_track: Option<u8> = None;
+        // Per-track bitmaps: with several note tracks firing in the same
+        // block, a single last-event-wins slot shadowed every channel
+        // whose track wasn't the final writer (three note tracks = a
+        // silent voice).
+        let mut note_trigs: u64 = 0;
+        let mut note_offs: u64 = 0;
         let mut event_count = 0u32;
         if let Some(ref mut ev) = events {
             while let Some(event) = ev.read_event() {
                 event_count += 1;
                 match event.event_type {
-                    0 => track_trigger = Some(event.source),
-                    1 => release_track = Some(event.source),
+                    0 => note_trigs |= 1 << (event.source & 63),
+                    1 => note_offs |= 1 << (event.source & 63),
                     4 => {
                         let ch = (event.target as usize).min(MAX_CHANNELS - 1);
                         triggers[ch] = true;
@@ -707,36 +754,51 @@ fn env_thread(
             let ch = &mut s.channels[i];
 
             let should_trigger = match r.trig {
-                Some(RTrig::AnyNote) | None => track_trigger.is_some() || triggers[i],
+                Some(RTrig::AnyNote) | None => note_trigs != 0 || triggers[i],
                 Some(RTrig::Off) | Some(RTrig::Edge(_)) => triggers[i],
-                Some(RTrig::Note(want)) => track_trigger == Some(want) || triggers[i],
+                Some(RTrig::Note(want)) => {
+                    note_trigs & (1 << (want & 63)) != 0 || triggers[i]
+                }
             };
             // note_off only matters to a gate; a trig ignores it entirely.
             // Edge sources release on their falling edge — without this a
             // gate-mode channel on an edge trigger sustains forever.
             let should_release = params.gate_mode
                 && match r.trig {
-                    Some(RTrig::AnyNote) | None => release_track.is_some(),
+                    Some(RTrig::AnyNote) | None => note_offs != 0,
                     Some(RTrig::Off) => false,
                     Some(RTrig::Edge(_)) => edge_falls[i],
-                    Some(RTrig::Note(want)) => release_track == Some(want),
+                    Some(RTrig::Note(want)) => note_offs & (1 << (want & 63)) != 0,
                 };
 
-            if should_release && ch.stage != Stage::Off && ch.stage != Stage::Fall {
-                ch.stage = Stage::Fall;
-                ch.phase = 0.0;
-            }
-            if should_trigger {
-                ch.stage = Stage::Rise;
-                ch.phase = 0.0;
-            }
-
             // Param modulation: bound + resolvable -> modbus value
+            // (computed before trigger handling: a retrigger needs the
+            // live shape to continue the rise from the current level)
             let chan_val = |c: Option<usize>| c.and_then(|c| modbus.as_ref().map(|m| m.get(c)));
             let rp = chan_val(r.mods[0]).map(|v| v.clamp(0.0, 1.0)).unwrap_or(params.rise_param);
             let fp = chan_val(r.mods[1]).map(|v| v.clamp(0.0, 1.0)).unwrap_or(params.fall_param);
             let sp = chan_val(r.mods[2]).map(|v| v.clamp(0.0, 1.0)).unwrap_or(params.shape_param);
             let att = chan_val(r.mods[3]).map(|v| v.clamp(-1.0, 1.0)).unwrap_or(params.attenuverter);
+
+            if should_release && ch.stage != Stage::Off && ch.stage != Stage::Fall {
+                // fall FROM the current level too: the non-pluck fall
+                // curve is 1−vari(phase), so an early release mid-rise
+                // used to jump up to 1.0 before falling
+                ch.stage = Stage::Fall;
+                ch.phase = if params.pluck > 0.0 {
+                    0.0 // pluck init captures ch.output itself
+                } else {
+                    vari_inverse(1.0 - ch.output, sp)
+                };
+            }
+            if should_trigger {
+                // continue the rise FROM the current output — a hard
+                // phase=0 reset stepped a ringing tail to zero in one
+                // sample, the click that got loud once shadowed triggers
+                // started landing
+                ch.stage = Stage::Rise;
+                ch.phase = vari_inverse(ch.output, sp);
+            }
 
             let rise_time = param_to_time(rp);
             let fall_time = param_to_time(fp);
@@ -766,7 +828,12 @@ fn env_thread(
                 } else if advance_stage(ch, &stage_params, dt) && i == n - 1 {
                     eoc_pulse = true;
                 }
-                // audio path: attenuverted function (offsets excluded — DC)
+                // audio path: attenuverted function (offsets excluded —
+                // DC), one-shot strikes and all — the hardware function
+                // jack carries everything, clicks included. Opt-in lives
+                // at the MIXER: this source's fader defaults to 0 (the
+                // software equivalent of an unpatched cable), so the raw
+                // transients only reach the master when you push it up.
                 let a = ch.output * att;
                 audio_buf[frame * 2] += a;
                 audio_buf[frame * 2 + 1] += a;
@@ -1289,8 +1356,10 @@ pub fn run(instance: usize) -> Result<()> {
                     continue;
                 }
                 if ex.is_active() {
-                    let candidates = crate::excmd::patch_names(&state::patches_dir());
-                    if let crate::excmd::ExEvent::Submit(cmd) = ex.handle_key(key.code, &candidates) {
+                    let completer = crate::excmd::standard_completer(
+                        crate::excmd::patch_names(&state::patches_dir()),
+                    );
+                    if let crate::excmd::ExEvent::Submit(cmd) = ex.handle_key(key.code, &completer) {
                         use crate::excmd::ExCommand;
                         let params = snapshot_params(&state.lock().unwrap());
                         match cmd {
@@ -1977,6 +2046,111 @@ mod tests {
         }
         assert!(above_tenth_at_100ms, "the ring is still audible at 100ms");
         assert!(t > 0.15, "tail outlives the nominal fall time");
+    }
+
+    #[test]
+    fn vari_inverse_roundtrips() {
+        for shape in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            for i in 0..=20 {
+                let x = i as f32 / 20.0;
+                let y = vari_response(x, shape);
+                let back = vari_inverse(y, shape);
+                assert!(
+                    (back - x).abs() < 1e-3,
+                    "shape {shape} x {x}: {back}"
+                );
+            }
+        }
+    }
+
+    /// The anti-click contract: however hard you retrigger, output never
+    /// steps DOWN in a single sample (rising snaps are the instrument).
+    #[test]
+    fn retrigger_never_steps_down() {
+        let dt = 1.0 / 48000.0;
+        let p = StageParams {
+            rise_time: 0.02,
+            fall_time: 0.2,
+            shape: 0.5,
+            loop_mode: false,
+            gate_mode: false,
+            pluck: 0.8,
+        };
+        let mut ch = EnvelopeChannel { stage: Stage::Rise, ..Default::default() };
+        let mut prev = ch.output;
+        let mut max_down = 0.0f32;
+        // a 2-second trigger storm: retrigger every 50ms, exactly the way
+        // env_thread does it (Rise + vari_inverse of the live output)
+        for n in 0..(48000 * 2) {
+            if n % 2400 == 0 && n > 0 {
+                ch.stage = Stage::Rise;
+                ch.phase = vari_inverse(ch.output, p.shape);
+            }
+            advance_stage(&mut ch, &p, dt);
+            max_down = max_down.max(prev - ch.output);
+            prev = ch.output;
+        }
+        // steepest legitimate slope is the pluck fast pole; a hard reset
+        // used to register ~0.3 here
+        assert!(max_down < 0.02, "downward step {max_down}");
+    }
+
+    #[test]
+    fn cycle_restart_is_continuous() {
+        let dt = 1.0 / 48000.0;
+        let p = StageParams {
+            rise_time: 0.05,
+            fall_time: 0.2,
+            shape: 0.5,
+            loop_mode: true,
+            gate_mode: false,
+            pluck: 0.8,
+        };
+        let mut ch = EnvelopeChannel { stage: Stage::Rise, ..Default::default() };
+        let mut prev = ch.output;
+        let mut max_down = 0.0f32;
+        let mut cycles = 0;
+        for _ in 0..(48000 * 5) {
+            if advance_stage(&mut ch, &p, dt) {
+                cycles += 1;
+            }
+            max_down = max_down.max(prev - ch.output);
+            prev = ch.output;
+        }
+        assert!(cycles >= 10, "still cycles on time: {cycles}");
+        assert!(max_down < 0.02, "restart cliff {max_down}");
+    }
+
+    #[test]
+    fn cycling_with_pluck_restarts_on_time_not_tail() {
+        let dt = 1.0 / 48000.0;
+        // rise 50ms, fall 200ms, pluck well up: a cycle should take about
+        // rise+fall, NOT the ~10s the -60dB vactrol tail needs
+        let p = StageParams {
+            rise_time: 0.05,
+            fall_time: 0.2,
+            shape: 0.5,
+            loop_mode: true,
+            gate_mode: false,
+            pluck: 0.8,
+        };
+        let mut ch = EnvelopeChannel { stage: Stage::Rise, ..Default::default() };
+        let mut cycles = 0;
+        for _ in 0..(48000 * 5) {
+            if advance_stage(&mut ch, &p, dt) {
+                cycles += 1;
+            }
+        }
+        assert!(cycles >= 12, "5s at ~250ms/cycle should loop plenty: {cycles}");
+        // and WITHOUT cycling, the tail still rings long (unchanged)
+        let p2 = StageParams { loop_mode: false, ..p };
+        let mut ch2 = EnvelopeChannel { stage: Stage::Fall, output: 1.0, ..Default::default() };
+        let mut t = 0.0f32;
+        while ch2.stage == Stage::Fall && t < 20.0 {
+            advance_stage(&mut ch2, &p2, dt);
+            t += dt;
+        }
+        assert!(t > 0.4, "non-cycling pluck tail outlives the fall time: {t}");
     }
 
     #[test]
