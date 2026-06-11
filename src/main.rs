@@ -9,7 +9,7 @@
 use anyhow::Result;
 use los::{
     badge, conductor, delay, envelope, filterbank, mixer, scope, sequencer, shm, state, tape,
-    template, tone, voice,
+    swarm, template, tone, voice,
 };
 
 /// `los ctl <action>` — control the global transport from any shell
@@ -83,6 +83,7 @@ fn usage() {
     eprintln!("  delay              8-tap time domain processor (fx: patch a source into it)");
     eprintln!("  filterbank         16-band spectral processor (fx, 296e-style)");
     eprintln!("  tape               6-track tape deck (record window; Tascam x OP-1)");
+    eprintln!("  swarm              CS-80-ish brass voice: 7 detuned saws, ladder, chords");
     eprintln!("  badge              Los faceplate (beat-synced animation, session info)");
     eprintln!();
     eprintln!("Aliases:");
@@ -107,6 +108,7 @@ fn dispatch_module(name: &str, instance: usize) -> Result<()> {
         "delay" => delay::run(instance),
         "filterbank" => filterbank::run(instance),
         "tape" => tape::run(instance),
+        "swarm" => swarm::run(instance),
         "badge" => badge::run(instance),
         other => anyhow::bail!("unknown module: {other}"),
     }

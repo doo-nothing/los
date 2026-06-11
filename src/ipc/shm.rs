@@ -1283,6 +1283,11 @@ pub const MODBUS_CHANNELS: usize = MODBUS_NUM_CHANNELS;
 pub fn consumer_id(module: &str, instance: usize) -> usize {
     match module {
         "voice" => instance.min(7),
+        // swarm shares the TOP of the voice range (swarm 0 → slot 7,
+        // swarm 1 → slot 6): growing NUM_CONSUMERS is an SHM layout bump,
+        // and a rig running eight voices plus swarms isn't real. The
+        // collision is documented, deliberate, and tested.
+        "swarm" => 7 - instance.min(1),
         "envelope" => 8 + instance.min(5),
         // `los tap` gets its own cursor so draining the backlog can't
         // starve whichever module shares the default slot

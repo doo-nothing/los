@@ -238,6 +238,18 @@ The worked example module (an LFO you can hear — see
 unbind · `u`/`Ctrl-r` · `:set rate|shape|depth|pitch|level|polar <v>` ·
 `:` patches · `?` · mouse wheel/click. Its LFO publishes as
 `template/N/lfo`. All ✅
+### Swarm
+The CS-80-flavored brass voice (seven detuned saws → resonant ladder,
+three of them stacked as a chord). Vertical list, pure doctrine:
+`j/k` select · `h/l` adjust (`H/L` coarse, counts) · `0` reset ·
+`gg/G` · chord row cycles uni/oct/5th/sus4/min/maj/min7/maj7 ·
+`@` bind (the five knobs take mod sources; `amp` and `notes` are
+routing rows — `@` binds, `x` unbinds, `h/l` does nothing on purpose) ·
+`u`/`Ctrl-r` · `:set chord min7`, `:set swell 0.8`, `:set amp
+envelope/0/ch1` (`:set amp -` unbinds) · `:` patches · `?` · Space ·
+mouse wheel/click. The filter-swell envelope publishes as
+`swarm/N/swl`. All ✅
+
 ### Delay
 The time domain processor (after the Buchla 288 —
 [the design doc](plans/delay-288.md)). A little console: strips T1–T8

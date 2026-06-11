@@ -102,6 +102,13 @@ tape ready to capture the full form top to tail, so `r` is a song. An optional `
 helper reprocesses takes through RAVE neural models (the `vintage`
 model is a credible cassette).
 
+A second kind of voice, the **swarm** (after the CS-80), turns one
+sequencer track into Vangelis chords: seven detuned saws through a
+resonant ladder whose cutoff *swells* open on every note, three of them
+stacked into selectable chord spreads and fanned across the field. Its
+bloom is a patchable source (`swarm/N/swl`); `los add swarm` and pick a
+chord. `cargo run --example swarmdemo` writes a four-chord demo patch.
+
 Fx modules (the **delay**, after the Buchla 288, and the
 **filterbank**, after the 296e) consume any audio source you point them
 at — a voice directly (insert: that strip leaves the console), or one
