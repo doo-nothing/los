@@ -778,7 +778,14 @@ fn build_fx_window(exe: &str) -> Result<()> {
     let win = "los:fx";
     tmux_cmd(&["new-window", "-t", "los", "-n", "fx"])?;
     tmux_cmd(&["set-option", "-w", "-t", win, "pane-border-status", "top"])?;
-    tmux_cmd(&["set-option", "-w", "-t", win, "pane-border-format", " #{pane_title} "])?;
+    tmux_cmd(&[
+        "set-option",
+        "-w",
+        "-t",
+        win,
+        "pane-border-format",
+        " #{pane_title} ",
+    ])?;
 
     let base = tmux_cmd(&["list-panes", "-t", win, "-F", "#{pane_id}"])?
         .lines()
@@ -837,7 +844,13 @@ fn build_fx_window(exe: &str) -> Result<()> {
         "#{pane_id}",
         &format!("{} filterbank 0", exe),
     ])?;
-    tmux_cmd(&["respawn-pane", "-k", "-t", &base, &format!("{} delay 0", exe)])?;
+    tmux_cmd(&[
+        "respawn-pane",
+        "-k",
+        "-t",
+        &base,
+        &format!("{} delay 0", exe),
+    ])?;
 
     // titles must stay in sync with FX_TITLES (the save round-trip
     // parses them back into module names + instances)

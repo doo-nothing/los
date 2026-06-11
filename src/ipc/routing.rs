@@ -270,7 +270,11 @@ mod tests {
         let t5 = SourceAddr::parse("sequencer/0/t5").unwrap();
         assert_eq!(note_source_track(&t5), Some(4));
         let seq1 = SourceAddr::parse("sequencer/1/t3").unwrap();
-        assert_eq!(note_source_track(&seq1), Some(10), "instance 1 offsets by 8");
+        assert_eq!(
+            note_source_track(&seq1),
+            Some(10),
+            "instance 1 offsets by 8"
+        );
         let env = SourceAddr::parse("envelope/0/ch1").unwrap();
         assert_eq!(note_source_track(&env), None);
     }

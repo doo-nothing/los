@@ -45,11 +45,13 @@ pub fn run(frequency: f32, instance: usize) -> Result<()> {
             }
         }
 
+        // full ring: sleep, don't yield-spin — the consumer frees a
+        // slot every ~1.3 ms
         loop {
             match ringbuf.write(&block) {
                 Ok(()) => break,
                 Err(_) => {
-                    thread::yield_now();
+                    thread::sleep(Duration::from_micros(500));
                 }
             }
         }

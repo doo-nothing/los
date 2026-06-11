@@ -373,7 +373,11 @@ fn reset_current(s: &mut BankState) {
             GlobalRow::Decay => s.decay = 0.3,
         }
     } else if s.edit_bank {
-        s.bank_b[s.selected] = if s.selected.is_multiple_of(2) { 0.9 } else { 0.2 };
+        s.bank_b[s.selected] = if s.selected.is_multiple_of(2) {
+            0.9
+        } else {
+            0.2
+        };
     } else {
         s.bank_a[s.selected] = 0.8;
     }
@@ -640,7 +644,7 @@ fn audio_thread(shared: Arc<Mutex<BankState>>, instance: usize) -> Result<()> {
         }
 
         while out_rb.write(&block).is_err() {
-            thread::yield_now();
+            thread::sleep(Duration::from_micros(500));
         }
 
         blocks += 1;
@@ -979,10 +983,26 @@ pub fn run(instance: usize) -> Result<()> {
         apply_params(&mut shared.lock().unwrap(), &p);
     }
 
+    // The audio thread owns every RT resource. Its setup races the
+    // session's boot storm (a dozen modules registering into the CAS
+    // manifest at once), so a failure retries instead of dying silent —
+    // and persistent errors land in a tmp file the user can find.
     let audio_state = Arc::clone(&shared);
     thread::spawn(move || {
-        if let Err(e) = audio_thread(audio_state, instance) {
-            eprintln!("[filterbank {}] audio thread error: {}", instance, e);
+        let err_path = state::tmp_dir().join(format!("filterbank_{}.err", instance));
+        let _ = std::fs::remove_file(&err_path);
+        loop {
+            match audio_thread(Arc::clone(&audio_state), instance) {
+                Ok(()) => break,
+                Err(e) => {
+                    let _ = std::fs::write(&err_path, format!("{}", e));
+                    eprintln!(
+                        "[filterbank {}] audio thread error (retrying): {}",
+                        instance, e
+                    );
+                    thread::sleep(Duration::from_millis(500));
+                }
+            }
         }
     });
 

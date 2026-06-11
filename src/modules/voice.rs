@@ -319,12 +319,15 @@ fn voice_thread(
             s.level = level;
         }
 
-        // Write to ringbuffer — retry when full, don't drop blocks
+        // Write to ringbuffer — retry when full, don't drop blocks. A
+        // full ring holds ~21 ms of audio and the mixer frees a slot
+        // every ~1.3 ms, so a short sleep beats burning the core on
+        // yield (this loop used to pin a CPU per voice).
         loop {
             match ringbuf.write(&block) {
                 Ok(()) => break,
                 Err(_) => {
-                    std::thread::yield_now();
+                    std::thread::sleep(Duration::from_micros(500));
                 }
             }
         }

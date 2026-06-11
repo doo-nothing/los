@@ -373,7 +373,7 @@ impl Tap8Fx {
 			self.fVec12[(self.IOTA0 & 1023) as usize] = fTemp10;
 			self.fRec1[0] = self.fVec12[((i32::wrapping_sub(self.IOTA0, self.iConst12)) & 1023) as usize];
 			let mut fRec2: F32 = -(0.6 * fTemp10);
-			*output1 = (fRec2 + self.fRec1[1]) as FaustFloat;
+			*output1 = (0.04 * (fRec2 + self.fRec1[1])) as FaustFloat;
 			self.IOTA0 = i32::wrapping_add(self.IOTA0, 1);
 			self.fRec0[1] = self.fRec0[0];
 			self.fRec10[1] = self.fRec10[0];

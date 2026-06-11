@@ -172,7 +172,11 @@ impl Strip {
     /// envelope's function out) starts dry — a return feeding its own
     /// send is a feedback loop you should have to ask for.
     fn with_sends(level: f32, send_a: f32, send_b: f32) -> Self {
-        Self { send_a, send_b, ..Self::new(level) }
+        Self {
+            send_a,
+            send_b,
+            ..Self::new(level)
+        }
     }
 
     fn get(&self, p: Param) -> f32 {
@@ -328,7 +332,6 @@ fn mixer_thread(
     }
     let mut send_a_buf = vec![0.0f32; 128];
     let mut send_b_buf = vec![0.0f32; 128];
-    let mut send_scratch = vec![0.0f32; 128];
 
     let stream = device
         .build_output_stream(
@@ -464,19 +467,17 @@ fn mixer_thread(
                         peak = peak.max(data[j].abs().max(data[j + 1].abs()));
                     }
 
-                    // ship the send buses; drop-oldest when nothing is
-                    // draining so the audio callback never blocks
+                    // ship the send buses. When nothing is draining a
+                    // bus its ring fills once and writes simply skip —
+                    // never read our own ring to make room: the producer
+                    // touching read_index races the consumer (SPSC) and
+                    // corrupts it into serving stale slots. A consumer
+                    // that attaches later fast-forwards the backlog.
                     if let Some(rb) = send_a_rb.as_mut() {
-                        if rb.write(&send_a_buf[..slot_len]).is_err() {
-                            let _ = rb.read(&mut send_scratch[..slot_len]);
-                            let _ = rb.write(&send_a_buf[..slot_len]);
-                        }
+                        let _ = rb.write(&send_a_buf[..slot_len]);
                     }
                     if let Some(rb) = send_b_rb.as_mut() {
-                        if rb.write(&send_b_buf[..slot_len]).is_err() {
-                            let _ = rb.read(&mut send_scratch[..slot_len]);
-                            let _ = rb.write(&send_b_buf[..slot_len]);
-                        }
+                        let _ = rb.write(&send_b_buf[..slot_len]);
                     }
 
                     if let Some(ref mut scope_rb) = inner.scope_rb {
@@ -1089,8 +1090,7 @@ fn draw_ui(
                     strip.get(Param::Level)
                 };
                 let cursor = *sel
-                    && STRIP_ROWS[inner.selected_param.min(STRIP_ROWS.len() - 1)]
-                        == Param::Level;
+                    && STRIP_ROWS[inner.selected_param.min(STRIP_ROWS.len() - 1)] == Param::Level;
                 let mut txt = format!("  {:>4}", param_text(Param::Level, shown));
                 while txt.chars().count() < STRIP_W {
                     txt.push(' ');

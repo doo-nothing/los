@@ -649,7 +649,7 @@ fn audio_thread(shared: Arc<Mutex<DelayState>>, instance: usize) -> Result<()> {
         }
 
         while out_rb.write(&block).is_err() {
-            thread::yield_now();
+            thread::sleep(Duration::from_micros(500));
         }
 
         blocks += 1;
@@ -1065,10 +1065,23 @@ pub fn run(instance: usize) -> Result<()> {
         apply_params(&mut shared.lock().unwrap(), &p);
     }
 
+    // The audio thread owns every RT resource. Its setup races the
+    // session's boot storm (a dozen modules registering into the CAS
+    // manifest at once), so a failure retries instead of dying silent —
+    // and persistent errors land in a tmp file the user can find.
     let audio_state = Arc::clone(&shared);
     thread::spawn(move || {
-        if let Err(e) = audio_thread(audio_state, instance) {
-            eprintln!("[delay {}] audio thread error: {}", instance, e);
+        let err_path = state::tmp_dir().join(format!("delay_{}.err", instance));
+        let _ = std::fs::remove_file(&err_path);
+        loop {
+            match audio_thread(Arc::clone(&audio_state), instance) {
+                Ok(()) => break,
+                Err(e) => {
+                    let _ = std::fs::write(&err_path, format!("{}", e));
+                    eprintln!("[delay {}] audio thread error (retrying): {}", instance, e);
+                    thread::sleep(Duration::from_millis(500));
+                }
+            }
         }
     });
 

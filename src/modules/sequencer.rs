@@ -3109,7 +3109,8 @@ fn sequencer_thread(
             if !s.pending_offs.is_empty() {
                 let offs: Vec<(u8, u8)> = s.pending_offs.drain(..).collect();
                 for (n, src) in offs {
-                    let _ = events.write_event(&AudioEvent::note_off_source(n, s.src_base + src, 0));
+                    let _ =
+                        events.write_event(&AudioEvent::note_off_source(n, s.src_base + src, 0));
                     if let (Some(ref mut bus), Some(base)) = (modbus.as_mut(), s.mod_base) {
                         if (src as usize) < crate::NUM_TRACKS {
                             bus.set(base + src as usize, 0.0);

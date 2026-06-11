@@ -519,7 +519,7 @@ fn audio_thread(state: Arc<Mutex<TemplateState>>, instance: usize) -> Result<()>
         // Write the block. Full ring = the mixer is gone or stalled; spin
         // gently rather than erroring out, exactly like tone.rs.
         while ringbuf.write(&block).is_err() {
-            thread::yield_now();
+            thread::sleep(Duration::from_micros(500));
         }
 
         blocks += 1;

@@ -135,23 +135,39 @@ impl AudioRingbuf {
 
         // Create or open the shared memory object
         let fd = unsafe {
-            let fd = libc::shm_open(cname.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o644);
-            if fd < 0 {
+            let mut use_fd = libc::shm_open(cname.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o644);
+            if use_fd < 0 {
                 anyhow::bail!(
                     "shm_open failed for {name}: {}",
                     std::io::Error::last_os_error()
                 );
             }
-            // Set the size
-            if libc::ftruncate(fd, total_size as libc::off_t) < 0 {
-                libc::close(fd);
-                libc::shm_unlink(cname.as_ptr());
-                anyhow::bail!(
-                    "ftruncate failed for {name}: {}",
-                    std::io::Error::last_os_error()
-                );
+            // Set the size. macOS sizes a POSIX shm object exactly once:
+            // re-truncating a leftover ring from a killed session can
+            // fail EINVAL even at the same size. If the existing object
+            // is big enough (it always is — sizes are page-rounded and
+            // the layout hasn't shrunk), claim it: the header re-init
+            // below makes it ours. Otherwise unlink and start over.
+            if libc::ftruncate(use_fd, total_size as libc::off_t) < 0 {
+                let mut st: libc::stat = std::mem::zeroed();
+                let big_enough =
+                    libc::fstat(use_fd, &mut st) == 0 && st.st_size >= total_size as libc::off_t;
+                if !big_enough {
+                    libc::close(use_fd);
+                    libc::shm_unlink(cname.as_ptr());
+                    use_fd = libc::shm_open(cname.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o644);
+                    if use_fd < 0 || libc::ftruncate(use_fd, total_size as libc::off_t) < 0 {
+                        if use_fd >= 0 {
+                            libc::close(use_fd);
+                        }
+                        anyhow::bail!(
+                            "recreate failed for {name}: {}",
+                            std::io::Error::last_os_error()
+                        );
+                    }
+                }
             }
-            fd
+            use_fd
         };
 
         // Memory-map the SHM
@@ -188,6 +204,10 @@ impl AudioRingbuf {
             ptr::write_unaligned(ptr.add(16) as *mut u32, channels as u32);
             ptr::write_unaligned(ptr.add(20) as *mut u32, slot_frames);
             ptr::write_unaligned(ptr.add(24) as *mut u32, num_slots);
+            // zero the slot data too: a claimed leftover ring from a
+            // killed session holds that session's audio, and any index
+            // bug would replay it — stale slots must be silence
+            std::ptr::write_bytes(ptr.add(DATA_OFFSET), 0, data_bytes);
         }
 
         Ok(Self {

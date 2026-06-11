@@ -19,6 +19,9 @@ shim = ef.transpose(2400, 600, 12);
 
 // Freeverb tuned small and dark: the wash should sit behind the
 // repeats, not become the patch (raise the wash fader for that).
-wash = re.mono_freeverb(0.70, 0.6, 0.7, 0);
+// mono_freeverb returns the RAW comb sum (classic Freeverb applies a
+// ~0.015 wet scaler outside the kernel) — without the 0.04 here the
+// wash path has ~+28 dB of loop gain and the feedback self-oscillates.
+wash = re.mono_freeverb(0.70, 0.6, 0.7, 0) * 0.04;
 
 process = _ <: shim, wash;
