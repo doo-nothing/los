@@ -1261,7 +1261,11 @@ pub fn run(instance: usize) -> Result<()> {
     state::write_pid_file("envelope", instance);
     let shm_name = format!("/los_audio_envelope_{}", instance);
     let mut manifest = Manifest::open().or_else(|_| Manifest::create())?;
-    let _ = manifest.register("envelope", instance, Some(&shm_name), CLAIMED_OUTPUTS);
+    if let Err(e) = manifest.register("envelope", instance, Some(&shm_name), CLAIMED_OUTPUTS) {
+        // a lost slot means every binding on our outputs goes dead —
+        // say so where a pane capture can see it
+        eprintln!("[envelope {}] manifest registration FAILED: {}", instance, e);
+    }
     let claimed_base = manifest.claimed_base();
 
     for attempt in 0..20 {

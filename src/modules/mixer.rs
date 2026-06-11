@@ -617,8 +617,8 @@ fn mixer_thread(
                 // floor, the melody sits inside it, and the fx returns
                 // ride hot enough to be characters, not seasoning
                 let level = match (entry.module_name.as_str(), entry.instance) {
-                    ("voice", 0) => 0.58,
-                    ("voice", 1) => 0.95,
+                    ("voice", 0) => 0.72,
+                    ("voice", 1) => 0.82,
                     ("delay", _) => 0.9,
                     ("filterbank", _) => 0.85,
                     _ => 0.8,

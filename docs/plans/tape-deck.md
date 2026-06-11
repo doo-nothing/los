@@ -67,10 +67,11 @@ exist.
 ## 5. House wiring ("hit record, get a song")
 
 Window 4 "tape": TAPE + MATHs 3. Fresh sessions arm track 1 to the
-mix with the loop set to the house drone's 16-bar form; the lane
-already evolves the piece, so `r` + 52 seconds = a take. MATHs 3
-stands beside the deck for automation cables (`@` the speed or a
-fader). Export drops `~/Music/los/<name>.wav`.
+mix with loop OFF and the house form running ~7 minutes — `r` captures
+the song top to tail (flip `L` for OP-1-style sound-on-sound looping
+instead). MATHs 3 ch1 ships as a minutes-long swell breathing the
+delay's wash; the rest of it stands ready for automation cables (`@`
+the tape speed or a fader). Export drops `~/Music/los/<name>.wav`.
 
 Plumbing fix that rides along: envelope event-consumer IDs grow to
 instances 0–5 (8..13; 12–13 were reserved) so MATHs 3 consumes notes

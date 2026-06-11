@@ -1263,10 +1263,15 @@ impl ModulationBus {
 
 // ── Manifest ────────────────────────────────────────────────────────────
 
-const MANIFEST_MAX_ENTRIES: usize = 16;
+// v4: 16 → 32. The record window pushed a full house past 16 (the
+// mixer alone holds four entries: itself, two sends, the print bus)
+// and the 17th module silently lost the registration race — envelope 0
+// one boot, muting every voice whose amp rode it. 32 leaves room for
+// tape input claims and spawned extras.
+const MANIFEST_MAX_ENTRIES: usize = 32;
 const MANIFEST_ENTRY_SIZE: usize = 128; // v3: grew from 96 for fx input claims
 const MANIFEST_HEADER_SIZE: usize = 64;
-const MANIFEST_VERSION: u32 = 3;
+const MANIFEST_VERSION: u32 = 4;
 /// Total modbus channels available to the allocator.
 pub const MODBUS_CHANNELS: usize = MODBUS_NUM_CHANNELS;
 
@@ -2485,8 +2490,8 @@ mod shm_tests {
         let _ = unsafe { libc::shm_unlink(CString::new(SHM_MANIFEST_NAME).unwrap().as_ptr()) };
         let mut m = Manifest::create().expect("create manifest");
 
-        // Fill all 16 slots
-        for i in 0..16 {
+        // Fill every slot
+        for i in 0..MANIFEST_MAX_ENTRIES {
             m.register("mod", i, None, 0).expect("register");
         }
 
