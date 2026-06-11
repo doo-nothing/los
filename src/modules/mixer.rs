@@ -573,8 +573,10 @@ fn mixer_thread(
                 continue;
             }
             // the send buses are our own outputs — adopting one would
-            // feed the mix straight back into itself
-            if entry.module_name == "send" {
+            // feed the mix straight back into itself — and envelopes are
+            // control modules: their function-out audio is reachable as
+            // an fx input (or a future VCA), not as a console strip
+            if entry.module_name == "send" || entry.module_name == "envelope" {
                 continue;
             }
             let shm_name = entry.audio_shm.as_ref().unwrap();
@@ -586,20 +588,16 @@ fn mixer_thread(
 
             if let Ok(ringbuf) = AudioRingbuf::open(shm_name) {
                 let label = format!("{} {}", capitalize(&entry.module_name), entry.instance);
-                // The envelope's function out carries raw control
-                // transients (zero-rise strikes = impulses). Its fader
-                // starts DOWN — like an unpatched cable on the hardware —
-                // so those clicks are opt-in, not the default mix.
-                let level = if entry.module_name == "envelope" {
-                    0.0
-                } else {
-                    0.8
-                };
-                // house send defaults: sound sources get a taste of both
-                // fx buses (A = the delay, B = the filterbank in the
-                // fresh session); fx returns and the envelope start dry
+                let level = 0.8;
+                // house send defaults: sound sources feed both fx buses
+                // (A = the delay, B = the filterbank), and the BANK's
+                // return leans into send A — the spectrum echoes through
+                // the delay (the house fx chain). The delay's own return
+                // stays dry: a return feeding its own send is a loop you
+                // should have to ask for.
                 let (sa, sb) = match entry.module_name.as_str() {
-                    "voice" | "tone" | "template" => (0.25, 0.2),
+                    "voice" | "tone" | "template" => (0.3, 0.25),
+                    "filterbank" => (0.3, 0.0),
                     _ => (0.0, 0.0),
                 };
                 inner.audio_sources.push(AudioSource {
@@ -1090,8 +1088,8 @@ fn draw_ui(
                         spans.push(Span::styled(theme::RAIL.to_string(), theme::chrome()));
                     }
                     spans.push(Span::raw(" "));
-                    let m = if *mute { 0.0 } else { *meter };
-                    let (mc, mstyle) = theme::meter_cell(m.min(1.0), fr, fader_rows);
+                    let m = if *mute { 0.0 } else { theme::meter_frac(*meter) };
+                    let (mc, mstyle) = theme::meter_cell(m, fr, fader_rows);
                     spans.push(Span::styled(mc.to_string(), mstyle));
                     spans.push(Span::raw("   "));
                 }
@@ -1159,7 +1157,7 @@ fn draw_ui(
                     theme::chrome()
                 };
                 let mut spans: Vec<Span> = vec![Span::styled(format!(" {:<9}", name), name_style)];
-                let m = if *mute { 0.0 } else { *meter };
+                let m = if *mute { 0.0 } else { theme::meter_frac(*meter) };
                 spans.push(Span::styled(
                     format!("{} ", theme::meter_char(m)),
                     theme::signal(theme::audio()),
@@ -1363,6 +1361,9 @@ pub fn run() -> Result<()> {
     // manifest entries for cable colors (refreshed ~1s)
     let mut ui_entries: Vec<crate::shm::ManifestEntry> = Vec::new();
     let mut ui_entries_at: Option<std::time::Instant> = None;
+    // the fader currently held by the mouse (Down in a fader area grabs
+    // it; Up releases) — drags adjust only this one
+    let mut grabbed: Option<usize> = None;
 
     loop {
         if state::check_save_signal() {
@@ -1423,41 +1424,55 @@ pub fn run() -> Result<()> {
                             history.record(slot, "Adjust", old, new);
                         }
                     }
-                    MouseEventKind::Down(_) | MouseEventKind::Drag(_) => {
-                        // console mode: the column picks the strip; in the
-                        // fader area, click/drag throws the fader to the
-                        // pointer's row (sweeps coalesce into one undo)
-                        use crate::undo::{ParamUndo, ParamValue};
+                    MouseEventKind::Down(_) => {
+                        // click selects; clicking a fader GRABS it (no
+                        // jump — like touching a cap, not throwing it)
                         let h = terminal.size().map(|r| r.height as usize).unwrap_or(0);
                         let mut s = inner.lock().unwrap();
                         let strip = (m.column as usize) / STRIP_W;
                         if strip > s.tracks.len() {
                             continue;
                         }
-                        if matches!(m.kind, MouseEventKind::Down(_)) {
-                            s.selected = strip;
-                        }
+                        s.selected = strip;
                         let rows = fader_rows_for(h);
-                        let row = m.row as usize;
-                        if h >= CONSOLE_MIN_H && (FADER_TOP..FADER_TOP + rows).contains(&row) {
-                            s.selected = strip;
+                        if h >= CONSOLE_MIN_H
+                            && (FADER_TOP..FADER_TOP + rows).contains(&(m.row as usize))
+                        {
                             s.selected_param = STRIP_ROWS.len() - 1; // the fader
-                            let value = 1.0 - (row - FADER_TOP) as f32 / (rows - 1) as f32;
-                            let slot = if strip < s.tracks.len() {
-                                strip * STRIDE
-                            } else {
-                                MASTER_SLOT
-                            };
-                            let old = s.get_param(slot);
-                            if strip < s.tracks.len() {
-                                s.tracks[strip].strip.set(Param::Level, value);
-                            } else {
-                                s.master.set(Param::Level, value);
-                            }
-                            if let Some(old) = old {
-                                history.record(slot, "Fader", old, ParamValue::F32(value));
-                            }
+                            grabbed = Some(strip);
                         }
+                    }
+                    MouseEventKind::Drag(_) => {
+                        // only the grabbed fader follows the pointer, and
+                        // only vertically — crossing other strips must
+                        // never throw THEIR faders
+                        let Some(strip) = grabbed else { continue };
+                        use crate::undo::{ParamUndo, ParamValue};
+                        let h = terminal.size().map(|r| r.height as usize).unwrap_or(0);
+                        let rows = fader_rows_for(h);
+                        if h < CONSOLE_MIN_H || rows < 2 {
+                            continue;
+                        }
+                        let row = (m.row as usize).clamp(FADER_TOP, FADER_TOP + rows - 1);
+                        let value = 1.0 - (row - FADER_TOP) as f32 / (rows - 1) as f32;
+                        let mut s = inner.lock().unwrap();
+                        let slot = if strip < s.tracks.len() {
+                            strip * STRIDE
+                        } else {
+                            MASTER_SLOT
+                        };
+                        let old = s.get_param(slot);
+                        if strip < s.tracks.len() {
+                            s.tracks[strip].strip.set(Param::Level, value);
+                        } else {
+                            s.master.set(Param::Level, value);
+                        }
+                        if let Some(old) = old {
+                            history.record(slot, "Fader", old, ParamValue::F32(value));
+                        }
+                    }
+                    MouseEventKind::Up(_) => {
+                        grabbed = None;
                     }
                     _ => {}
                 }

@@ -83,6 +83,13 @@ src/
   session/    save/load state, house layout, tmux wrapper
 ```
 
+Fresh sessions open already playing **the house drone** — a slow,
+evolving A-minor piece (74 BPM) that runs itself: the macro lane walks
+pattern slots a–d through a 16-bar form, probability and ratchets keep
+it alive, a drunk modulation track strolls the filterbank's window,
+and the ping-pong bass runs 12 steps against 16. It's a worked example
+of the sequencer's depth as much as a patch.
+
 Fx modules (the **delay**, after the Buchla 288, and the
 **filterbank**, after the 296e) consume any audio source you point them
 at — a voice directly (insert: that strip leaves the console), or one
