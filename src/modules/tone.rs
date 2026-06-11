@@ -13,7 +13,11 @@ pub fn run(frequency: f32, instance: usize) -> Result<()> {
     let mut manifest = Manifest::open().or_else(|_| Manifest::create())?;
     manifest.register("tone", instance, Some(&shm_name), 0)?;
 
-    let sample_rate = 48000.0;
+    // read the device's real rate when a session is up (test tones should
+    // be in tune too); 48k only as the no-mixer fallback
+    let sample_rate = crate::shm::ShmTransport::open()
+        .map(|t| f64::from(t.sample_rate()).max(1.0))
+        .unwrap_or(48000.0);
     let channels = ringbuf.channels() as usize;
     let slot_frames = ringbuf.slot_frames() as usize;
     let slot_len = ringbuf.slot_len();

@@ -123,7 +123,7 @@ fn voice_thread(
     let mut events = EventRingbuf::open(consumer_id).ok();
     let mut modbus = ModulationBus::open().or_else(|_| ModulationBus::create()).ok();
 
-    let _transport = ShmTransport::open()
+    let transport = ShmTransport::open()
         .or_else(|_| ShmTransport::create(48000))?;
 
     let mut phase = 0.0f64;
@@ -133,7 +133,10 @@ fn voice_thread(
     let mut level_smooth = 0.0f32;
     let mut lp_state = 0.0f32;
 
-    let sample_rate = 48000.0;
+    // the mixer publishes the device's REAL rate once cpal answers; a
+    // 48k assumption on a 44.1k device plays every pitch ~1.5 semitones
+    // flat (samples are consumed at the device rate, not ours)
+    let mut sample_rate = f64::from(transport.sample_rate()).max(1.0);
     let block_size = 64;
 
     // Resolved modbus channels for each binding; refreshed periodically so a
@@ -161,6 +164,9 @@ fn voice_thread(
         // Re-resolve bindings through the manifest (~every 256 blocks)
         if refresh_in == 0 {
             refresh_in = 256;
+            // pick up the device rate (the mixer may publish it after we
+            // start; a mixer respawn may change it)
+            sample_rate = f64::from(transport.sample_rate()).max(1.0);
             let entries = manifest.entries();
             let s = state.lock().unwrap();
             ch_shape = s.shape_src.as_ref().and_then(|a| routing::resolve(&entries, a));
@@ -270,7 +276,8 @@ fn voice_thread(
                 // 25Hz closed to ~12kHz open — and the VCA leans on the
                 // filter (gain ~ sqrt(level)) like a vactrol LPG.
                 let fc = lpg_cutoff(level_smooth);
-                let g = 1.0 - (-2.0 * std::f32::consts::PI * fc / 48000.0).exp();
+                let g = 1.0
+                    - (-2.0 * std::f32::consts::PI * fc / sample_rate as f32).exp();
                 lp_state += (sample - lp_state) * g;
                 let plain = sample * level_smooth;
                 let gated = lp_state * level_smooth.max(0.0).sqrt();

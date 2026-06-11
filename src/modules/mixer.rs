@@ -257,6 +257,11 @@ fn mixer_thread(
     let sample_rate = config.sample_rate().0;
     let slot_len = 128; // max 64 frames * 2 channels
 
+    // The mixer owns the clock, so it owns the rate: publish the device's
+    // real one. The create(48000) above is just a placeholder for the
+    // moments before cpal answers (and 44.1k Macs ran ~9% slow on it).
+    transport.set_sample_rate(sample_rate);
+
     let state_cb = Arc::clone(&state);
     let fs = sample_rate as f32;
     let mut chain: Vec<dsp::ChannelDsp> = Vec::new();

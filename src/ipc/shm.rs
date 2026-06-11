@@ -454,6 +454,16 @@ impl ShmTransport {
         unsafe { ptr::read_unaligned(self.ptr.add(8) as *const u32) }
     }
 
+    /// Publish the REAL device rate (the mixer calls this once its cpal
+    /// config is known). The clock counts device frames, so a stale rate
+    /// here skews every bpm-derived duration in wall-clock terms.
+    pub fn set_sample_rate(&mut self, rate: u32) {
+        if rate > 0 {
+            unsafe { ptr::write_unaligned(self.ptr.add(8) as *mut u32, rate) };
+            compiler_fence(Ordering::Release);
+        }
+    }
+
     pub fn playing(&self) -> bool {
         let flags: u32 = unsafe { ptr::read_unaligned(self.ptr.add(12) as *const u32) };
         flags & 1 != 0
