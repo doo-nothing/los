@@ -933,7 +933,7 @@ fn param_text(p: Param, v: f32) -> String {
 
 /// Full-console minimum height: header + name + 6 param rows + 3 fader
 /// rows + % + MS + rule + status.
-const CONSOLE_MIN_H: usize = 15;
+const CONSOLE_MIN_H: usize = 17; // header+name+8 rows+3 fader+pct+MS+rule+status
 const STRIP_W: usize = 9;
 
 fn draw_ui(
@@ -985,7 +985,7 @@ fn draw_ui(
         let console = h >= CONSOLE_MIN_H && w >= strips.len() * STRIP_W && !strips.is_empty();
         if console {
             // ── the console: vertical strips ────────────────────────────
-            let fader_rows = (h - 12).clamp(3, 8);
+            let fader_rows = (h - 14).clamp(3, 8);
             let mut name_spans: Vec<Span> = Vec::new();
             for (name, _, _, _, _, sel, _) in &strips {
                 let mut nm = format!(" {}", name);

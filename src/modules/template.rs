@@ -771,7 +771,9 @@ pub fn run(instance: usize) -> Result<()> {
     // slot is reaped and the mixer drops our strip — exactly what should
     // happen. The UI keeps its own read-only manifest handle.
     let audio_state = Arc::clone(&shared);
-    thread::spawn(move || {
+    let audio_builder =
+        thread::Builder::new().name(String::from("template-audio")).stack_size(4 * 1024 * 1024);
+    let _ = audio_builder.spawn(move || {
         if let Err(e) = audio_thread(audio_state, instance) {
             eprintln!("[template {}] audio thread error: {}", instance, e);
         }

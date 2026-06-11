@@ -1070,7 +1070,15 @@ pub fn run(instance: usize) -> Result<()> {
     // manifest at once), so a failure retries instead of dying silent —
     // and persistent errors land in a tmp file the user can find.
     let audio_state = Arc::clone(&shared);
-    thread::spawn(move || {
+    // A named builder with a roomy stack: generated Faust cores hold
+    // their delay lines as big inline arrays (tap8fx ≈ 800 KB), and a
+    // debug build materializes extra copies constructing them — the
+    // default 2 MB thread stack overflowed and took the whole process
+    // (and its pane) down.
+    let audio_builder = thread::Builder::new()
+        .name(String::from("delay-audio"))
+        .stack_size(8 * 1024 * 1024);
+    let _ = audio_builder.spawn(move || {
         let err_path = state::tmp_dir().join(format!("delay_{}.err", instance));
         let _ = std::fs::remove_file(&err_path);
         loop {
