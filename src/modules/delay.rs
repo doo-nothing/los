@@ -353,6 +353,8 @@ fn src_slot_at(s: &DelayState) -> Option<usize> {
 
 fn adjust(s: &mut DelayState, steps: i32, coarse: bool) -> Option<String> {
     use crate::keys::step_f32;
+    // fine = 1% of the range, coarse = 5%
+    let u = |fine: f32, coarse_u: f32| if coarse { coarse_u } else { fine };
     if s.selected == GLOBAL_STRIP {
         match GLOBAL_ROWS[s.sel_row.min(GLOBAL_ROWS.len() - 1)] {
             GlobalRow::Input => {
@@ -361,13 +363,14 @@ fn adjust(s: &mut DelayState, steps: i32, coarse: bool) -> Option<String> {
             GlobalRow::Time => {
                 // adjust in the exponential norm domain so steps feel
                 // even from 1 ms to 250 ms
-                let n = step_f32(dsp::norm_from_time(s.time), steps, 0.02, coarse, 0.0, 1.0);
+                let n =
+                    step_f32(dsp::norm_from_time(s.time), steps, u(0.01, 0.05), false, 0.0, 1.0);
                 s.time = dsp::time_from_norm(n);
             }
-            GlobalRow::Regen => s.regen = step_f32(s.regen, steps, 0.05, coarse, 0.0, 1.0),
-            GlobalRow::Shim => s.shim = step_f32(s.shim, steps, 0.05, coarse, 0.0, 1.0),
-            GlobalRow::Wash => s.wash = step_f32(s.wash, steps, 0.05, coarse, 0.0, 1.0),
-            GlobalRow::Dry => s.dry = step_f32(s.dry, steps, 0.05, coarse, 0.0, 1.0),
+            GlobalRow::Regen => s.regen = step_f32(s.regen, steps, u(0.01, 0.05), false, 0.0, 1.0),
+            GlobalRow::Shim => s.shim = step_f32(s.shim, steps, u(0.01, 0.05), false, 0.0, 1.0),
+            GlobalRow::Wash => s.wash = step_f32(s.wash, steps, u(0.01, 0.05), false, 0.0, 1.0),
+            GlobalRow::Dry => s.dry = step_f32(s.dry, steps, u(0.01, 0.05), false, 0.0, 1.0),
             GlobalRow::Taps => {
                 s.taps = (s.taps as i64 + steps as i64).clamp(1, MAX_TAPS as i64) as usize;
             }
@@ -375,9 +378,9 @@ fn adjust(s: &mut DelayState, steps: i32, coarse: bool) -> Option<String> {
     } else {
         let t = &mut s.tap[s.selected];
         match TAP_ROWS[s.sel_row.min(TAP_ROWS.len() - 1)] {
-            TapRow::Pan => t.pan = step_f32(t.pan, steps, 0.05, coarse, -1.0, 1.0),
+            TapRow::Pan => t.pan = step_f32(t.pan, steps, u(0.02, 0.10), false, -1.0, 1.0),
             TapRow::Phase => t.phase = crate::keys::cycle(t.phase, steps, PHASES.len()),
-            TapRow::Level => t.level = step_f32(t.level, steps, 0.05, coarse, 0.0, 1.0),
+            TapRow::Level => t.level = step_f32(t.level, steps, u(0.01, 0.05), false, 0.0, 1.0),
         }
     }
     None
@@ -668,6 +671,14 @@ fn audio_thread(shared: Arc<Mutex<DelayState>>, instance: usize) -> Result<()> {
 const TAP_W: usize = 6;
 const PANEL_W: usize = 26;
 const CONSOLE_MIN_H: usize = 12;
+/// First fader row in console mode: header + names + pan + phase.
+const FADER_TOP: usize = 4;
+
+/// Fader geometry from the pane height — one function for the renderer
+/// and the mouse hit-test.
+fn fader_rows_for(h: usize) -> usize {
+    h.saturating_sub(9).clamp(3, 8)
+}
 
 fn time_text(t: f32) -> String {
     let ms = t * 1000.0;
@@ -777,7 +788,7 @@ fn draw_ui(
 
         let console = h >= CONSOLE_MIN_H && w >= MAX_TAPS * TAP_W + 3 + PANEL_W;
         if console {
-            let fader_rows = (h - 9).clamp(3, 8);
+            let fader_rows = fader_rows_for(h);
             let sep = || Span::styled(" │", theme::chrome());
             // names
             let mut spans: Vec<Span> = Vec::new();
@@ -789,7 +800,9 @@ fn draw_ui(
                 let style = if i == s.selected {
                     theme::selected()
                 } else if i < s.taps {
-                    theme::chrome_hi()
+                    // the CV teal ramp doubles as echo depth: T1 bright,
+                    // T8 deep in the tail
+                    theme::signal(theme::cv_ramp(1.0 - i as f32 / (MAX_TAPS - 1) as f32))
                 } else {
                     theme::dim()
                 };
@@ -850,7 +863,9 @@ fn draw_ui(
                 lines.push(Line::from(spans));
             }
 
-            // fader rows: follower meter fill, level tick, ghost when bound
+            // the tap faders: a knob on a rail beside that tap's
+            // envelope-follower ladder — the echo pattern as a row of
+            // breathing LED meters
             let row_of =
                 |v: f32| ((1.0 - v.clamp(0.0, 1.0)) * (fader_rows - 1) as f32).round() as usize;
             for fr in 0..fader_rows {
@@ -858,27 +873,30 @@ fn draw_ui(
                 for (i, t) in s.tap.iter().enumerate() {
                     let bound = t.srcs[1].is_some();
                     let live = t.eff[1];
-                    let meter = s.followers[i + 1].min(1.0);
-                    let tick = fr == row_of(t.level);
-                    let ghost = bound && fr == row_of(live);
-                    let fill = i < s.taps && meter > 0.005 && fr >= row_of(meter);
-                    let (ch, style) = if ghost {
-                        (theme::GHOST, theme::signal(theme::clock()))
-                    } else if tick {
-                        (
-                            '█',
-                            if i == s.selected {
-                                theme::selected()
-                            } else {
-                                theme::value()
-                            },
-                        )
-                    } else if fill {
-                        ('▓', theme::signal(theme::audio()))
+                    let meter = if i < s.taps { s.followers[i + 1].min(1.0) } else { 0.0 };
+                    spans.push(Span::raw("  "));
+                    if bound && fr == row_of(live) {
+                        let cable = t.srcs[1]
+                            .as_ref()
+                            .map(|a| routing::cable_color(entries, a))
+                            .unwrap_or_else(theme::clock);
+                        spans.push(Span::styled(theme::GHOST.to_string(), theme::signal(cable)));
+                    } else if let Some(knob) = theme::knob_cell(t.level, fr, fader_rows) {
+                        let style = if i == s.selected {
+                            theme::selected()
+                        } else if i < s.taps {
+                            theme::value()
+                        } else {
+                            theme::dim()
+                        };
+                        spans.push(Span::styled(knob.to_string(), style));
                     } else {
-                        ('·', theme::dim())
-                    };
-                    spans.push(Span::styled(format!("   {}  ", ch), style));
+                        spans.push(Span::styled(theme::RAIL.to_string(), theme::chrome()));
+                    }
+                    spans.push(Span::raw(" "));
+                    let (mc, mstyle) = theme::meter_cell(meter, fr, fader_rows);
+                    spans.push(Span::styled(mc.to_string(), mstyle));
+                    spans.push(Span::raw(" "));
                 }
                 spans.push(sep());
                 spans.extend(panel_line(panel_row));
@@ -986,7 +1004,7 @@ fn draw_ui(
                 Line::from(""),
                 Line::from("  h/l        Select strip (taps T1–T8, then GLOBAL)"),
                 Line::from("  j/k        Select row (taps: pan·phs·lvl)"),
-                Line::from("  - / =      Adjust (_/+ or H/L coarse, counts)"),
+                Line::from("  K/J or =/- Adjust 1% (up/down; _/+ = 5%, counts)"),
                 Line::from("  0          Reset row · m cycle tap phase (+ · −)"),
                 Line::from("  @          Bind a mod source (input row: pick the"),
                 Line::from("             audio source to consume) · x unbinds"),
@@ -1189,15 +1207,33 @@ pub fn run(instance: usize) -> Result<()> {
                         ex_msg = msg;
                     }
                 }
-                MouseEventKind::Down(_) => {
+                MouseEventKind::Down(_) | MouseEventKind::Drag(_) => {
+                    use crate::undo::{ParamUndo, ParamValue};
+                    let h = terminal.size().map(|r| r.height as usize).unwrap_or(0);
                     let mut s = shared.lock().unwrap();
                     let col = m.column as usize;
-                    if col < MAX_TAPS * TAP_W {
-                        s.selected = col / TAP_W;
-                    } else {
-                        s.selected = GLOBAL_STRIP;
+                    let strip = if col < MAX_TAPS * TAP_W { col / TAP_W } else { GLOBAL_STRIP };
+                    if matches!(m.kind, MouseEventKind::Down(_)) {
+                        s.selected = strip;
+                        s.sel_row = s.sel_row.min(s.rows_in(s.selected) - 1);
                     }
-                    s.sel_row = s.sel_row.min(s.rows_in(s.selected) - 1);
+                    // click/drag in the fader area throws that tap's fader
+                    let rows = fader_rows_for(h);
+                    let row = m.row as usize;
+                    if strip < MAX_TAPS
+                        && h >= CONSOLE_MIN_H
+                        && (FADER_TOP..FADER_TOP + rows).contains(&row)
+                    {
+                        s.selected = strip;
+                        s.sel_row = TAP_ROWS.len() - 1; // the fader row
+                        let value = 1.0 - (row - FADER_TOP) as f32 / (rows - 1) as f32;
+                        let slot = strip * TAP_STRIDE + 2;
+                        let old = s.get_param(slot);
+                        s.tap[strip].level = value.clamp(0.0, 1.0);
+                        if let Some(old) = old {
+                            history.record(slot, "Fader", old, ParamValue::F32(value));
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -1361,12 +1397,12 @@ pub fn run(instance: usize) -> Result<()> {
                 let rows = s.rows_in(s.selected);
                 s.sel_row = crate::keys::cycle(s.sel_row.min(rows - 1), -n, rows);
             }
-            KeyCode::Char(c @ ('-' | '=' | '_' | '+' | 'H' | 'L')) => {
+            KeyCode::Char(c @ ('-' | '=' | '_' | '+' | 'J' | 'K')) => {
                 let n = count.take() as i32;
                 let (steps, coarse) = match c {
-                    '-' => (-n, false),
-                    '=' => (n, false),
-                    '_' | 'H' => (-n, true),
+                    '-' | 'J' => (-n, false),
+                    '=' | 'K' => (n, false),
+                    '_' => (-n, true),
                     _ => (n, true),
                 };
                 use crate::undo::ParamUndo;
@@ -1689,7 +1725,9 @@ mod tests {
         s.selected = 2;
         s.sel_row = 0;
         adjust(&mut s, -4, false);
-        assert!((s.tap[2].pan + 0.2).abs() < 1e-6);
+        assert!((s.tap[2].pan + 0.08).abs() < 1e-6, "pan fine = 0.02");
+        adjust(&mut s, -2, true);
+        assert!((s.tap[2].pan + 0.28).abs() < 1e-6, "pan coarse = 0.10");
         s.sel_row = 1;
         adjust(&mut s, 1, false);
         assert_eq!(s.tap[2].phase, 1, "phase cycles to off");

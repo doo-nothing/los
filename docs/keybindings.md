@@ -12,7 +12,7 @@ Status markers: **✅ today** · **🔜 v1** (see `docs/plans/v1-polish.md`) ·
 |------|---------|
 | Axis rule | Navigate along the module's visual layout axis; adjust on the perpendicular. Vertical param list → j/k select, h/l adjust. Horizontal strip (sequencer steps) → h/l select, j/k adjust. 2D grids (mixer console) → h/l and j/k both navigate; a dedicated adjust key (`-`/`=`) turns the knob. |
 | Counts | A number prefix repeats any nav/adjust key: `5l`, `3j`, `10u`. ✅ |
-| Coarse | Shift-variant of an adjust key = ~10× step: `L` vs `l` (mixer: `_`/`+`). ✅ |
+| Coarse | Shift-variant of an adjust key = a bigger step. Console modules (mixer, delay, filterbank): fine is **1%** on `K`/`J` (up/down — vertical keys for vertical faders) or `=`/`-`; coarse is **5%** on `_`/`+`. List modules keep `h/l` fine, `H/L` ~10×. ✅ |
 | `?` | Help overlay. ✅ |
 | `Ctrl-s` | Save module state. ✅ |
 | `Space` | Global transport play/pause (except sequencer insert mode); also `Ctrl-b p`/`Ctrl-b s` and `los ctl`. ✅ |
@@ -208,13 +208,13 @@ drive → EQ → pan → fader; the meter lives inside the fader. All ✅:
 |-----|--------|
 | `h` / `l` | select strip (channels, then MASTER; counts, wraps) |
 | `j` / `k` | select param within the strip (counts, wraps) |
-| `-` / `=` | adjust the selected param (counts) |
-| `_` / `+` (or `H`/`L`) | coarse adjust |
+| `K` / `J` (or `=`/`-`) | adjust the selected param 1% up / down (counts) |
+| `_` / `+` | coarse adjust, 5% |
 | `0` | reset the selected param to its default |
 | `@` | bind a mod source to the selected param · `x` unbinds |
 | `m` / `s` | mute / solo the selected strip |
 | `gg` / `G` | first strip / MASTER |
-| mouse | wheel turns the selected knob · click selects a strip |
+| mouse | wheel = 1% · click selects a strip · click/drag in the fader area throws that fader |
 
 Every strip param — drive, EQ gains, mid freq, pan, fader, master
 width — is mod-bindable; bound values render in the source's cable
@@ -243,8 +243,8 @@ The time domain processor (after the Buchla 288 —
 [the design doc](plans/delay-288.md)). A little console: strips T1–T8
 (rows pan · phase · level, the fader's meter is that tap's envelope
 follower) plus GLOBAL (input · time · regen · shim · wash · dry ·
-taps). Mixer dialect: `h/l` strip · `j/k` row · `-`/`=` adjust
-(`_`/`+`/`H`/`L` coarse, counts) · `0` reset · `m` cycle tap phase
+taps). Mixer dialect: `h/l` strip · `j/k` row · `K`/`J` (or `=`/`-`)
+adjust 1% (`_`/`+` 5%, counts) · `0` reset · `m` cycle tap phase
 (+ · −, off is the mute) · `@` bind a mod source — on the input row it
 picks the audio source to consume (the patch cable into the module) ·
 `x` unbind/unpatch · `gg/G` · `:set time 120ms|regen 35|taps 4|input
@@ -254,10 +254,10 @@ publish as `delay/N/in` + `t1`–`t8`. All ✅
 ### Filterbank
 The spectral processor (after the Buchla 296e —
 [the design doc](plans/filterbank-296e.md)). The slider wall: strips
-b1–b16 (one fader each; the meter inside is that band's envelope
-follower) plus GLOBAL (input · morph · xfer · frz · wcent · wwide ·
+b1–b16 (a fader on its rail beside that band's envelope-follower LED
+ladder, names tinted by the pitch wheel) plus GLOBAL (input · morph · xfer · frz · wcent · wwide ·
 sprd · split · dry · decay). Mixer dialect: `h/l` strip · `j/k` global
-row · `-`/`=` adjust (coarse/counts as everywhere) · `0` reset · `b`
+row · `K`/`J` or `=`/`-` adjust 1% (`_`/`+` 5%, counts) · `0` reset · `b`
 edit bank A ↔ B (morph crossfades the two spectra) · `f` freeze (latch
 the followers — spectral hold) · `@` bind (band fader: its CV in; input
 row: pick the audio source) · `x` unbind/unpatch · `gg/G` · `:set morph
@@ -297,8 +297,8 @@ separate feature:
 Per module: **sequencer** wheel = step nav, click = select step in the
 visible window (identical geometry to the renderer, long tracks included) ·
 **maths** click on the overview line selects a channel, click on detail rows
-selects params, Trig/Sig rows open on click · **mixer** click/drag on a
-strip's bar sets level · **scope** wheel adjusts and wakes the param strip ·
+selects params, Trig/Sig rows open on click · **mixer/delay/filterbank** click/drag
+in the fader area throws that fader (console mode) · **scope** wheel adjusts and wakes the param strip ·
 **conductor/badge** keyboard-first, no mouse surface.
 
 Everything the mouse does is undoable exactly like its keyboard twin.
