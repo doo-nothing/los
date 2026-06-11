@@ -715,10 +715,28 @@ fn render(s: &TapeState) -> (Vec<f32>, u64) {
     (out, frames)
 }
 
+/// Seconds of fade-in applied to exports (the tape itself stays raw —
+/// bounces don't fade).
+const EXPORT_FADE_IN: f32 = 4.0;
+/// A short tail fade so an export never ends on a click.
+const EXPORT_FADE_OUT: f32 = 1.5;
+
 /// Export the tape to ~/Music/los/tape-<n>.wav. Returns the path.
 fn export(s: &TapeState) -> Result<PathBuf> {
-    let (mix, frames) = render(s);
+    let (mut mix, frames) = render(s);
     anyhow::ensure!(frames > 0, "the tape is empty");
+    // fades: squared-linear in (smooth from silence), linear out
+    let fin = ((EXPORT_FADE_IN * s.rate) as usize * 2).min(mix.len());
+    for (i, v) in mix.iter_mut().enumerate().take(fin) {
+        let g = (i / 2) as f32 / (fin / 2).max(1) as f32;
+        *v *= g * g;
+    }
+    let fout = ((EXPORT_FADE_OUT * s.rate) as usize * 2).min(mix.len());
+    let start = mix.len() - fout;
+    for i in 0..fout {
+        let g = 1.0 - (i / 2) as f32 / (fout / 2).max(1) as f32;
+        mix[start + i] *= g;
+    }
     let dir = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
         .join("Music")
         .join("los");
@@ -2038,6 +2056,28 @@ mod tests {
         s2.tape_len = 1000;
         journal_recover(&mut s2);
         assert_eq!(s2.tracks[tr].filled, 0, "journal gone after clean save");
+    }
+
+    #[test]
+    fn export_fades_in_and_out() {
+        let mut s = TapeState::new();
+        s.rate = 1000.0; // tiny rate keeps the test fast
+        s.tape_len = 20_000;
+        let mut a = vec![20_000i16; 24_000]; // 12 s of constant tone
+        a.iter_mut().skip(1).step_by(2).for_each(|v| *v = 20_000);
+        s.tracks[0].audio = Some(a);
+        s.tracks[0].filled = 12_000;
+        s.tracks[0].fader = 1.0;
+        let path = export(&s).expect("export");
+        let mut rd = hound::WavReader::open(&path).expect("open");
+        let samples: Vec<i16> = rd.samples::<i16>().map(|x| x.unwrap()).collect();
+        let n = samples.len();
+        assert!(samples[2].abs() < 200, "starts from silence");
+        let early = samples[(2.0 * 1000.0) as usize * 2].abs(); // t = 2 s, mid-fade
+        let mid = samples[n / 2].abs(); // well past the fade
+        assert!(early > 200 && early < mid, "rising through the fade-in");
+        assert!(samples[n - 2].abs() < mid / 4, "tail fades toward silence");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
