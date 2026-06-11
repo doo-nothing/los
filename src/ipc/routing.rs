@@ -48,6 +48,7 @@ pub fn output_labels(module: &str) -> &'static [&'static str] {
             "ch1", "ch2", "ch3", "ch4", "ch5", "ch6", "sum", "or", "and", "inv", "eor", "eoc",
         ],
         "template" => &["lfo"],
+        "swarm" => &["swl"],
         "delay" => &["in", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"],
         "filterbank" => &[
             "b1", "b2", "b3", "b4", "b5", "b6", "b7", "b8", "b9", "b10", "b11", "b12", "b13",

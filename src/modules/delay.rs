@@ -639,6 +639,16 @@ fn audio_thread(shared: Arc<Mutex<DelayState>>, instance: usize) -> Result<()> {
         };
 
         core.process_block(&mut block, &p, &mut fx);
+        // NaN watchdog: feedback lines latch NaN forever once poisoned
+        // (one bad upstream block is enough). Ship silence and rebuild.
+        if block.iter().any(|s| !s.is_finite()) {
+            block.fill(0.0);
+            core = dsp::DelayCore::new(sample_rate, slot_frames);
+            fx = tap8fx::Tap8Fx::new();
+            fx.init(sample_rate as i32);
+            let t = { shared.lock().unwrap().time };
+            core.snap_time(t);
+        }
 
         // Publish the followers — the MDP's rhythm-section-of-CVs trick.
         let f = core.followers();

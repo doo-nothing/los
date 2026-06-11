@@ -417,6 +417,40 @@ pub struct TemplateParams {
     pub level_src: Option<String>,
 }
 
+/// The swarm voice (modules/swarm.rs) — the CS-80-flavored brass pad:
+/// chord by name ("min7"), the five knobs, glide, and the three kinds
+/// of binding (knob sources, amp, notes).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SwarmParams {
+    #[serde(default)]
+    pub format: u32,
+    /// Chord spread by name ("oct"), not index — saves stay readable
+    /// and survive reordering the chord table.
+    pub chord: Option<String>,
+    pub detune: Option<f32>,
+    pub cutoff: Option<f32>,
+    pub res: Option<f32>,
+    pub swell: Option<f32>,
+    pub glide: Option<f32>,
+    pub level: Option<f32>,
+    pub freq: Option<f32>,
+    pub gate: Option<bool>,
+    #[serde(default)]
+    pub detune_src: Option<String>,
+    #[serde(default)]
+    pub cutoff_src: Option<String>,
+    #[serde(default)]
+    pub res_src: Option<String>,
+    #[serde(default)]
+    pub swell_src: Option<String>,
+    #[serde(default)]
+    pub level_src: Option<String>,
+    #[serde(default)]
+    pub amp_src: Option<String>,
+    #[serde(default)]
+    pub notes_src: Option<String>,
+}
+
 /// The tape deck (modules/tape.rs — docs/plans/tape-deck.md). Audio
 /// lives as WAVs under ~/.config/los/tape/, not in TOML.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

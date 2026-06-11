@@ -31,7 +31,7 @@ pub mod ui;
 
 pub use ipc::{routing, shm};
 pub use modules::{
-    badge, conductor, delay, envelope, filterbank, mixer, scope, sequencer, tape, template,
+    badge, conductor, delay, envelope, filterbank, mixer, scope, sequencer, swarm, tape, template,
     tone, voice,
 };
 pub use session::{layout, state, tmux};

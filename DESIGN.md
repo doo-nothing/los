@@ -591,6 +591,7 @@ by a trait or framework. The sections below describe what each phase must do and
 | template  | Create `/los_audio_template_N` | —                | Open (play/pause)  | Open (write 1 ch)     | Register  |
 | delay     | Create `/los_audio_delay_N`; consumes one claimed ring | — | Open (play/pause) | Open (write 9 ch) | Register + publish_input |
 | filterbank| Create `/los_audio_filterbank_N`; consumes one claimed ring | — | Open (play/pause) | Open (write 16 ch) | Register + publish_input |
+| swarm     | Create `/los_audio_swarm_N` | Open consumer 7−N   | Open (read rate)   | Open (write 1 ch: swl)| Register  |
 | (mixer) sends | Create `/los_send_a` + `/los_send_b` (post-fader buses) | — | — | — | 2 extra entries: send/0, send/1 |
 | conductor | —                           | —                   | —                  | —                     | Create+Open |
 
