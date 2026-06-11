@@ -761,8 +761,8 @@ fn write_house_patch() {
     a[14] = StepParam { delay: 45.0, delay_prob: 80, ..maybe(59, 55, 45) }; // late B3 ornament
 
     let mut b = vec![off(); 16];
-    for (i, n, v) in [(0usize, 57u8, 108u8), (2, 60, 78), (4, 64, 92), (6, 67, 72),
-        (8, 69, 100), (10, 67, 70), (12, 64, 86), (14, 60, 66)]
+    for (i, n, v) in [(0usize, 57u8, 120u8), (2, 60, 86), (4, 64, 104), (6, 67, 80),
+        (8, 69, 112), (10, 67, 78), (12, 64, 96), (14, 60, 72)]
     {
         b[i] = note(n, v);
     }
@@ -845,6 +845,15 @@ fn write_house_patch() {
     bass[4] = maybe(40, 72, 85); // E2
     bass[8] = maybe(43, 58, 60); // G2
     bass[10] = StepParam { delay: 55.0, delay_unit: DelayUnit::Pct, delay_prob: 100, ..maybe(38, 56, 45) }; // pushed D2 lean-in
+
+    // the peak riff: denser, hotter — macro f swaps it in, a/e/h swap out
+    let mut bass_peak = vec![off(); 12];
+    bass_peak[0] = note(33, 115); // A1, leaning in
+    bass_peak[2] = maybe(33, 84, 70);
+    bass_peak[4] = note(40, 104); // E2
+    bass_peak[6] = maybe(43, 80, 80); // G2
+    bass_peak[8] = note(45, 96); // A2
+    bass_peak[10] = maybe(38, 92, 85); // D2
     let t3 = TrackParam {
         steps: bass,
         length: Some(12),
@@ -858,7 +867,13 @@ fn write_house_patch() {
         scale_period: None,
         root: None,
         active_slot: 0,
-        slots: vec![],
+        slots: vec![SlotParam {
+            slot: 1,
+            steps: bass_peak,
+            length: Some(12),
+            pulses: None,
+            rotation: None,
+        }],
         swing: 54,
         groove: None,
         humanize: 1.5,
@@ -879,6 +894,7 @@ fn write_house_patch() {
         // a — the theme: both voices, ping-pong bass, home tempo
         mac("a", vec![
             MacroCmd::SwitchPattern { track: 0, slot: 0 },
+            MacroCmd::SwitchPattern { track: 2, slot: 0 },
             MacroCmd::SetMute { track: 0, muted: false },
             MacroCmd::SetMute { track: 2, muted: false },
             MacroCmd::SetCycle { track: 2, mode: CycleMode::PingPong },
@@ -905,14 +921,16 @@ fn write_house_patch() {
         ]),
         // e — BASS ONLY: melody out, bass walks forward, slow
         mac("e", vec![
+            MacroCmd::SwitchPattern { track: 2, slot: 0 },
             MacroCmd::SetMute { track: 0, muted: true },
             MacroCmd::SetMute { track: 2, muted: false },
             MacroCmd::SetCycle { track: 2, mode: CycleMode::Forward },
             MacroCmd::SetBpm { bpm: 64.0 },
         ]),
-        // f — the peak: fast, arp on, drunk bass
+        // f — the peak: fast, arp on, the bass riff in, drunk motion
         mac("f", vec![
             MacroCmd::SwitchPattern { track: 0, slot: 1 },
+            MacroCmd::SwitchPattern { track: 2, slot: 1 },
             MacroCmd::SetMute { track: 0, muted: false },
             MacroCmd::SetCycle { track: 2, mode: CycleMode::Drunk },
             MacroCmd::SetBpm { bpm: 90.0 },
@@ -927,6 +945,7 @@ fn write_house_patch() {
         // h — the swell return: shimmer with the bass back
         mac("h", vec![
             MacroCmd::SwitchPattern { track: 0, slot: 2 },
+            MacroCmd::SwitchPattern { track: 2, slot: 0 },
             MacroCmd::SetMute { track: 0, muted: false },
             MacroCmd::SetMute { track: 2, muted: false },
             MacroCmd::SetCycle { track: 2, mode: CycleMode::PingPong },
@@ -2187,6 +2206,7 @@ mod tests {
         assert_eq!(seq.tracks[0].slots.len(), 4, "melody carries slots b, c, d + the ghost");
         assert_eq!(seq.tracks[1].mode, crate::state::TrackMode::Modulation);
         assert_eq!(seq.tracks[2].length, Some(12), "polymetric bass");
+        assert_eq!(seq.tracks[2].slots.len(), 1, "the bass carries its peak riff");
         assert_eq!(seq.macros.len(), 8, "eight section verbs");
         assert_eq!(seq.lane.len(), 128, "the long form (~7 minutes)");
         assert!(seq.lane.iter().any(|m| m == "e"), "a bass-only section");
