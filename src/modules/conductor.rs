@@ -980,7 +980,6 @@ fn write_house_patch() {
         dry: Some(0.0),
         taps: Some(8),
         input: Some(String::from("send/0")),
-        wash_src: Some(String::from("envelope/3/ch1")),
         tap: (0..8)
             .map(|i| DelayTapParam {
                 level: levels[i],
@@ -1081,9 +1080,11 @@ fn write_house_patch() {
     };
     let _ = state::save_module_state("envelope", 0, &env0);
 
-    // ── MATHs 3 (the record window's modulator): channel 1 looping VERY
-    // slowly with the attenuverter pulled down — a minutes-long swell
-    // that breathes the delay's wash underneath the whole form
+    // ── MATHs 3 (the record window's modulator): channel 1 loops
+    // minutes-long with the attenuverter pulled down, ready to patch
+    // (it shipped bound to the delay's wash once — and its random boot
+    // phase kept filling the form's quiet sections; the composition
+    // owns the dynamics now, the cable is yours to plug)
     let env3 = state::EnvelopeParams {
         format: state::STATE_FORMAT,
         channels: vec![
