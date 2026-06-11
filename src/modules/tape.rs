@@ -1160,6 +1160,12 @@ pub fn run(instance: usize) -> Result<()> {
     let mut ui_entries_at: Option<Instant> = None;
     let mut baseline =
         state::to_toml_string(&snapshot_params(&shared.lock().unwrap())).unwrap_or_default();
+    // autosave: a killed pane must never eat a take. Track the filled
+    // counts we last wrote; park the tape whenever they've moved and
+    // either recording just stopped or 30 s have passed.
+    let mut saved_filled = [0u64; TRACKS];
+    let mut was_recording = false;
+    let mut autosave_at = Instant::now();
 
     loop {
         if state::check_save_signal() {
@@ -1175,6 +1181,22 @@ pub fn run(instance: usize) -> Result<()> {
         if ui_entries_at.is_none_or(|t| t.elapsed() > Duration::from_secs(1)) {
             ui_entries = manifest.entries();
             ui_entries_at = Some(Instant::now());
+        }
+        {
+            let s = shared.lock().unwrap();
+            let filled: [u64; TRACKS] = std::array::from_fn(|i| s.tracks[i].filled);
+            let dirty = filled != saved_filled;
+            let stopped_recording = was_recording && !s.recording;
+            was_recording = s.recording;
+            if dirty
+                && !s.recording
+                && (stopped_recording || autosave_at.elapsed() > Duration::from_secs(30))
+            {
+                let _ = state::save_module_state("tape", instance, &snapshot_params(&s));
+                save_audio(&s);
+                saved_filled = filled;
+                autosave_at = Instant::now();
+            }
         }
 
         let overlay = {
