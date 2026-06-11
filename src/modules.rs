@@ -19,6 +19,7 @@
 
 pub mod badge;
 pub mod conductor;
+pub mod delay;
 pub mod envelope;
 pub mod mixer;
 pub mod scope;

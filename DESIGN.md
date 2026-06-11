@@ -402,9 +402,17 @@ manifest at read time (`routing::resolve`).
 
 > **v2:** entry size grew 64 → 96 bytes: offsets 56–59 hold `mod_base` (u32,
 > `u32::MAX` = none) and 60–63 `mod_count`. Header offset 12–15 is the
-> atomic next-free-channel allocator. Header version = 2. Event-ringbuf
-> consumer slots are assigned by `shm::consumer_id`: voices 0–7,
-> envelopes 8–11, 12–15 reserved.
+> atomic next-free-channel allocator. Event-ringbuf consumer slots are
+> assigned by `shm::consumer_id`: voices 0–7, envelopes 8–11, 12–15
+> reserved.
+>
+> **v3:** entry size grew 96 → 128 bytes for fx modules: data offsets
+> 80–111 hold `input_shm` (u8[32], null-terminated) — the audio ring
+> this module is *consuming*, set via `Manifest::publish_input`. Audio
+> rings are SPSC, so an fx module takes over consumption from the mixer:
+> the mixer skips any source some live entry claims as its input, and
+> re-adopts it when the claim clears or the claimant dies. Header
+> version = 3.
 
 Lock-free fixed-size module registry. 16 entries, two-phase atomic claim protocol.
 
@@ -574,6 +582,7 @@ by a trait or framework. The sections below describe what each phase must do and
 | envelope  | —                           | Open prod + consumer| —                  | Create (write ch 0-7) | Register  |
 | scope     | Open `/los_mix_in` (peek)   | —                   | —                  | Open (read all)       | Register  |
 | template  | Create `/los_audio_template_N` | —                | Open (play/pause)  | Open (write 1 ch)     | Register  |
+| delay     | Create `/los_audio_delay_N`; consumes one claimed ring | — | Open (play/pause) | Open (write 9 ch) | Register + publish_input |
 | conductor | —                           | —                   | —                  | —                     | Create+Open |
 
 **Consumer ID assignment:** A module that opens EventRingbuf as a consumer needs

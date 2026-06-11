@@ -432,12 +432,22 @@ fn mixer_thread(
             }
         }
 
+        // Audio rings claimed as an fx module's input (manifest v3): the
+        // cable has left the console, so that source's strip goes away —
+        // the fx module's own output strip carries the signal now. When
+        // the claim clears (unpatch or death) the source is re-adopted
+        // below within one housekeeping pass.
+        let claimed: Vec<&str> = entries
+            .iter()
+            .filter_map(|e| e.input_shm.as_deref())
+            .collect();
+
         let mut to_remove = Vec::new();
         for (i, source) in inner.audio_sources.iter().enumerate() {
             let still_alive = entries.iter().any(|e| {
                 e.audio_shm.as_deref() == Some(&source.shm_name)
             });
-            if !still_alive {
+            if !still_alive || claimed.contains(&source.shm_name.as_str()) {
                 to_remove.push(i);
             }
         }
@@ -455,7 +465,7 @@ fn mixer_thread(
             let shm_name = entry.audio_shm.as_ref().unwrap();
 
             let already = inner.audio_sources.iter().any(|s| s.shm_name == *shm_name);
-            if already { continue; }
+            if already || claimed.contains(&shm_name.as_str()) { continue; }
 
             if let Ok(ringbuf) = AudioRingbuf::open(shm_name) {
                 let label = format!("{} {}", capitalize(&entry.module_name), entry.instance);
