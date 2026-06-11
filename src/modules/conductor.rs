@@ -265,6 +265,7 @@ pub fn canonical_module(name: &str) -> Option<&'static str> {
         "badge" | "los" => "badge",
         "tone" => "tone",
         "template" | "example" => "template",
+        "delay" | "288" | "mdp" => "delay",
         "conductor" => "conductor",
         _ => return None,
     })
@@ -272,7 +273,7 @@ pub fn canonical_module(name: &str) -> Option<&'static str> {
 
 /// Module types the conductor (and `los add`) can spawn at runtime.
 pub const ADDABLE_MODULES: &[&str] =
-    &["voice", "envelope", "sequencer", "scope", "tone", "badge", "template"];
+    &["voice", "envelope", "sequencer", "scope", "tone", "badge", "template", "delay"];
 
 /// Spawn a new module instance in a fresh pane of the modules window.
 /// Picks the next free instance number from the manifest when not given.

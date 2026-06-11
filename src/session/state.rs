@@ -395,6 +395,54 @@ pub struct TemplateParams {
     pub level_src: Option<String>,
 }
 
+/// The delay module (modules/delay.rs — docs/plans/delay-288.md).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DelayParams {
+    #[serde(default)]
+    pub format: u32,
+    /// Per-stage time, seconds.
+    pub time: Option<f32>,
+    pub regen: Option<f32>,
+    pub shim: Option<f32>,
+    pub wash: Option<f32>,
+    pub dry: Option<f32>,
+    /// Active tap count 1–8.
+    pub taps: Option<usize>,
+    /// Consumed audio source as "module/instance" (e.g. "voice/0") —
+    /// resolved to a live ring through the manifest at runtime.
+    #[serde(default)]
+    pub input: Option<String>,
+    #[serde(default)]
+    pub time_src: Option<String>,
+    #[serde(default)]
+    pub regen_src: Option<String>,
+    #[serde(default)]
+    pub shim_src: Option<String>,
+    #[serde(default)]
+    pub wash_src: Option<String>,
+    #[serde(default)]
+    pub dry_src: Option<String>,
+    #[serde(default)]
+    pub tap: Vec<DelayTapParam>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DelayTapParam {
+    pub level: f32,
+    pub pan: f32,
+    /// Phase select by glyph: "+" normal, "·" off, "−" inverted.
+    #[serde(default = "default_phase")]
+    pub phase: String,
+    #[serde(default)]
+    pub pan_src: Option<String>,
+    #[serde(default)]
+    pub level_src: Option<String>,
+}
+
+fn default_phase() -> String {
+    "+".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EnvelopeParams {
     #[serde(default)]

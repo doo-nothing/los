@@ -83,6 +83,11 @@ src/
   session/    save/load state, house layout, tmux wrapper
 ```
 
+The delay is the first **fx module**: `los add delay`, then pick its
+input on the GLOBAL strip (`@` on the input row) — the source's strip
+leaves the console and the delay's takes its place. Its DSP is part
+Rust, part Faust ([docs/writing-dsp.md](docs/writing-dsp.md)).
+
 Adding a module touches `src/modules/` plus a few registration points —
 [docs/writing-a-module.md](docs/writing-a-module.md) is the guide and
 `src/modules/template.rs` the worked example ([CONTRIBUTING.md](CONTRIBUTING.md)

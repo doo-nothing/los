@@ -22,6 +22,7 @@
 //! `crate::shm`, …) so call sites stay short and moving a file between
 //! groups never breaks imports.
 
+pub mod faust;
 pub mod ipc;
 pub mod modules;
 pub mod session;
@@ -29,7 +30,9 @@ pub mod theory;
 pub mod ui;
 
 pub use ipc::{routing, shm};
-pub use modules::{badge, conductor, envelope, mixer, scope, sequencer, template, tone, voice};
+pub use modules::{
+    badge, conductor, delay, envelope, mixer, scope, sequencer, template, tone, voice,
+};
 pub use session::{layout, state, tmux};
 pub use ui::{excmd, keys, picker, theme, undo};
 
