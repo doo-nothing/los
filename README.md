@@ -84,19 +84,21 @@ src/
 ```
 
 Fresh sessions open already playing **the house drone** — a slow,
-evolving A-minor piece (74 BPM) that runs itself: the macro lane walks
-pattern slots a–d through a 16-bar form, probability and ratchets keep
-it alive, a drunk modulation track strolls the filterbank's window,
-and the ping-pong bass runs 12 steps against 16. It's a worked example
-of the sequencer's depth as much as a patch.
+evolving A-minor piece that runs itself through a ~7-minute, 128-bar
+form: eight macro "sections" (theme, build, shimmer, thin, a bass-only
+passage, a 90 BPM peak, a swelling return, a 58 BPM outro) walked by
+the macro lane, with probability and pushed notes keeping every bar
+alive, a drunk modulation track strolling the filterbank's window, and
+a ping-pong bass running 12 steps against 16. It's a worked example of
+the sequencer's depth as much as a patch.
 
 ![the fx rack: the delay's tap ladders answering the pattern, the filterbank strolling](docs/demo-fx.gif)
 
 The fourth window is a **tape deck** (Tascam 4-track × OP-1): six
 tracks recording the mix or any single source, varispeed, loop
 overdubs, reverse, fader automation lanes, bounce, and export to
-`~/Music/los/` — fresh sessions arrive with track 1 armed over the
-drone's 16-bar form, so `r` is a song. An optional `tools/los-rave`
+`~/Music/los/` — fresh sessions arrive with track 1 armed and the
+tape ready to capture the full form top to tail, so `r` is a song. An optional `tools/los-rave`
 helper reprocesses takes through RAVE neural models (the `vintage`
 model is a credible cassette).
 

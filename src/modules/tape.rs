@@ -41,8 +41,10 @@ use crate::state;
 /// Used only until the transport answers with the device's real rate.
 const FALLBACK_RATE: f32 = 48_000.0;
 pub const TRACKS: usize = 6;
-/// Tape length, seconds. Finite on purpose — a tape, not a DAW.
-const TAPE_SECS: u64 = 180;
+/// Tape length, seconds. Finite on purpose — a tape, not a DAW — but
+/// long enough for the house form (~7 min) plus headroom. Tracks
+/// allocate lazily (~115 MB each at 48 k only once recorded on).
+const TAPE_SECS: u64 = 600;
 
 const GLOBAL_STRIP: usize = TRACKS;
 
@@ -320,6 +322,52 @@ fn apply_params(s: &mut TapeState, p: &state::TapeParams) {
     }
 }
 
+/// Append frames [from..to) of a track's buffer to its crash journal
+/// (raw interleaved stereo i16). Runs OUTSIDE the state lock — callers
+/// clone just the delta while holding it (a few MB at most).
+fn journal_append(track: usize, delta: &[i16]) {
+    use std::io::Write;
+    let dir = tape_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(format!("track_{}.rec", track));
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let bytes: Vec<u8> = delta.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let _ = f.write_all(&bytes);
+    }
+}
+
+/// A clean save makes the journals redundant.
+fn journal_clear() {
+    if let Ok(rd) = std::fs::read_dir(tape_dir()) {
+        for e in rd.flatten() {
+            if e.path().extension().is_some_and(|x| x == "rec") {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+}
+
+/// Recover crash journals into empty tracks (raw i16 stereo at the
+/// session rate — written by journal_append during a recording that
+/// never reached a clean save).
+fn journal_recover(s: &mut TapeState) {
+    for i in 0..TRACKS {
+        let path = tape_dir().join(format!("track_{}.rec", i));
+        let Ok(bytes) = std::fs::read(&path) else { continue };
+        if bytes.len() < 4 || s.tracks[i].filled > 0 {
+            continue;
+        }
+        let mut buf = vec![0i16; (s.tape_len as usize) * 2];
+        let n = (bytes.len() / 2).min(buf.len());
+        for (j, slot) in buf.iter_mut().enumerate().take(n) {
+            *slot = i16::from_le_bytes([bytes[j * 2], bytes[j * 2 + 1]]);
+        }
+        s.tracks[i].filled = (n / 2) as u64;
+        s.tracks[i].audio = Some(buf);
+        s.status = Some(format!("recovered an unsaved take on t{} (crash journal)", i + 1));
+    }
+}
+
 /// Write each non-empty track to ~/.config/los/tape/track_N.wav.
 fn save_audio(s: &TapeState) {
     let dir = tape_dir();
@@ -348,6 +396,7 @@ fn save_audio(s: &TapeState) {
             let _ = wr.finalize();
         }
     }
+    journal_clear();
 }
 
 /// Load track WAVs back in (startup).
@@ -1112,7 +1161,11 @@ pub fn run(instance: usize) -> Result<()> {
     if let Ok(p) = state::load_module_state::<state::TapeParams>("tape", instance) {
         apply_params(&mut shared.lock().unwrap(), &p);
     }
-    load_audio(&mut shared.lock().unwrap());
+    {
+        let mut s = shared.lock().unwrap();
+        load_audio(&mut s);
+        journal_recover(&mut s);
+    }
 
     let audio_state = Arc::clone(&shared);
     let audio_builder =
@@ -1183,19 +1236,40 @@ pub fn run(instance: usize) -> Result<()> {
             ui_entries_at = Some(Instant::now());
         }
         {
-            let s = shared.lock().unwrap();
-            let filled: [u64; TRACKS] = std::array::from_fn(|i| s.tracks[i].filled);
-            let dirty = filled != saved_filled;
-            let stopped_recording = was_recording && !s.recording;
-            was_recording = s.recording;
-            if dirty
-                && !s.recording
-                && (stopped_recording || autosave_at.elapsed() > Duration::from_secs(30))
+            let mut journal: Vec<(usize, Vec<i16>)> = Vec::new();
             {
-                let _ = state::save_module_state("tape", instance, &snapshot_params(&s));
-                save_audio(&s);
-                saved_filled = filled;
-                autosave_at = Instant::now();
+                let s = shared.lock().unwrap();
+                let filled: [u64; TRACKS] = std::array::from_fn(|i| s.tracks[i].filled);
+                let dirty = filled != saved_filled;
+                let stopped_recording = was_recording && !s.recording;
+                was_recording = s.recording;
+                if s.recording && dirty && autosave_at.elapsed() > Duration::from_secs(5) {
+                    // mid-record: clone only each track's NEW frames under
+                    // the lock (a few MB), journal them outside it — a
+                    // crash mid-take now costs seconds, not the take
+                    for i in 0..TRACKS {
+                        if filled[i] > saved_filled[i] {
+                            if let Some(audio) = s.tracks[i].audio.as_ref() {
+                                let a = (saved_filled[i] as usize) * 2;
+                                let b = ((filled[i] as usize) * 2).min(audio.len());
+                                journal.push((i, audio[a..b].to_vec()));
+                            }
+                        }
+                    }
+                    saved_filled = filled;
+                    autosave_at = Instant::now();
+                } else if dirty
+                    && !s.recording
+                    && (stopped_recording || autosave_at.elapsed() > Duration::from_secs(30))
+                {
+                    let _ = state::save_module_state("tape", instance, &snapshot_params(&s));
+                    save_audio(&s);
+                    saved_filled = filled;
+                    autosave_at = Instant::now();
+                }
+            }
+            for (track, delta) in journal {
+                journal_append(track, &delta);
             }
         }
 
@@ -1936,6 +2010,31 @@ mod tests {
         let w = wave_overview(&t, 10, tape_len);
         assert!(w[0] > 0.5, "first column carries the hit");
         assert_eq!(w[9], 0.0, "unfilled region is silent");
+    }
+
+    #[test]
+    fn crash_journal_round_trips() {
+        let _ = std::fs::create_dir_all(tape_dir());
+        // use a track index unlikely to collide with real session data
+        let tr = TRACKS - 1;
+        let _ = std::fs::remove_file(tape_dir().join(format!("track_{}.rec", tr)));
+        let _ = std::fs::remove_file(tape_dir().join(format!("track_{}.wav", tr)));
+        // two appends, like two autosave ticks mid-record
+        journal_append(tr, &[100, -100, 200, -200]);
+        journal_append(tr, &[300, -300]);
+        let mut s = TapeState::new();
+        s.tape_len = 1000;
+        journal_recover(&mut s);
+        assert_eq!(s.tracks[tr].filled, 3, "three frames recovered");
+        let a = s.tracks[tr].audio.as_ref().unwrap();
+        assert_eq!(&a[..6], &[100, -100, 200, -200, 300, -300]);
+        assert!(s.status.as_deref().unwrap_or("").contains("recovered"));
+        // a clean save clears the journal; recovery then does nothing
+        journal_clear();
+        let mut s2 = TapeState::new();
+        s2.tape_len = 1000;
+        journal_recover(&mut s2);
+        assert_eq!(s2.tracks[tr].filled, 0, "journal gone after clean save");
     }
 
     #[test]

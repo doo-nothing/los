@@ -761,8 +761,8 @@ fn write_house_patch() {
     a[14] = StepParam { delay: 45.0, delay_prob: 80, ..maybe(59, 55, 45) }; // late B3 ornament
 
     let mut b = vec![off(); 16];
-    for (i, n, v) in [(0usize, 57u8, 90u8), (2, 60, 64), (4, 64, 76), (6, 67, 60),
-        (8, 69, 82), (10, 67, 58), (12, 64, 72), (14, 60, 55)]
+    for (i, n, v) in [(0usize, 57u8, 108u8), (2, 60, 78), (4, 64, 92), (6, 67, 72),
+        (8, 69, 100), (10, 67, 70), (12, 64, 86), (14, 60, 66)]
     {
         b[i] = note(n, v);
     }
@@ -780,8 +780,8 @@ fn write_house_patch() {
     c[14] = maybe(64, 45, 55);
 
     let mut d = vec![off(); 16];
-    d[0] = note(45, 96); // A2 — just the root, wide open
-    d[8] = maybe(52, 70, 80); // E3
+    d[0] = note(45, 54); // A2 — just the root, hushed
+    d[8] = maybe(52, 38, 80); // E3, barely there
 
     let t1 = TrackParam {
         steps: a,
@@ -862,32 +862,91 @@ fn write_house_patch() {
 
     // macros: the form's verbs. The lane fires them bar by bar, so the
     // piece evolves on its own — and they're yours to fire with @a–@d.
+    // macros: the song's verbs — each one is a SECTION (slot, mutes,
+    // bass behavior, tempo). The lane walks them through a 128-bar form
+    // (~7 minutes with the tempo moves), and they're yours live on @a–@h.
     let mac = |id: &str, cmds: Vec<MacroCmd>| MacroParam {
         id: id.into(),
         quant: Quant::Bar,
         cmds,
     };
     let macros = vec![
+        // a — the theme: both voices, ping-pong bass, home tempo
         mac("a", vec![
             MacroCmd::SwitchPattern { track: 0, slot: 0 },
+            MacroCmd::SetMute { track: 0, muted: false },
             MacroCmd::SetMute { track: 2, muted: false },
             MacroCmd::SetCycle { track: 2, mode: CycleMode::PingPong },
+            MacroCmd::SetBpm { bpm: 74.0 },
         ]),
-        mac("b", vec![MacroCmd::SwitchPattern { track: 0, slot: 1 }]),
+        // b — the build: fuller arp, a touch faster
+        mac("b", vec![
+            MacroCmd::SwitchPattern { track: 0, slot: 1 },
+            MacroCmd::SetMute { track: 0, muted: false },
+            MacroCmd::SetBpm { bpm: 78.0 },
+        ]),
+        // c — shimmer: high sparse line over reversed bass
         mac("c", vec![
             MacroCmd::SwitchPattern { track: 0, slot: 2 },
+            MacroCmd::SetMute { track: 0, muted: false },
             MacroCmd::SetCycle { track: 2, mode: CycleMode::Reverse },
+            MacroCmd::SetBpm { bpm: 74.0 },
         ]),
+        // d — thin: root drones only, slowing
         mac("d", vec![
             MacroCmd::SwitchPattern { track: 0, slot: 3 },
+            MacroCmd::SetMute { track: 0, muted: false },
+            MacroCmd::SetBpm { bpm: 70.0 },
+        ]),
+        // e — BASS ONLY: melody out, bass walks forward, slow
+        mac("e", vec![
+            MacroCmd::SetMute { track: 0, muted: true },
+            MacroCmd::SetMute { track: 2, muted: false },
+            MacroCmd::SetCycle { track: 2, mode: CycleMode::Forward },
+            MacroCmd::SetBpm { bpm: 64.0 },
+        ]),
+        // f — the peak: fast, arp on, drunk bass
+        mac("f", vec![
+            MacroCmd::SwitchPattern { track: 0, slot: 1 },
+            MacroCmd::SetMute { track: 0, muted: false },
+            MacroCmd::SetCycle { track: 2, mode: CycleMode::Drunk },
+            MacroCmd::SetBpm { bpm: 90.0 },
+        ]),
+        // g — the outro: thin line alone, very slow
+        mac("g", vec![
+            MacroCmd::SwitchPattern { track: 0, slot: 3 },
+            MacroCmd::SetMute { track: 0, muted: false },
             MacroCmd::SetMute { track: 2, muted: true },
+            MacroCmd::SetBpm { bpm: 58.0 },
+        ]),
+        // h — the swell return: shimmer with the bass back
+        mac("h", vec![
+            MacroCmd::SwitchPattern { track: 0, slot: 2 },
+            MacroCmd::SetMute { track: 0, muted: false },
+            MacroCmd::SetMute { track: 2, muted: false },
+            MacroCmd::SetCycle { track: 2, mode: CycleMode::PingPong },
+            MacroCmd::SetBpm { bpm: 70.0 },
         ]),
     ];
-    // the 16-bar form: theme → arp → shimmer → arp → theme → breakdown → arp
-    let lane: Vec<String> = ["a", "", "", "b", "", "", "c", "", "b", "", "a", "", "d", "", "b", ""]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    // the 128-bar form (one lane slot per bar):
+    //   intro a ×12 · build b ×16 · shimmer c ×12 · thin d ×12 ·
+    //   BASS ONLY e ×12 · theme a ×8 · PEAK f ×20 · return h ×12 ·
+    //   thin d ×12 · outro g ×12
+    let mut lane = vec![String::new(); 128];
+    for (bar, m) in [
+        (0, "a"),
+        (12, "b"),
+        (28, "c"),
+        (40, "d"),
+        (52, "e"),
+        (64, "a"),
+        (72, "f"),
+        (92, "h"),
+        (104, "d"),
+        (116, "g"),
+    ] {
+        lane[bar] = m.to_string();
+    }
 
     let seq = state::SequencerParams {
         bpm: Some(74.0),
@@ -899,7 +958,7 @@ fn write_house_patch() {
         tracks: vec![t1, t2, t3],
         macros,
         lane,
-        lane_len: Some(16),
+        lane_len: Some(128),
     };
     let _ = state::save_module_state("sequencer", 0, &seq);
 
@@ -916,6 +975,7 @@ fn write_house_patch() {
         dry: Some(0.0),
         taps: Some(8),
         input: Some(String::from("send/0")),
+        wash_src: Some(String::from("envelope/3/ch1")),
         tap: (0..8)
             .map(|i| DelayTapParam {
                 level: levels[i],
@@ -1016,16 +1076,39 @@ fn write_house_patch() {
     };
     let _ = state::save_module_state("envelope", 0, &env0);
 
+    // ── MATHs 3 (the record window's modulator): channel 1 looping VERY
+    // slowly with the attenuverter pulled down — a minutes-long swell
+    // that breathes the delay's wash underneath the whole form
+    let env3 = state::EnvelopeParams {
+        format: state::STATE_FORMAT,
+        channels: vec![
+            EnvelopeChannelParams {
+                rise: 0.88,
+                fall: 0.88,
+                loop_mode: true,
+                attenuverter: 0.35,
+                ..Default::default()
+            },
+            EnvelopeChannelParams::default(),
+            EnvelopeChannelParams::default(),
+            EnvelopeChannelParams::default(),
+        ],
+        logic_outputs: Default::default(),
+    };
+    let _ = state::save_module_state("envelope", 3, &env3);
+
     // ── tape 0: ready to record. Track 1 armed to the mix, the loop
     // wrapped around the drone's 16-bar form — roll the transport, hit
     // r on the TAPE pane, and 52 seconds later you have a take.
+    // loop OFF: r captures the form once, top to tail (~7 min); flip
+    // L on for OP-1-style sound-on-sound layering instead
     let bar_frames = (60.0 / 74.0 * 4.0 * 48_000.0) as u64;
     let tape = state::TapeParams {
         format: state::STATE_FORMAT,
         speed: Some(1.0),
-        loop_on: Some(true),
+        loop_on: Some(false),
         loop_in: Some(0),
-        loop_out: Some(bar_frames * 16),
+        loop_out: Some(bar_frames * 128),
         speed_src: None,
         tracks: (0..crate::tape::TRACKS)
             .map(|i| state::TapeTrackParam {
@@ -2098,9 +2181,18 @@ mod tests {
         assert_eq!(seq.tracks[0].slots.len(), 3, "melody carries slots b, c, d");
         assert_eq!(seq.tracks[1].mode, crate::state::TrackMode::Modulation);
         assert_eq!(seq.tracks[2].length, Some(12), "polymetric bass");
-        assert_eq!(seq.macros.len(), 4);
-        assert_eq!(seq.lane.len(), 16, "the 16-bar form");
-        assert!(seq.lane.iter().any(|m| m == "d"), "the breakdown is in the form");
+        assert_eq!(seq.macros.len(), 8, "eight section verbs");
+        assert_eq!(seq.lane.len(), 128, "the long form (~7 minutes)");
+        assert!(seq.lane.iter().any(|m| m == "e"), "a bass-only section");
+        assert!(seq.lane.iter().any(|m| m == "f"), "a fast peak");
+        assert!(seq.lane.iter().any(|m| m == "g"), "a sparse outro");
+        assert!(
+            seq.macros.iter().any(|m| m
+                .cmds
+                .iter()
+                .any(|c| matches!(c, crate::state::MacroCmd::SetBpm { .. }))),
+            "tempo moves are part of the form"
+        );
         assert!(
             seq.tracks[0].steps.iter().any(|st| st.active && st.prob < 100),
             "probability is in play"
@@ -2124,7 +2216,7 @@ mod tests {
 
         let tape: crate::state::TapeParams =
             crate::state::load_module_state("tape", 0).expect("tape state");
-        assert_eq!(tape.loop_on, Some(true), "the loop wraps the form");
+        assert_eq!(tape.loop_on, Some(false), "record-once over the form");
         assert!(tape.tracks[0].armed, "track 1 ready to record");
         assert!(!tape.tracks[1].armed);
 
