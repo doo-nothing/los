@@ -230,6 +230,15 @@ modbus rows opens the picker; the channel row shows the live source label
 (`envelope/0/sum`). The param strip auto-hides ~4s after the last
 interaction — the scope is the picture. `:` ✅.
 
+### Template
+The worked example module (an LFO you can hear — see
+[writing-a-module.md](writing-a-module.md)). Pure doctrine, nothing else:
+`j/k` select param · `h/l` adjust · `H/L` coarse · counts · `gg/G` ·
+`0` reset · `@` bind on bindable rows (rate/depth/pitch/level), `x`
+unbind · `u`/`Ctrl-r` · `:set rate|shape|depth|pitch|level|polar <v>` ·
+`:` patches · `?` · mouse wheel/click. Its LFO publishes as
+`template/N/lfo`. All ✅
+
 ### Conductor
 Two views, `Tab` switches. **States**: `j/k` nav (counts) · `gg/G` ·
 `Enter` load (`l` alias) · `s` save session · `dd` + y/n confirm to delete.

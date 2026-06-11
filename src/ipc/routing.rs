@@ -43,6 +43,7 @@ pub fn output_labels(module: &str) -> &'static [&'static str] {
         "envelope" => &[
             "ch1", "ch2", "ch3", "ch4", "ch5", "ch6", "sum", "or", "and", "inv", "eor", "eoc",
         ],
+        "template" => &["lfo"],
         _ => &[],
     }
 }

@@ -7,7 +7,7 @@
 // License, or (at your option) any later version. See LICENSE.
 
 use anyhow::Result;
-use los::{badge, conductor, voice, sequencer, mixer, scope, envelope, tone, shm, state};
+use los::{badge, conductor, voice, sequencer, mixer, scope, envelope, template, tone, shm, state};
 
 /// `los ctl <action>` — control the global transport from any shell
 /// (used by the tmux prefix bindings; also handy for scripting).
@@ -72,6 +72,7 @@ fn usage() {
     eprintln!("  scope              ASCII oscilloscope (reads master mix)");
     eprintln!("  envelope           Envelope generator (Maths-inspired, 4 channels)");
     eprintln!("  tone [freq]        Test tone generator (for testing)");
+    eprintln!("  template           Worked example module (LFO + drone) — read the source!");
     eprintln!("  badge              Los faceplate (beat-synced animation, session info)");
     eprintln!();
     eprintln!("Aliases:");
@@ -92,6 +93,7 @@ fn dispatch_module(name: &str, instance: usize) -> Result<()> {
         "scope" => scope::run(instance),
         "envelope" => envelope::run(instance),
         "tone" => tone::run(440.0, instance),
+        "template" => template::run(instance),
         "badge" => badge::run(instance),
         other => anyhow::bail!("unknown module: {other}"),
     }

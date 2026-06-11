@@ -1,9 +1,11 @@
 //! The runnable modules — each one is a separate process living in its own
 //! tmux pane, launched via `los <module> [instance]`.
 //!
-//! To contribute a new module, start from an existing one ([`tone`] is the
-//! smallest, [`scope`] a mid-size TUI example) and wire it up in three
-//! places:
+//! To contribute a new module, read [`template`] — a small, fully wired,
+//! heavily commented worked example written to be copied
+//! (docs/writing-a-module.md is the matching guide; docs/writing-dsp.md
+//! covers writing the audio-rate core in a DSP language). Then wire yours
+//! up in three places:
 //!
 //! 1. Declare it here and re-export it from `lib.rs`.
 //! 2. Add it to `dispatch_module` in `main.rs`.
@@ -21,5 +23,6 @@ pub mod envelope;
 pub mod mixer;
 pub mod scope;
 pub mod sequencer;
+pub mod template;
 pub mod tone;
 pub mod voice;

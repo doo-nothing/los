@@ -52,13 +52,17 @@ breaks imports.
 
 ## Adding a module
 
-This is the most fun kind of contribution. The full walkthrough is in
-[DESIGN.md §11](DESIGN.md) (and the `//!` header of `src/modules.rs` is the
-short version); the shape of it:
+This is the most fun kind of contribution. Start by reading
+`src/modules/template.rs` — a small, fully wired worked example with the
+why in the comments — alongside the guide in
+[docs/writing-a-module.md](docs/writing-a-module.md). (DESIGN.md §11 is
+the condensed protocol view; the `//!` header of `src/modules.rs` is the
+shortest version.) The shape of it:
 
 1. Create `src/modules/yourmodule.rs` with a
-   `pub fn run(instance: usize) -> Result<()>` entry point. `tone` is the
-   smallest example, `scope` a mid-size TUI one.
+   `pub fn run(instance: usize) -> Result<()>` entry point — copying
+   `template.rs` is the intended path. (`tone` is the smallest example,
+   `scope` a mid-size TUI one.)
 2. Register it: declare in `src/modules.rs`, re-export from `src/lib.rs`,
    add a dispatch arm in `src/main.rs`, and teach the conductor about it
    (`canonical_module`, plus `ADDABLE_MODULES` if `los add` should spawn it).
