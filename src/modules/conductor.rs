@@ -751,7 +751,7 @@ fn write_house_patch() {
     a[3] = maybe(60, 68, 85); // C4, usually
     a[6] = note(64, 78); // E4
     a[10] = maybe(55, 62, 70); // G3, often
-    a[12] = StepParam { repeats: 2, repeat_prob: 55, ..note(57, 84) }; // gentle ratchet, sometimes
+    a[12] = note(57, 84);
     a[14] = StepParam { delay: 45.0, delay_prob: 80, ..maybe(59, 55, 45) }; // late B3 ornament
 
     let mut b = vec![off(); 16];
@@ -762,7 +762,9 @@ fn write_house_patch() {
     }
     b[6].prob = 75;
     b[10].prob = 60;
-    b[12] = StepParam { repeats: 3, repeat_prob: 45, ..b[12].clone() };
+    // a pushed echo-double of the E4: ~60% late, usually — the loose
+    // repeat (the delay line answers it again at 152 ms)
+    b[13] = StepParam { delay: 60.0, delay_unit: DelayUnit::Pct, delay_prob: 85, ..maybe(64, 52, 70) };
 
     let mut c = vec![off(); 16];
     c[0] = maybe(69, 58, 90); // A4
@@ -831,7 +833,7 @@ fn write_house_patch() {
     bass[0] = note(33, 100); // A1
     bass[4] = maybe(40, 72, 85); // E2
     bass[8] = maybe(43, 58, 60); // G2
-    bass[10] = StepParam { repeats: 2, repeat_prob: 50, ..maybe(38, 50, 40) }; // D2
+    bass[10] = StepParam { delay: 55.0, delay_unit: DelayUnit::Pct, delay_prob: 100, ..maybe(38, 56, 45) }; // pushed D2 lean-in
     let t3 = TrackParam {
         steps: bass,
         length: Some(12),
@@ -902,7 +904,7 @@ fn write_house_patch() {
     let delay = state::DelayParams {
         format: state::STATE_FORMAT,
         time: Some(0.152),
-        regen: Some(0.45),
+        regen: Some(0.5),
         shim: Some(0.0),
         wash: Some(0.12),
         dry: Some(0.0),
@@ -924,13 +926,18 @@ fn write_house_patch() {
     // ── filterbank 0: on send B, wet-only, twice alive — morph breathes
     // under MATHs 1's looping channel, and the 296-style window strolls
     // the spectrum on the sequencer's drunk t2
+    // the bank must be a CHARACTER, not seasoning: a narrow resonant
+    // window strolling the spectrum, hard odd|even split, long follower
+    // decay, and the per-band time spread smearing everything it passes
+    // — then the whole animation echoes into the delay via its return
     let bank = state::FilterbankParams {
         format: state::STATE_FORMAT,
         morph: Some(0.0),
-        wwidth: Some(0.5),
-        split: Some(0.45),
+        wwidth: Some(0.38),
+        split: Some(0.6),
+        spread: Some(0.3),
         dry: Some(0.0),
-        decay: Some(0.42),
+        decay: Some(0.5),
         input: Some(String::from("send/1")),
         morph_src: Some(String::from("envelope/1/ch1")),
         wcent_src: Some(String::from("sequencer/0/t2")),
@@ -956,6 +963,52 @@ fn write_house_patch() {
         logic_outputs: Default::default(),
     };
     let _ = state::save_module_state("envelope", 1, &env1);
+
+    // ── voices: melody soft-edged, bass heavy on the sub osc. Format-2
+    // states replace bindings wholesale, so the stock cables (amp ←
+    // MATHs ch 2i+1, notes ← track 2i+1) ride along explicitly.
+    let voice0 = state::VoiceParams {
+        format: state::STATE_FORMAT,
+        shape: Some(0.35),
+        sub: Some(0.25),
+        lpg: Some(0.55),
+        amp_src: Some(String::from("envelope/0/ch1")),
+        notes_src: Some(String::from("sequencer/0/t1")),
+        ..Default::default()
+    };
+    let _ = state::save_module_state("voice", 0, &voice0);
+    let voice1 = state::VoiceParams {
+        format: state::STATE_FORMAT,
+        shape: Some(0.1),
+        sub: Some(0.85),
+        lpg: Some(0.35),
+        amp_src: Some(String::from("envelope/0/ch3")),
+        notes_src: Some(String::from("sequencer/0/t3")),
+        ..Default::default()
+    };
+    let _ = state::save_module_state("voice", 1, &voice1);
+
+    // ── MATHs 0: the amp envelopes. The bass swell was so slow the sub
+    // never opened inside a step — both channels now bloom fast and
+    // ring long. Triggers ride along explicitly (ch_i ← t_i, the stock
+    // cables) for the same format-2 reason as the voices.
+    let amp_ch = |rise: f32, fall: f32, track: &str| EnvelopeChannelParams {
+        rise,
+        fall,
+        trigger_src: Some(format!("sequencer/0/{}", track)),
+        ..Default::default()
+    };
+    let env0 = state::EnvelopeParams {
+        format: state::STATE_FORMAT,
+        channels: vec![
+            amp_ch(0.3, 0.62, "t1"),  // melody: quick bloom, singing tail
+            amp_ch(0.5, 0.5, "t2"),
+            amp_ch(0.24, 0.8, "t3"),  // bass: speaks NOW, rings long
+            amp_ch(0.5, 0.5, "t4"),
+        ],
+        logic_outputs: Default::default(),
+    };
+    let _ = state::save_module_state("envelope", 0, &env0);
 }
 
 /// The fx rack window:
@@ -1985,9 +2038,14 @@ mod tests {
             seq.tracks[0].steps.iter().any(|st| st.active && st.prob < 100),
             "probability is in play"
         );
+        let slot_b = &seq.tracks[0].slots[0].steps;
         assert!(
-            seq.tracks[0].steps.iter().any(|st| st.active && st.repeats > 1),
-            "ratchets are in play"
+            slot_b.iter().chain(seq.tracks[2].steps.iter()).any(|st| st.active && st.delay > 0.0),
+            "pushed micro-delay notes carry the loose-repeat feel"
+        );
+        assert!(
+            seq.tracks[0].steps.iter().all(|st| st.repeats <= 1),
+            "no substep ratchets in the drone (too tight at 74 BPM)"
         );
 
         let delay: crate::state::DelayParams =
