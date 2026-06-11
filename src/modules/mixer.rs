@@ -588,7 +588,16 @@ fn mixer_thread(
 
             if let Ok(ringbuf) = AudioRingbuf::open(shm_name) {
                 let label = format!("{} {}", capitalize(&entry.module_name), entry.instance);
-                let level = 0.8;
+                // house balance: the bass voice (voice 1) carries the
+                // floor, the melody sits inside it, and the fx returns
+                // ride hot enough to be characters, not seasoning
+                let level = match (entry.module_name.as_str(), entry.instance) {
+                    ("voice", 0) => 0.58,
+                    ("voice", 1) => 0.95,
+                    ("delay", _) => 0.9,
+                    ("filterbank", _) => 0.85,
+                    _ => 0.8,
+                };
                 // house send defaults: sound sources feed both fx buses
                 // (A = the delay, B = the filterbank), and the BANK's
                 // return leans into send A — the spectrum echoes through
@@ -596,7 +605,7 @@ fn mixer_thread(
                 // stays dry: a return feeding its own send is a loop you
                 // should have to ask for.
                 let (sa, sb) = match entry.module_name.as_str() {
-                    "voice" | "tone" | "template" => (0.3, 0.25),
+                    "voice" | "tone" | "template" => (0.4, 0.3),
                     "filterbank" => (0.3, 0.0),
                     _ => (0.0, 0.0),
                 };
