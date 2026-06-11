@@ -7,9 +7,9 @@ own process in its own tmux pane, wired together over shared memory. Edit
 patterns with vi grammar. Patch modulation like a Eurorack. No DAW, no
 plugins, no mouse required (but the mouse works too).
 
-![a curated los session, one sequencer loop, seamlessly looping](docs/demo.gif)
+![the console playing one bar of the house drone, seamlessly looping](docs/demo.gif)
 
-**[🔊 ten seconds with sound →](docs/demo.mp4)**
+**[🔊 the house drone with sound — and a tour of the fx rack →](docs/demo.mp4)**
 
 - **vi grammar, on sequences** — `3x`, `yw`, `ct4`, visual mode, registers,
   `.` repeat, `u` undo. Everywhere. Macros too: `qa…q` records a
@@ -89,6 +89,8 @@ pattern slots a–d through a 16-bar form, probability and ratchets keep
 it alive, a drunk modulation track strolls the filterbank's window,
 and the ping-pong bass runs 12 steps against 16. It's a worked example
 of the sequencer's depth as much as a patch.
+
+![the fx rack: the delay's tap ladders answering the pattern, the filterbank strolling](docs/demo-fx.gif)
 
 Fx modules (the **delay**, after the Buchla 288, and the
 **filterbank**, after the 296e) consume any audio source you point them

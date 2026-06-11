@@ -1,16 +1,15 @@
 # vhs tape — records docs/demo-raw.mp4 (run via `just demo`)
 # https://github.com/charmbracelet/vhs
 #
-# Records the out-of-the-box instrument: `los new` comes pre-patched
-# (t1 melody / t3 bass through pluck envelopes into two voices), so the
-# tape just opens the rig and presses play. The justfile recipe then
-# cuts the seamless one-loop GIF and muxes the mixer's tape-out audio
-# into docs/demo.mp4 — timing below is load-bearing:
-#   video t=0   : Show (5s after launch)
-#   video t=3.0 : `los ctl play` fires -> first loop starts
-#   loop length : exactly 2.0s (16 steps @ 120 BPM, 16th-note steps)
-#   gif window  : [5.0, 7.0) = loop 2, cut on the boundary
-
+# Records the out-of-the-box instrument. `los new` opens already playing
+# the house drone, so the tape stops the transport off-camera and fires
+# play at a KNOWN video time — the GIF cut lands on bar boundaries.
+# Timing contract (the justfile's ffmpeg cuts depend on it):
+#   video t=0    : Show (8s after launch; stop fired at 6s)
+#   video t=3.0  : `los ctl play` fires — bar 1 begins
+#   bar length   : 60/74*4 = 3.2432s (16 steps @ 74 BPM)
+#   hero gif     : [6.243, 9.486) = bar 2, cut on the boundary
+#   window tour  : t≈11 switches to the fx rack for the video
 Output docs/demo-raw.mp4
 
 Set FontSize 14
@@ -23,16 +22,12 @@ Set Theme { "background": "#0d0b08", "foreground": "#e8dcc8" }
 
 # Launch off-camera: the recording opens on the rig, not a shell prompt.
 Hide
-Type `export COLORTERM=truecolor PATH=target/release:$PATH; (sleep 8 && los ctl play) & los new`
+Type `export COLORTERM=truecolor PATH=target/release:$PATH; (sleep 6 && los ctl stop) & (sleep 11 && los ctl play) & (sleep 19 && tmux select-window -t los:fx) & los new`
 Enter
-Sleep 5s
+Sleep 8s
 Show
 
-# paused rig for a beat, then play fires at t=3.0 and it grooves
-Sleep 12s
-
-# wander the rig while it plays (after the gif window, t > 7)
-Ctrl+B
-Sleep 200ms
-Up
-Sleep 3s
+# a paused beat, then play fires at t=3.0 and the drone breathes;
+# the scheduled select-window tours the fx rack at t=11 (after the
+# gif window)
+Sleep 17s
