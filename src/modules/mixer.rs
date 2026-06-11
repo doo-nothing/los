@@ -234,6 +234,12 @@ fn mixer_thread(
     shutdown: std::sync::mpsc::Receiver<()>,
 ) -> Result<()> {
     let mut manifest = Manifest::open().or_else(|_| Manifest::create())?;
+    // Register on THIS handle: publish_consumes only writes through the
+    // handle that owns the manifest slot. Never die over it — the mixer
+    // owns the audio output and advances the transport clock for everyone.
+    if let Err(e) = manifest.register("mixer", 0, None, 0) {
+        eprintln!("[mixer] manifest registration failed (continuing): {}", e);
+    }
 
     let mut transport = ShmTransport::open()
         .or_else(|_| ShmTransport::create(48000))?;
@@ -326,8 +332,8 @@ fn mixer_thread(
                     }
                     for (i, &p) in track_peaks.iter().enumerate() {
                         if let Some(t) = inner.tracks.get_mut(i) {
-                            // peak with ~decay so the meters breathe
-                            t.meter = p.max(t.meter * 0.92);
+                            // peak with ~300ms release so the meters breathe
+                            t.meter = p.max(t.meter * 0.997);
                         }
                     }
 
@@ -385,7 +391,7 @@ fn mixer_thread(
                     *sample = 0.0;
                 }
 
-                inner.master_meter = peak;
+                inner.master_meter = peak.max(inner.master_meter * 0.95);
                 transport.add_clock_frames((data.len() / channels) as u64);
             },
             move |err| {
@@ -744,6 +750,8 @@ fn param_text(p: Param, v: f32) -> String {
         Param::Lo | Param::Mid | Param::Hi => {
             if v.abs() < 0.05 {
                 String::from("0")
+            } else if v.abs() >= 9.95 {
+                format!("{:+.0}", v)
             } else {
                 format!("{:+.1}", v)
             }
@@ -848,17 +856,18 @@ fn draw_ui(
                 lines.push(Line::from(spans));
             }
             // fader rows: meter fill, level tick, ghost at the live level
+            let row_of = |v: f32| {
+                ((1.0 - v.clamp(0.0, 1.0)) * (fader_rows - 1) as f32).round() as usize
+            };
             for fr in 0..fader_rows {
-                let frac_hi = 1.0 - fr as f32 / fader_rows as f32;
-                let half = 0.5 / fader_rows as f32;
                 let mut spans: Vec<Span> = Vec::new();
                 for (_, strip, mute, _, meter, sel, _) in &strips {
                     let lvl = strip.get(Param::Level);
                     let live = strip.eff[0];
                     let bound = strip.srcs[0].is_some();
-                    let tick = (lvl - frac_hi).abs() < half || (frac_hi <= lvl && fr == 0);
-                    let ghost = bound && (live - frac_hi).abs() < half;
-                    let meter_fill = !mute && *meter >= frac_hi;
+                    let tick = fr == row_of(lvl);
+                    let ghost = bound && fr == row_of(live);
+                    let meter_fill = !mute && *meter > 0.005 && fr >= row_of(*meter);
                     let (ch, style) = if ghost {
                         (theme::GHOST, theme::signal(theme::clock()))
                     } else if tick {
@@ -1040,12 +1049,9 @@ pub fn run() -> Result<()> {
     state::setup_save_signal();
     state::setup_reload_signal();
     state::write_pid_file("mixer", 0);
-    let mut manifest = Manifest::open().or_else(|_| Manifest::create())?;
-    // Never die over a registration problem — the mixer owns the audio
-    // output and advances the transport clock for everyone.
-    if let Err(e) = manifest.register("mixer", 0, None, 0) {
-        eprintln!("[mixer] manifest registration failed (continuing): {}", e);
-    }
+    // Read-only handle for the UI (cable colors); mixer_thread owns the
+    // registered handle so its publish_consumes actually lands.
+    let manifest = Manifest::open().or_else(|_| Manifest::create())?;
 
     for attempt in 0..20 {
         match enable_raw_mode() {
