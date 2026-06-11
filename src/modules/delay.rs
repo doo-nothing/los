@@ -59,7 +59,8 @@ pub mod tap8fx {
 
 use dsp::MAX_TAPS;
 
-const SAMPLE_RATE: f32 = 48_000.0;
+/// Used only until the transport answers with the device's real rate.
+const FALLBACK_RATE: f32 = 48_000.0;
 
 // ── strips & rows ──────────────────────────────────────────────────────────
 //
@@ -490,12 +491,22 @@ fn audio_thread(shared: Arc<Mutex<DelayState>>, instance: usize) -> Result<()> {
 
     let slot_frames = out_rb.slot_frames() as usize;
     let slot_len = out_rb.slot_len();
-    let slot_duration =
-        Duration::from_nanos((slot_frames as f64 / SAMPLE_RATE as f64 * 1e9) as u64);
 
-    let mut core = dsp::DelayCore::new(SAMPLE_RATE, slot_frames);
+    // The mixer owns the device and publishes its real rate on the
+    // transport; if it changes (in practice: once, when the mixer comes
+    // up on a non-48k device), rebuild the cores — their coefficients
+    // and line lengths bake the rate in.
+    let mut transport = ShmTransport::open().ok();
+    let rate_of = |t: &Option<ShmTransport>| {
+        t.as_ref().map(|t| t.sample_rate() as f32).filter(|r| *r > 0.0).unwrap_or(FALLBACK_RATE)
+    };
+    let mut sample_rate = rate_of(&transport);
+    let mut slot_duration =
+        Duration::from_nanos((slot_frames as f64 / sample_rate as f64 * 1e9) as u64);
+
+    let mut core = dsp::DelayCore::new(sample_rate, slot_frames);
     let mut fx = tap8fx::Tap8Fx::new();
-    fx.init(SAMPLE_RATE as i32);
+    fx.init(sample_rate as i32);
 
     let mut input: Option<AudioRingbuf> = None;
     let mut input_shm: Option<String> = None;
@@ -506,6 +517,20 @@ fn audio_thread(shared: Arc<Mutex<DelayState>>, instance: usize) -> Result<()> {
     loop {
         // Slow path every ~85 ms: re-resolve bindings and the input claim.
         if blocks.is_multiple_of(64) {
+            if transport.is_none() {
+                transport = ShmTransport::open().ok();
+            }
+            let now_rate = rate_of(&transport);
+            if (now_rate - sample_rate).abs() > 0.5 {
+                sample_rate = now_rate;
+                slot_duration =
+                    Duration::from_nanos((slot_frames as f64 / sample_rate as f64 * 1e9) as u64);
+                core = dsp::DelayCore::new(sample_rate, slot_frames);
+                fx = tap8fx::Tap8Fx::new();
+                fx.init(sample_rate as i32);
+                let t = { shared.lock().unwrap().time };
+                core.snap_time(t);
+            }
             let entries = manifest.entries();
             let desired: Option<String> = {
                 let mut s = shared.lock().unwrap();

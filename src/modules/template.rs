@@ -369,7 +369,8 @@ fn apply_params(s: &mut TemplateState, p: &state::TemplateParams) {
 
 /// One ringbuffer slot is 64 frames ≈ 1.3 ms at 48 kHz. We sleep for one
 /// slot per iteration; the ringbuffer (16 slots deep) absorbs the jitter.
-const SAMPLE_RATE: f32 = 48_000.0;
+/// Used only until the transport answers with the device's real rate.
+const FALLBACK_RATE: f32 = 48_000.0;
 
 fn audio_thread(state: Arc<Mutex<TemplateState>>, instance: usize) -> Result<()> {
     // 1. Create our audio-out ringbuffer. The name pattern is load-bearing:
@@ -396,7 +397,18 @@ fn audio_thread(state: Arc<Mutex<TemplateState>>, instance: usize) -> Result<()>
     let channels = ringbuf.channels() as usize;
     let slot_frames = ringbuf.slot_frames() as usize;
     let mut block = vec![0.0_f32; ringbuf.slot_len()];
-    let slot_duration = Duration::from_nanos((slot_frames as f64 / SAMPLE_RATE as f64 * 1e9) as u64);
+
+    // The mixer owns the audio device and publishes its real sample rate
+    // on the transport (it may not be 48 k!). Read it here and refresh in
+    // the slow path below — the transport might not exist yet if we
+    // started before the mixer.
+    let mut transport = ShmTransport::open().ok();
+    let rate_of = |t: &Option<ShmTransport>| {
+        t.as_ref().map(|t| t.sample_rate() as f32).filter(|r| *r > 0.0).unwrap_or(FALLBACK_RATE)
+    };
+    let mut sample_rate = rate_of(&transport);
+    let mut slot_duration =
+        Duration::from_nanos((slot_frames as f64 / sample_rate as f64 * 1e9) as u64);
 
     let mut lfo_phase = 0.0_f32; // 0..1
     let mut carrier_phase = 0.0_f32; // 0..1
@@ -410,6 +422,15 @@ fn audio_thread(state: Arc<Mutex<TemplateState>>, instance: usize) -> Result<()>
         // per-block path, but a restarted source is picked up within a
         // couple of UI frames. (voice.rs uses the same cadence.)
         if blocks.is_multiple_of(128) {
+            if transport.is_none() {
+                transport = ShmTransport::open().ok();
+            }
+            let now_rate = rate_of(&transport);
+            if (now_rate - sample_rate).abs() > 0.5 {
+                sample_rate = now_rate;
+                slot_duration =
+                    Duration::from_nanos((slot_frames as f64 / sample_rate as f64 * 1e9) as u64);
+            }
             let entries = manifest.entries();
             let mut s = state.lock().unwrap();
             for i in 0..s.srcs.len() {
@@ -440,8 +461,8 @@ fn audio_thread(state: Arc<Mutex<TemplateState>>, instance: usize) -> Result<()>
         // Hand-rolled here because it's eight lines; for anything bigger,
         // docs/writing-dsp.md shows the Faust path (write a .dsp file,
         // commit the generated Rust, call it from exactly this spot).
-        let lfo_inc = rate / SAMPLE_RATE;
-        let car_inc = pitch / SAMPLE_RATE;
+        let lfo_inc = rate / sample_rate;
+        let car_inc = pitch / sample_rate;
         let mut lfo = 0.0;
         for frame in 0..slot_frames {
             lfo = match SHAPES[shape] {
