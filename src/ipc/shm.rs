@@ -1278,7 +1278,7 @@ pub const MODBUS_CHANNELS: usize = MODBUS_NUM_CHANNELS;
 pub fn consumer_id(module: &str, instance: usize) -> usize {
     match module {
         "voice" => instance.min(7),
-        "envelope" => 8 + instance.min(3),
+        "envelope" => 8 + instance.min(5),
         // `los tap` gets its own cursor so draining the backlog can't
         // starve whichever module shares the default slot
         "tap" => 14,

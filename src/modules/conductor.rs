@@ -352,6 +352,7 @@ pub fn canonical_module(name: &str) -> Option<&'static str> {
         "template" | "example" => "template",
         "delay" | "288" | "mdp" => "delay",
         "filterbank" | "bank" | "296" | "296e" => "filterbank",
+        "tape" | "recorder" | "4track" => "tape",
         "conductor" => "conductor",
         _ => return None,
     })
@@ -368,6 +369,7 @@ pub const ADDABLE_MODULES: &[&str] = &[
     "template",
     "delay",
     "filterbank",
+    "tape",
 ];
 
 /// Spawn a new module instance in a fresh pane of the modules window.
@@ -548,6 +550,10 @@ pub const HOUSE_TITLES: [&str; 7] = ["SEQ", "VOICE 0", "VOICE 1", "MATHs", "MIX"
 /// sequencer whose tracks (sources 8–15) can step fx params without
 /// touching the voices.
 pub const FX_TITLES: [&str; 5] = ["DELAY", "BANK", "MATHs 1", "MATHs 2", "SEQ 1"];
+
+/// The record window's pane titles: the deck and a MATHs for
+/// automation patching (tape faders/speed take `@` bindings).
+pub const TAPE_TITLES: [&str; 2] = ["TAPE", "MATHs 3"];
 
 /// Content-aware split sizes for the house layout: `(row1, seq, left_col,
 /// badge)` in cells, given the window size. SEQ snaps to its content
@@ -1009,6 +1015,34 @@ fn write_house_patch() {
         logic_outputs: Default::default(),
     };
     let _ = state::save_module_state("envelope", 0, &env0);
+
+    // ── tape 0: ready to record. Track 1 armed to the mix, the loop
+    // wrapped around the drone's 16-bar form — roll the transport, hit
+    // r on the TAPE pane, and 52 seconds later you have a take.
+    let bar_frames = (60.0 / 74.0 * 4.0 * 48_000.0) as u64;
+    let tape = state::TapeParams {
+        format: state::STATE_FORMAT,
+        speed: Some(1.0),
+        loop_on: Some(true),
+        loop_in: Some(0),
+        loop_out: Some(bar_frames * 16),
+        speed_src: None,
+        tracks: (0..crate::tape::TRACKS)
+            .map(|i| state::TapeTrackParam {
+                input: None, // the mix
+                fader: 0.8,
+                pan: 0.0,
+                armed: i == 0,
+                muted: false,
+                reversed: false,
+                monitor: true,
+                fader_src: None,
+                pan_src: None,
+                auto: vec![],
+            })
+            .collect(),
+    };
+    let _ = state::save_module_state("tape", 0, &tape);
 }
 
 /// The fx rack window:
@@ -1112,6 +1146,38 @@ fn build_fx_window(exe: &str) -> Result<()> {
     Ok(())
 }
 
+/// The record window: the deck across the left, MATHs 3 riding along
+/// for automation cables.
+fn build_tape_window(exe: &str) -> Result<()> {
+    let win = "los:tape";
+    tmux_cmd(&["new-window", "-t", "los", "-n", "tape"])?;
+    tmux_cmd(&["set-option", "-w", "-t", win, "pane-border-status", "top"])?;
+    tmux_cmd(&["set-option", "-w", "-t", win, "pane-border-format", " #{pane_title} "])?;
+    let base = tmux_cmd(&["list-panes", "-t", win, "-F", "#{pane_id}"])?
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let maths = tmux_cmd(&[
+        "split-window",
+        "-t",
+        &base,
+        "-h",
+        "-l",
+        "30%",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        &format!("{} envelope 3", exe),
+    ])?;
+    tmux_cmd(&["respawn-pane", "-k", "-t", &base, &format!("{} tape 0", exe)])?;
+    for (id, title) in [(base.as_str(), "TAPE"), (maths.trim(), "MATHs 3")] {
+        tmux_cmd_ok(&["select-pane", "-t", id, "-T", title]);
+    }
+    tmux_cmd_ok(&["select-pane", "-t", &base]);
+    Ok(())
+}
+
 pub fn create_session() -> Result<()> {
     state::ensure_dirs()?;
     let _ = tmux_cmd(&["kill-session", "-t", "los"]);
@@ -1147,6 +1213,7 @@ pub fn create_session() -> Result<()> {
     //   └───────────────────────────┘
     build_house_layout(&exe)?;
     build_fx_window(&exe)?;
+    build_tape_window(&exe)?;
     // land on the console, not the rack
     tmux_cmd_ok(&["select-window", "-t", "los:modules"]);
 
@@ -2054,6 +2121,12 @@ mod tests {
         assert_eq!(delay.tap.len(), 8);
         assert!(delay.regen.unwrap() > 0.3, "audible feedback out of the box");
         assert!(delay.tap[0].level > delay.tap[5].level, "tap levels decay");
+
+        let tape: crate::state::TapeParams =
+            crate::state::load_module_state("tape", 0).expect("tape state");
+        assert_eq!(tape.loop_on, Some(true), "the loop wraps the form");
+        assert!(tape.tracks[0].armed, "track 1 ready to record");
+        assert!(!tape.tracks[1].armed);
 
         let bank: crate::state::FilterbankParams =
             crate::state::load_module_state("filterbank", 0).expect("bank state");

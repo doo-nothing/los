@@ -229,6 +229,9 @@ struct TrackState {
 struct AudioSource {
     shm_name: String,
     ringbuf: AudioRingbuf,
+    /// Feeds the print bus (everything except tape returns — the deck
+    /// must hear the rig without re-recording its own playback).
+    print: bool,
 }
 
 struct MixerInner {
@@ -330,6 +333,17 @@ fn mixer_thread(
     if let Some(m) = send_manifest_b.as_mut() {
         let _ = m.register("send", 1, Some("/los_send_b"), 0);
     }
+    // ── the print bus ──────────────────────────────────────────────
+    // What the tape deck records when a track is armed to "mix": every
+    // strip's post-fader signal EXCEPT tape returns. The deck can
+    // overdub against earlier takes (heard through the console) without
+    // re-recording them. Advertised as mix/0.
+    let mut print_rb = AudioRingbuf::create("/los_mix_print").ok();
+    let mut print_manifest = Manifest::open().ok();
+    if let Some(m) = print_manifest.as_mut() {
+        let _ = m.register("mix", 0, Some("/los_mix_print"), 0);
+    }
+    let mut print_buf = vec![0.0f32; 128];
     let mut send_a_buf = vec![0.0f32; 128];
     let mut send_b_buf = vec![0.0f32; 128];
 
@@ -354,6 +368,7 @@ fn mixer_thread(
                     }
                     send_a_buf[..slot_len].iter_mut().for_each(|v| *v = 0.0);
                     send_b_buf[..slot_len].iter_mut().for_each(|v| *v = 0.0);
+                    print_buf[..slot_len].iter_mut().for_each(|v| *v = 0.0);
 
                     let mut voice_buf = [0.0f32; 128];
                     let n = inner.audio_sources.len().min(inner.tracks.len());
@@ -410,6 +425,10 @@ fn mixer_thread(
                             send_a_buf[j + 1] += r * sa;
                             send_b_buf[j] += l * sb;
                             send_b_buf[j + 1] += r * sb;
+                            if inner.audio_sources[i].print {
+                                print_buf[j] += l;
+                                print_buf[j + 1] += r;
+                            }
                             track_peaks[i] = track_peaks[i].max(l.abs().max(r.abs()));
                         }
                     }
@@ -478,6 +497,9 @@ fn mixer_thread(
                     }
                     if let Some(rb) = send_b_rb.as_mut() {
                         let _ = rb.write(&send_b_buf[..slot_len]);
+                    }
+                    if let Some(rb) = print_rb.as_mut() {
+                        let _ = rb.write(&print_buf[..slot_len]);
                     }
 
                     if let Some(ref mut scope_rb) = inner.scope_rb {
@@ -576,7 +598,10 @@ fn mixer_thread(
             // feed the mix straight back into itself — and envelopes are
             // control modules: their function-out audio is reachable as
             // an fx input (or a future VCA), not as a console strip
-            if entry.module_name == "send" || entry.module_name == "envelope" {
+            if entry.module_name == "send"
+                || entry.module_name == "envelope"
+                || entry.module_name == "mix"
+            {
                 continue;
             }
             let shm_name = entry.audio_shm.as_ref().unwrap();
@@ -612,6 +637,9 @@ fn mixer_thread(
                 inner.audio_sources.push(AudioSource {
                     shm_name: shm_name.clone(),
                     ringbuf,
+                    // tape returns stay off the print bus — the deck
+                    // must never re-record its own playback
+                    print: entry.module_name != "tape",
                 });
                 inner.tracks.push(TrackState {
                     name: label,

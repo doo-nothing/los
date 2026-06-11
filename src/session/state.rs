@@ -417,6 +417,50 @@ pub struct TemplateParams {
     pub level_src: Option<String>,
 }
 
+/// The tape deck (modules/tape.rs — docs/plans/tape-deck.md). Audio
+/// lives as WAVs under ~/.config/los/tape/, not in TOML.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TapeParams {
+    #[serde(default)]
+    pub format: u32,
+    pub speed: Option<f32>,
+    pub loop_on: Option<bool>,
+    pub loop_in: Option<u64>,
+    pub loop_out: Option<u64>,
+    #[serde(default)]
+    pub speed_src: Option<String>,
+    #[serde(default)]
+    pub tracks: Vec<TapeTrackParam>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TapeTrackParam {
+    /// None = the mix (print bus); Some("voice/1") = a claimed source.
+    #[serde(default)]
+    pub input: Option<String>,
+    pub fader: f32,
+    pub pan: f32,
+    #[serde(default)]
+    pub armed: bool,
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default)]
+    pub reversed: bool,
+    #[serde(default = "default_true")]
+    pub monitor: bool,
+    #[serde(default)]
+    pub fader_src: Option<String>,
+    #[serde(default)]
+    pub pan_src: Option<String>,
+    /// The recorded fader lane: (frame, value) points.
+    #[serde(default)]
+    pub auto: Vec<(u64, f32)>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// The filterbank module (modules/filterbank.rs —
 /// docs/plans/filterbank-296e.md).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -25,6 +25,7 @@ pub mod filterbank;
 pub mod mixer;
 pub mod scope;
 pub mod sequencer;
+pub mod tape;
 pub mod template;
 pub mod tone;
 pub mod voice;

@@ -92,6 +92,14 @@ of the sequencer's depth as much as a patch.
 
 ![the fx rack: the delay's tap ladders answering the pattern, the filterbank strolling](docs/demo-fx.gif)
 
+The fourth window is a **tape deck** (Tascam 4-track × OP-1): six
+tracks recording the mix or any single source, varispeed, loop
+overdubs, reverse, fader automation lanes, bounce, and export to
+`~/Music/los/` — fresh sessions arrive with track 1 armed over the
+drone's 16-bar form, so `r` is a song. An optional `tools/los-rave`
+helper reprocesses takes through RAVE neural models (the `vintage`
+model is a credible cassette).
+
 Fx modules (the **delay**, after the Buchla 288, and the
 **filterbank**, after the 296e) consume any audio source you point them
 at — a voice directly (insert: that strip leaves the console), or one
