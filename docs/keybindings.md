@@ -10,9 +10,9 @@ Status markers: **✅ today** · **🔜 v1** (see `docs/plans/v1-polish.md`) ·
 
 | Rule | Meaning |
 |------|---------|
-| Axis rule | Navigate along the module's visual layout axis; adjust on the perpendicular. Vertical param list → j/k select, h/l adjust. Horizontal strip (mixer channels, sequencer steps) → h/l select, j/k adjust. |
+| Axis rule | Navigate along the module's visual layout axis; adjust on the perpendicular. Vertical param list → j/k select, h/l adjust. Horizontal strip (sequencer steps) → h/l select, j/k adjust. 2D grids (mixer console) → h/l and j/k both navigate; a dedicated adjust key (`-`/`=`) turns the knob. |
 | Counts | A number prefix repeats any nav/adjust key: `5l`, `3j`, `10u`. ✅ |
-| Coarse | Shift-variant of an adjust key = ~10× step: `L` vs `l` (mixer: `J`/`K`). ✅ |
+| Coarse | Shift-variant of an adjust key = ~10× step: `L` vs `l` (mixer: `_`/`+`). ✅ |
 | `?` | Help overlay. ✅ |
 | `Ctrl-s` | Save module state. ✅ |
 | `Space` | Global transport play/pause (except sequencer insert mode); also `Ctrl-b p`/`Ctrl-b s` and `los ctl`. ✅ |
@@ -193,10 +193,28 @@ e.g. `envelope/0/eoc` for self-patching) · `:set rise 0|100ms|2s|1.5m|0.42`
 (also fall/shape/atten/offset/pluck, `mode trig|gate`) · `:` · undo (all ✅)
 
 ### Mixer
-Strips are vertical rows: `j/k` select strip (counts) · `h/l` level
-down/up · `H/L` coarse ·
-`<`/`>` pan · `gg` first track / `G` master · `m` mute ·
-`s` solo · `:` · undo (all ✅)
+The console: one vertical strip per audio source plus MASTER, signal
+order top to bottom — drive · hi · mid · freq · lo · pan · fader
+(master swaps pan for **width**). Per-channel chain is
+drive → EQ → pan → fader; the meter lives inside the fader. All ✅:
+
+| Key | Action |
+|-----|--------|
+| `h` / `l` | select strip (channels, then MASTER; counts, wraps) |
+| `j` / `k` | select param within the strip (counts, wraps) |
+| `-` / `=` | adjust the selected param (counts) |
+| `_` / `+` (or `H`/`L`) | coarse adjust |
+| `0` | reset the selected param to its default |
+| `@` | bind a mod source to the selected param · `x` unbinds |
+| `m` / `s` | mute / solo the selected strip |
+| `gg` / `G` | first strip / MASTER |
+| mouse | wheel turns the selected knob · click selects a strip |
+
+Every strip param — drive, EQ gains, mid freq, pan, fader, master
+width — is mod-bindable; bound values render in the source's cable
+color with a `▸`, and a ghost tick on the fader shows the live
+modulated level. Short panes collapse to dense rows plus a one-line
+detail of the selected strip. `:` and undo as everywhere.
 
 ### Scope
 Rebuilt as a vertical param list (✅): `j/k` select (mode, source, channel,

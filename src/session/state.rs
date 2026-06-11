@@ -264,14 +264,60 @@ pub struct MixerParams {
     pub master: Option<f32>,
     #[serde(default)]
     pub tracks: Vec<MixerTrackParam>,
+    // master strip console params (v2): EQ + drive + width
+    #[serde(default)]
+    pub master_drive: f32,
+    #[serde(default)]
+    pub master_eq_lo: f32,
+    #[serde(default)]
+    pub master_eq_mid: f32,
+    #[serde(default = "default_mid_freq")]
+    pub master_eq_freq: f32,
+    #[serde(default)]
+    pub master_eq_hi: f32,
+    #[serde(default = "default_width")]
+    pub master_width: f32,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+fn default_mid_freq() -> f32 {
+    0.5
+}
+fn default_width() -> f32 {
+    1.0
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MixerTrackParam {
     pub level: f32,
     pub pan: f32,
     pub mute: bool,
     pub solo: bool,
+    // console strip (v2): drive -> 3-band EQ; gains in dB, freq 0..1
+    #[serde(default)]
+    pub drive: f32,
+    #[serde(default)]
+    pub eq_lo: f32,
+    #[serde(default)]
+    pub eq_mid: f32,
+    #[serde(default = "default_mid_freq")]
+    pub eq_freq: f32,
+    #[serde(default)]
+    pub eq_hi: f32,
+    // mod-input bindings, one per bindable param ("module/inst/output")
+    #[serde(default)]
+    pub level_src: Option<String>,
+    #[serde(default)]
+    pub pan_src: Option<String>,
+    #[serde(default)]
+    pub drive_src: Option<String>,
+    #[serde(default)]
+    pub lo_src: Option<String>,
+    #[serde(default)]
+    pub mid_src: Option<String>,
+    #[serde(default)]
+    pub freq_src: Option<String>,
+    #[serde(default)]
+    pub hi_src: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
