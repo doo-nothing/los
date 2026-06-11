@@ -780,8 +780,12 @@ fn write_house_patch() {
     c[14] = maybe(64, 45, 55);
 
     let mut d = vec![off(); 16];
-    d[0] = note(45, 54); // A2 — just the root, hushed
-    d[8] = maybe(52, 38, 80); // E3, barely there
+    d[0] = note(45, 44); // A2 — just the root, hushed
+    d[8] = maybe(52, 30, 80); // E3, barely there
+
+    // slot e — the ghost: one breath per pattern, for the outro floor
+    let mut gh = vec![off(); 16];
+    gh[0] = note(45, 34);
 
     let t1 = TrackParam {
         steps: a,
@@ -800,6 +804,7 @@ fn write_house_patch() {
             SlotParam { slot: 1, steps: b, length: Some(16), pulses: None, rotation: None },
             SlotParam { slot: 2, steps: c, length: Some(16), pulses: None, rotation: None },
             SlotParam { slot: 3, steps: d, length: Some(16), pulses: None, rotation: None },
+            SlotParam { slot: 4, steps: gh, length: Some(16), pulses: None, rotation: None },
         ],
         swing: 50,
         groove: None,
@@ -912,9 +917,9 @@ fn write_house_patch() {
             MacroCmd::SetCycle { track: 2, mode: CycleMode::Drunk },
             MacroCmd::SetBpm { bpm: 90.0 },
         ]),
-        // g — the outro: thin line alone, very slow
+        // g — the outro: one ghost note alone, very slow
         mac("g", vec![
-            MacroCmd::SwitchPattern { track: 0, slot: 3 },
+            MacroCmd::SwitchPattern { track: 0, slot: 4 },
             MacroCmd::SetMute { track: 0, muted: false },
             MacroCmd::SetMute { track: 2, muted: true },
             MacroCmd::SetBpm { bpm: 58.0 },
@@ -2178,7 +2183,7 @@ mod tests {
         assert_eq!(seq.bpm, Some(74.0));
         assert_eq!(seq.playing, Some(true), "the house opens breathing");
         assert_eq!(seq.tracks.len(), 3);
-        assert_eq!(seq.tracks[0].slots.len(), 3, "melody carries slots b, c, d");
+        assert_eq!(seq.tracks[0].slots.len(), 4, "melody carries slots b, c, d + the ghost");
         assert_eq!(seq.tracks[1].mode, crate::state::TrackMode::Modulation);
         assert_eq!(seq.tracks[2].length, Some(12), "polymetric bass");
         assert_eq!(seq.macros.len(), 8, "eight section verbs");
