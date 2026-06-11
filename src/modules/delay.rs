@@ -723,7 +723,7 @@ fn global_label(r: GlobalRow) -> &'static str {
     match r {
         GlobalRow::Input => "input",
         GlobalRow::Time => "time",
-        GlobalRow::Regen => "regen",
+        GlobalRow::Regen => "fdbk",
         GlobalRow::Shim => "shim",
         GlobalRow::Wash => "wash",
         GlobalRow::Dry => "dry",
@@ -873,7 +873,8 @@ fn draw_ui(
                 for (i, t) in s.tap.iter().enumerate() {
                     let bound = t.srcs[1].is_some();
                     let live = t.eff[1];
-                    let meter = if i < s.taps { s.followers[i + 1].min(1.0) } else { 0.0 };
+                    let meter =
+                        if i < s.taps { theme::meter_frac(s.followers[i + 1]) } else { 0.0 };
                     spans.push(Span::raw("  "));
                     if bound && fr == row_of(live) {
                         let cable = t.srcs[1]
@@ -964,7 +965,7 @@ fn draw_ui(
                     format!(
                         "t{} {} ",
                         i + 1,
-                        theme::meter_char(s.followers[i + 1].min(1.0))
+                        theme::meter_char(theme::meter_frac(s.followers[i + 1]))
                     ),
                     style,
                 ));
@@ -1012,7 +1013,7 @@ fn draw_ui(
                 Line::from("  u/^r  :    Undo / redo · patches/:set · Space"),
                 Line::from(""),
                 Line::from("8 series taps at 1×–8× the stage time; sweeping"),
-                Line::from("time repitches the line. regen/shim/wash are the"),
+                Line::from("time repitches the line. fdbk/shim/wash are the"),
                 Line::from("feedback characters (plain · +1 oct · reverb)."),
                 Line::from("Followers publish as delay/N/in + t1…t8."),
                 Line::from(""),
@@ -1141,6 +1142,8 @@ pub fn run(instance: usize) -> Result<()> {
     let manifest = Manifest::open().or_else(|_| Manifest::create())?;
     let mut ui_entries: Vec<crate::shm::ManifestEntry> = Vec::new();
     let mut ui_entries_at: Option<Instant> = None;
+    // the tap fader currently held by the mouse
+    let mut grabbed: Option<usize> = None;
     let mut baseline =
         state::to_toml_string(&snapshot_params(&shared.lock().unwrap())).unwrap_or_default();
 
@@ -1207,33 +1210,45 @@ pub fn run(instance: usize) -> Result<()> {
                         ex_msg = msg;
                     }
                 }
-                MouseEventKind::Down(_) | MouseEventKind::Drag(_) => {
-                    use crate::undo::{ParamUndo, ParamValue};
+                MouseEventKind::Down(_) => {
+                    // click selects; clicking a tap's fader grabs it
                     let h = terminal.size().map(|r| r.height as usize).unwrap_or(0);
                     let mut s = shared.lock().unwrap();
                     let col = m.column as usize;
                     let strip = if col < MAX_TAPS * TAP_W { col / TAP_W } else { GLOBAL_STRIP };
-                    if matches!(m.kind, MouseEventKind::Down(_)) {
-                        s.selected = strip;
-                        s.sel_row = s.sel_row.min(s.rows_in(s.selected) - 1);
-                    }
-                    // click/drag in the fader area throws that tap's fader
+                    s.selected = strip;
+                    s.sel_row = s.sel_row.min(s.rows_in(s.selected) - 1);
                     let rows = fader_rows_for(h);
-                    let row = m.row as usize;
                     if strip < MAX_TAPS
                         && h >= CONSOLE_MIN_H
-                        && (FADER_TOP..FADER_TOP + rows).contains(&row)
+                        && (FADER_TOP..FADER_TOP + rows).contains(&(m.row as usize))
                     {
-                        s.selected = strip;
                         s.sel_row = TAP_ROWS.len() - 1; // the fader row
-                        let value = 1.0 - (row - FADER_TOP) as f32 / (rows - 1) as f32;
-                        let slot = strip * TAP_STRIDE + 2;
-                        let old = s.get_param(slot);
-                        s.tap[strip].level = value.clamp(0.0, 1.0);
-                        if let Some(old) = old {
-                            history.record(slot, "Fader", old, ParamValue::F32(value));
-                        }
+                        grabbed = Some(strip);
                     }
+                }
+                MouseEventKind::Drag(_) => {
+                    // only the grabbed fader follows, only vertically —
+                    // crossing other taps must never throw THEIR faders
+                    let Some(strip) = grabbed else { continue };
+                    use crate::undo::{ParamUndo, ParamValue};
+                    let h = terminal.size().map(|r| r.height as usize).unwrap_or(0);
+                    let rows = fader_rows_for(h);
+                    if h < CONSOLE_MIN_H || rows < 2 {
+                        continue;
+                    }
+                    let row = (m.row as usize).clamp(FADER_TOP, FADER_TOP + rows - 1);
+                    let value = 1.0 - (row - FADER_TOP) as f32 / (rows - 1) as f32;
+                    let mut s = shared.lock().unwrap();
+                    let slot = strip * TAP_STRIDE + 2;
+                    let old = s.get_param(slot);
+                    s.tap[strip].level = value.clamp(0.0, 1.0);
+                    if let Some(old) = old {
+                        history.record(slot, "Fader", old, ParamValue::F32(value));
+                    }
+                }
+                MouseEventKind::Up(_) => {
+                    grabbed = None;
                 }
                 _ => {}
             }

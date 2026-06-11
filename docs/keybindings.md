@@ -242,7 +242,7 @@ unbind · `u`/`Ctrl-r` · `:set rate|shape|depth|pitch|level|polar <v>` ·
 The time domain processor (after the Buchla 288 —
 [the design doc](plans/delay-288.md)). A little console: strips T1–T8
 (rows pan · phase · level, the fader's meter is that tap's envelope
-follower) plus GLOBAL (input · time · regen · shim · wash · dry ·
+follower) plus GLOBAL (input · time · fdbk · shim · wash · dry ·
 taps). Mixer dialect: `h/l` strip · `j/k` row · `K`/`J` (or `=`/`-`)
 adjust 1% (`_`/`+` 5%, counts) · `0` reset · `m` cycle tap phase
 (+ · −, off is the mute) · `@` bind a mod source — on the input row it
@@ -267,7 +267,12 @@ mouse. Followers publish as `filterbank/N/b1`–`b16`. All ✅
 ### Mixer sends (fx routing)
 Every strip (master included) has `sa`/`sb` rows between pan and the
 fader: post-fader taps into the two send buses, which appear as
-`send/0` and `send/1` in every fx module's input picker. The classic
+`send/0` and `send/1` in every fx module's input picker. The console
+seats **sound sources only** — envelopes keep their attenuverters on
+their own panel (their function-out audio is still reachable as any fx
+module's input). The fresh session cables voices into both buses and
+leans the BANK's return into send A, so the spectrum echoes through
+the delay (`fdbk` on the delay is its feedback). The classic
 patch is strips → send → fx → the fx module's own strip (the return).
 Inserts skip the bus: point the fx input at a voice directly and its
 strip leaves the console. Fx-into-fx chains work the same way. Master

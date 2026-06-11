@@ -252,6 +252,10 @@ struct SequencerState {
     current_track: usize,
     bpm: f64,
     playing: bool,
+    /// Set when a loaded save carried an explicit play flag — only then
+    /// may this instance seed the global transport (a second sequencer
+    /// with no save must not stomp the first one's restored "playing").
+    seed_play: Option<bool>,
     current_steps: Vec<usize>,
     selected: usize,
     last_notes: Vec<Option<u8>>,
@@ -316,6 +320,7 @@ impl Default for SequencerState {
             bpm: 120.0,
             // a fresh session waits for Space — never opens with sound
             playing: false,
+            seed_play: None,
             current_steps: vec![0; track_count],
             selected: 0,
             last_notes: vec![None; track_count],
@@ -3026,11 +3031,15 @@ fn sequencer_thread(
         Err(_) => ShmTransport::create(48000)?,
     };
 
-    // Seed the global play flag from loaded/default state once; from here on
-    // the SHM flag is the source of truth (any module or `los ctl` may flip it).
+    // Seed the global play flag once, and only when a loaded save said
+    // so explicitly; from here on the SHM flag is the source of truth
+    // (any module or `los ctl` may flip it). Stateless instances (the fx
+    // rack's SEQ 1 on a fresh boot) must not stomp the flag.
     {
         let s = state.lock().unwrap();
-        transport.set_playing(s.playing);
+        if let Some(p) = s.seed_play {
+            transport.set_playing(p);
+        }
     }
 
     // Global step counter the playheads derive from. Phase-accumulated so
@@ -4959,6 +4968,7 @@ pub fn run(instance: usize) -> Result<()> {
         }
         if let Some(playing) = params.playing {
             s.playing = playing;
+            s.seed_play = Some(playing);
         }
         if !params.tracks.is_empty() {
             apply_tracks(&mut s, &params);

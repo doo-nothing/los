@@ -844,7 +844,7 @@ fn draw_ui(
                     // bound or not) has left the edited fader behind
                     let ghost =
                         fr == row_of(s.band_eff[i]) && (s.band_eff[i] - lvl).abs() > 0.02;
-                    let meter = s.followers[i].min(1.0);
+                    let meter = theme::meter_frac(s.followers[i]);
                     spans.push(Span::raw(" "));
                     // fader column: ghost (the live gain after morph /
                     // CV / window) over knob over rail
@@ -903,7 +903,7 @@ fn draw_ui(
                     theme::signal(theme::audio())
                 };
                 m.push(Span::styled(
-                    theme::meter_char(s.followers[i].min(1.0)).to_string(),
+                    theme::meter_char(theme::meter_frac(s.followers[i])).to_string(),
                     style,
                 ));
             }
@@ -1074,6 +1074,8 @@ pub fn run(instance: usize) -> Result<()> {
     let manifest = Manifest::open().or_else(|_| Manifest::create())?;
     let mut ui_entries: Vec<crate::shm::ManifestEntry> = Vec::new();
     let mut ui_entries_at: Option<Instant> = None;
+    // the band fader currently held by the mouse
+    let mut grabbed: Option<usize> = None;
     let mut baseline =
         state::to_toml_string(&snapshot_params(&shared.lock().unwrap())).unwrap_or_default();
 
@@ -1142,37 +1144,47 @@ pub fn run(instance: usize) -> Result<()> {
                         ex_msg = msg;
                     }
                 }
-                MouseEventKind::Down(_) | MouseEventKind::Drag(_) => {
-                    use crate::undo::{ParamUndo, ParamValue};
+                MouseEventKind::Down(_) => {
+                    // click selects; clicking the wall grabs that band —
+                    // dragging then paints ONLY the grabbed band
                     let h = terminal.size().map(|r| r.height as usize).unwrap_or(0);
                     let mut s = shared.lock().unwrap();
                     let col = m.column as usize;
                     let strip = if col < BANDS * BAND_W { col / BAND_W } else { GLOBAL_STRIP };
-                    if matches!(m.kind, MouseEventKind::Down(_)) {
-                        s.selected = strip;
-                        s.sel_row = s.sel_row.min(s.rows_in(s.selected) - 1);
-                    }
-                    // click/drag in the wall paints the edited bank's fader
+                    s.selected = strip;
+                    s.sel_row = s.sel_row.min(s.rows_in(s.selected) - 1);
                     let rows = fader_rows_for(h);
-                    let row = m.row as usize;
                     if strip < BANDS
                         && h >= CONSOLE_MIN_H
-                        && (FADER_TOP..FADER_TOP + rows).contains(&row)
+                        && (FADER_TOP..FADER_TOP + rows).contains(&(m.row as usize))
                     {
-                        s.selected = strip;
-                        let value =
-                            (1.0 - (row - FADER_TOP) as f32 / (rows - 1) as f32).clamp(0.0, 1.0);
-                        let slot = strip * BAND_STRIDE + s.edit_bank as usize;
-                        let old = s.get_param(slot);
-                        if s.edit_bank {
-                            s.bank_b[strip] = value;
-                        } else {
-                            s.bank_a[strip] = value;
-                        }
-                        if let Some(old) = old {
-                            history.record(slot, "Fader", old, ParamValue::F32(value));
-                        }
+                        grabbed = Some(strip);
                     }
+                }
+                MouseEventKind::Drag(_) => {
+                    let Some(strip) = grabbed else { continue };
+                    use crate::undo::{ParamUndo, ParamValue};
+                    let h = terminal.size().map(|r| r.height as usize).unwrap_or(0);
+                    let rows = fader_rows_for(h);
+                    if h < CONSOLE_MIN_H || rows < 2 {
+                        continue;
+                    }
+                    let row = (m.row as usize).clamp(FADER_TOP, FADER_TOP + rows - 1);
+                    let value = 1.0 - (row - FADER_TOP) as f32 / (rows - 1) as f32;
+                    let mut s = shared.lock().unwrap();
+                    let slot = strip * BAND_STRIDE + s.edit_bank as usize;
+                    let old = s.get_param(slot);
+                    if s.edit_bank {
+                        s.bank_b[strip] = value;
+                    } else {
+                        s.bank_a[strip] = value;
+                    }
+                    if let Some(old) = old {
+                        history.record(slot, "Fader", old, ParamValue::F32(value));
+                    }
+                }
+                MouseEventKind::Up(_) => {
+                    grabbed = None;
                 }
                 _ => {}
             }

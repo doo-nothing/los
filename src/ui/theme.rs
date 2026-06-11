@@ -128,6 +128,18 @@ pub const FALL_ARROW: char = '↘';
 pub const SUSTAIN_BAR: char = '―';
 
 /// A meter cell for a 0..1 level.
+/// Map a raw peak amplitude onto meter ladder height perceptually:
+/// -48 dBFS sits at the bottom, 0 dBFS at the top. Linear amplitude
+/// wastes the ladder — audible-but-modest signals (-20 dB ≈ 0.1) barely
+/// lit two cells; in dB they stand more than half tall, like a console.
+pub fn meter_frac(amplitude: f32) -> f32 {
+    if amplitude <= 0.0 {
+        return 0.0;
+    }
+    let db = 20.0 * amplitude.max(1e-6).log10();
+    ((db + 48.0) / 48.0).clamp(0.0, 1.0)
+}
+
 /// One cell of a vertical LED meter ladder, `row` 0 at the top. Lit
 /// cells fill from the bottom with an eighth-block tip, and the ladder
 /// wears console zones: AUDIO green through the body, hot amber above
@@ -418,6 +430,40 @@ pub fn status(mode: &str, msg: &str, right: &str, width: usize) -> Line<'static>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn meter_frac_is_perceptual() {
+        assert_eq!(meter_frac(0.0), 0.0);
+        assert_eq!(meter_frac(1.0), 1.0);
+        let quiet = meter_frac(0.1); // -20 dBFS
+        assert!(quiet > 0.5, "-20 dB stands over half tall: {}", quiet);
+        assert!(meter_frac(0.003) < 0.05, "below -48 dB vanishes");
+        assert!(meter_frac(0.5) > meter_frac(0.25));
+    }
+
+    #[test]
+    fn meter_ladder_fills_from_bottom_with_zones() {
+        for r in 0..8 {
+            assert_eq!(meter_cell(0.0, r, 8).0, '╵', "silence is all notches");
+            assert_eq!(meter_cell(1.0, r, 8).0, '█', "full scale all lit");
+        }
+        assert_eq!(meter_cell(1.0, 0, 8).1, signal(alert()), "top is the clip cell");
+        assert_eq!(meter_cell(1.0, 7, 8).1, signal(audio()), "bottom is green");
+        assert_eq!(meter_cell(1.0, 1, 8).1, signal(amber_hi()), "below clip runs hot");
+        assert_eq!(meter_cell(0.5, 4, 8).0, '█');
+        assert_eq!(meter_cell(0.5, 3, 8).0, '╵');
+    }
+
+    #[test]
+    fn knob_rides_the_rail_half_cell() {
+        assert_eq!(knob_cell(1.0, 0, 8), Some('▀'));
+        assert_eq!(knob_cell(0.0, 7, 8), Some('▄'));
+        assert_eq!(knob_cell(1.0, 4, 8), None);
+        for v in [0.0_f32, 0.13, 0.5, 0.8, 1.0] {
+            let hits = (0..8).filter(|r| knob_cell(v, *r, 8).is_some()).count();
+            assert_eq!(hits, 1, "exactly one cell carries the knob at {}", v);
+        }
+    }
 
     #[test]
     fn segments_carve_out_the_active_option() {

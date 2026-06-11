@@ -708,58 +708,250 @@ fn build_house_layout(exe: &str) -> Result<()> {
     Ok(())
 }
 
-/// Seed the fresh session's curated default patch: the fx rack arrives
-/// pre-cabled. Modules load these state files as they spawn.
+/// Seed the fresh session's curated default patch — "the house drone".
 ///
-/// The routing story (see docs/tour.md):
-///   strips → send A (25%) → DELAY → its strip on the console (the return)
-///   strips → send B (20%) → BANK  → its strip, morph swept by MATHs 1 ch1
+/// A slow, melodic, evolving piece (à la Alessandro Cortini) that plays
+/// the moment the session opens and demonstrates the rig's depth:
+/// pattern slots a–d on the melody, macros sequenced by the macro lane
+/// (the 16-bar form runs itself), probability and ratchets for life,
+/// a drunk modulation track sweeping the filterbank's window, polymetric
+/// ping-pong bass, and the fx chain wired so everything breathes:
+///
+///   voices → send A (30%) ───────────────► DELAY ─► console
+///   voices → send B (25%) ─► BANK ─► console ─► send A (30%) ─► DELAY
+///   MATHs 1 ch1 (looping) ─► bank morph · seq t2 (drunk) ─► bank wcent
 fn write_house_patch() {
-    // delay 0: a tasteful echo on send A — wet-only (the dry path is
-    // the console itself), a little regeneration, a whisper of wash
+    use state::{DelayTapParam, EnvelopeChannelParams, MacroCmd, MacroParam, Quant, SlotParam,
+        StepParam, TrackParam};
+    use state::{CycleMode, DelayUnit, TrackMode};
+
+    // ── helpers: a silent step, a note, an ornament ────────────────────
+    let off = || StepParam {
+        active: false,
+        note: 60,
+        velocity: 100,
+        mod_value: 0.0,
+        prob: 100,
+        bind: None,
+        delay: 0.0,
+        delay_unit: DelayUnit::Ms,
+        delay_prob: 100,
+        repeats: 1,
+        repeat_prob: 100,
+    };
+    let note = |n: u8, v: u8| StepParam { active: true, note: n, velocity: v, ..off() };
+    let maybe = |n: u8, v: u8, p: u8| StepParam { prob: p, ..note(n, v) };
+
+    // ── sequencer 0: the piece (A minor, 74 BPM) ───────────────────────
+    // t1 — the melody voice 0 plays. Four pattern slots, switched by the
+    // macro lane over a 16-bar form:
+    //   a: the theme   b: fuller arp   c: high shimmer   d: breakdown
+    let mut a = vec![off(); 16];
+    a[0] = note(57, 92); // A3 — the anchor
+    a[3] = maybe(60, 68, 85); // C4, usually
+    a[6] = note(64, 78); // E4
+    a[10] = maybe(55, 62, 70); // G3, often
+    a[12] = StepParam { repeats: 2, repeat_prob: 55, ..note(57, 84) }; // gentle ratchet, sometimes
+    a[14] = StepParam { delay: 45.0, delay_prob: 80, ..maybe(59, 55, 45) }; // late B3 ornament
+
+    let mut b = vec![off(); 16];
+    for (i, n, v) in [(0usize, 57u8, 90u8), (2, 60, 64), (4, 64, 76), (6, 67, 60),
+        (8, 69, 82), (10, 67, 58), (12, 64, 72), (14, 60, 55)]
+    {
+        b[i] = note(n, v);
+    }
+    b[6].prob = 75;
+    b[10].prob = 60;
+    b[12] = StepParam { repeats: 3, repeat_prob: 45, ..b[12].clone() };
+
+    let mut c = vec![off(); 16];
+    c[0] = maybe(69, 58, 90); // A4
+    c[5] = maybe(72, 48, 65); // C5
+    c[8] = maybe(76, 52, 75); // E5
+    c[11] = StepParam { delay: 60.0, delay_prob: 100, ..maybe(71, 40, 50) }; // pushed B4
+    c[14] = maybe(64, 45, 55);
+
+    let mut d = vec![off(); 16];
+    d[0] = note(45, 96); // A2 — just the root, wide open
+    d[8] = maybe(52, 70, 80); // E3
+
+    let t1 = TrackParam {
+        steps: a,
+        length: Some(16),
+        pulses: None,
+        rotation: None,
+        muted: false,
+        mode: TrackMode::Note,
+        cycle: CycleMode::Forward,
+        scale: None,
+        scale_cents: vec![],
+        scale_period: None,
+        root: None,
+        active_slot: 0,
+        slots: vec![
+            SlotParam { slot: 1, steps: b, length: Some(16), pulses: None, rotation: None },
+            SlotParam { slot: 2, steps: c, length: Some(16), pulses: None, rotation: None },
+            SlotParam { slot: 3, steps: d, length: Some(16), pulses: None, rotation: None },
+        ],
+        swing: 50,
+        groove: None,
+        humanize: 2.5,
+        ratchet_decay: 35,
+    };
+
+    // t2 — a drunk modulation track wandering the filterbank's window
+    // (wcent is bound to sequencer/0/t2 below): the spectrum strolls.
+    let walk = [0.18, 0.62, 0.35, 0.8, 0.5, 0.28, 0.7, 0.42];
+    let t2 = TrackParam {
+        steps: walk
+            .iter()
+            .map(|m| StepParam { active: true, mod_value: *m, ..off() })
+            .collect(),
+        length: Some(8),
+        pulses: None,
+        rotation: None,
+        muted: false,
+        mode: TrackMode::Modulation,
+        cycle: CycleMode::Drunk,
+        scale: None,
+        scale_cents: vec![],
+        scale_period: None,
+        root: None,
+        active_slot: 0,
+        slots: vec![],
+        swing: 50,
+        groove: None,
+        humanize: 0.0,
+        ratchet_decay: 0,
+    };
+
+    // t3 — the bass voice 1 plays: 12 steps against t1's 16 (polymeter),
+    // ping-ponging, with a rare ratcheted approach note.
+    let mut bass = vec![off(); 12];
+    bass[0] = note(33, 100); // A1
+    bass[4] = maybe(40, 72, 85); // E2
+    bass[8] = maybe(43, 58, 60); // G2
+    bass[10] = StepParam { repeats: 2, repeat_prob: 50, ..maybe(38, 50, 40) }; // D2
+    let t3 = TrackParam {
+        steps: bass,
+        length: Some(12),
+        pulses: None,
+        rotation: None,
+        muted: false,
+        mode: TrackMode::Note,
+        cycle: CycleMode::PingPong,
+        scale: None,
+        scale_cents: vec![],
+        scale_period: None,
+        root: None,
+        active_slot: 0,
+        slots: vec![],
+        swing: 54,
+        groove: None,
+        humanize: 1.5,
+        ratchet_decay: -25, // bass ratchets crescendo into the beat
+    };
+
+    // macros: the form's verbs. The lane fires them bar by bar, so the
+    // piece evolves on its own — and they're yours to fire with @a–@d.
+    let mac = |id: &str, cmds: Vec<MacroCmd>| MacroParam {
+        id: id.into(),
+        quant: Quant::Bar,
+        cmds,
+    };
+    let macros = vec![
+        mac("a", vec![
+            MacroCmd::SwitchPattern { track: 0, slot: 0 },
+            MacroCmd::SetMute { track: 2, muted: false },
+            MacroCmd::SetCycle { track: 2, mode: CycleMode::PingPong },
+        ]),
+        mac("b", vec![MacroCmd::SwitchPattern { track: 0, slot: 1 }]),
+        mac("c", vec![
+            MacroCmd::SwitchPattern { track: 0, slot: 2 },
+            MacroCmd::SetCycle { track: 2, mode: CycleMode::Reverse },
+        ]),
+        mac("d", vec![
+            MacroCmd::SwitchPattern { track: 0, slot: 3 },
+            MacroCmd::SetMute { track: 2, muted: true },
+        ]),
+    ];
+    // the 16-bar form: theme → arp → shimmer → arp → theme → breakdown → arp
+    let lane: Vec<String> = ["a", "", "", "b", "", "", "c", "", "b", "", "a", "", "d", "", "b", ""]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    let seq = state::SequencerParams {
+        bpm: Some(74.0),
+        playing: Some(true), // the house opens already breathing
+        euclidean_pulses: None,
+        euclidean_length: None,
+        euclidean_rotation: None,
+        steps: vec![],
+        tracks: vec![t1, t2, t3],
+        macros,
+        lane,
+        lane_len: Some(16),
+    };
+    let _ = state::save_module_state("sequencer", 0, &seq);
+
+    // ── delay 0: a tasteful echo on send A — wet-only, real feedback,
+    // tap levels decaying with a bloom on tap 8, pans widening with age
+    let levels = [0.85, 0.5, 0.65, 0.4, 0.55, 0.35, 0.45, 0.75];
+    let pans = [-0.15, 0.18, -0.25, 0.3, -0.35, 0.4, -0.45, 0.5];
     let delay = state::DelayParams {
         format: state::STATE_FORMAT,
-        time: Some(0.160),
-        regen: Some(0.30),
+        time: Some(0.152),
+        regen: Some(0.45),
         shim: Some(0.0),
-        wash: Some(0.15),
+        wash: Some(0.12),
         dry: Some(0.0),
         taps: Some(8),
         input: Some(String::from("send/0")),
+        tap: (0..8)
+            .map(|i| DelayTapParam {
+                level: levels[i],
+                pan: pans[i],
+                phase: String::from("+"),
+                pan_src: None,
+                level_src: None,
+            })
+            .collect(),
         ..Default::default()
     };
     let _ = state::save_module_state("delay", 0, &delay);
 
-    // filterbank 0: on send B, wet-only, spectrum slowly breathing —
-    // morph rides MATHs 1's looping channel 1
+    // ── filterbank 0: on send B, wet-only, twice alive — morph breathes
+    // under MATHs 1's looping channel, and the 296-style window strolls
+    // the spectrum on the sequencer's drunk t2
     let bank = state::FilterbankParams {
         format: state::STATE_FORMAT,
         morph: Some(0.0),
-        split: Some(0.4),
+        wwidth: Some(0.5),
+        split: Some(0.45),
         dry: Some(0.0),
-        decay: Some(0.35),
+        decay: Some(0.42),
         input: Some(String::from("send/1")),
         morph_src: Some(String::from("envelope/1/ch1")),
+        wcent_src: Some(String::from("sequencer/0/t2")),
         ..Default::default()
     };
     let _ = state::save_module_state("filterbank", 0, &bank);
 
-    // MATHs 1: channel 1 cycling slowly = the LFO driving the bank's
-    // morph; the other channels stay stock for patching
-    let mut ch1 = state::EnvelopeChannelParams {
+    // ── MATHs 1: channel 1 cycling slowly — the LFO behind the morph
+    let ch1 = EnvelopeChannelParams {
         rise: 0.72,
         fall: 0.72,
         loop_mode: true,
         ..Default::default()
     };
-    ch1.shape = 0.5;
     let env1 = state::EnvelopeParams {
         format: state::STATE_FORMAT,
         channels: vec![
             ch1,
-            state::EnvelopeChannelParams::default(),
-            state::EnvelopeChannelParams::default(),
-            state::EnvelopeChannelParams::default(),
+            EnvelopeChannelParams::default(),
+            EnvelopeChannelParams::default(),
+            EnvelopeChannelParams::default(),
         ],
         logic_outputs: Default::default(),
     };
@@ -904,6 +1096,18 @@ pub fn create_session() -> Result<()> {
     build_fx_window(&exe)?;
     // land on the console, not the rack
     tmux_cmd_ok(&["select-window", "-t", "los:modules"]);
+
+    // the house patch opens already breathing: press play once the
+    // mixer brings the transport up (background — don't hold up attach)
+    std::thread::spawn(|| {
+        for _ in 0..40 {
+            if let Ok(mut t) = crate::shm::ShmTransport::open() {
+                t.set_playing(true);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    });
 
     install_transport_keys(&exe);
     install_shell_theme();
@@ -1759,6 +1963,46 @@ mod tests {
         assert_eq!(canonical_module("envelope"), Some("envelope"));
         assert_eq!(canonical_module("maths"), Some("envelope"));
         assert_eq!(canonical_module("nonsense"), None);
+    }
+
+    #[test]
+    fn house_patch_round_trips_and_is_composed() {
+        let _ = crate::state::ensure_dirs();
+        write_house_patch();
+
+        let seq: crate::state::SequencerParams =
+            crate::state::load_module_state("sequencer", 0).expect("seq state");
+        assert_eq!(seq.bpm, Some(74.0));
+        assert_eq!(seq.playing, Some(true), "the house opens breathing");
+        assert_eq!(seq.tracks.len(), 3);
+        assert_eq!(seq.tracks[0].slots.len(), 3, "melody carries slots b, c, d");
+        assert_eq!(seq.tracks[1].mode, crate::state::TrackMode::Modulation);
+        assert_eq!(seq.tracks[2].length, Some(12), "polymetric bass");
+        assert_eq!(seq.macros.len(), 4);
+        assert_eq!(seq.lane.len(), 16, "the 16-bar form");
+        assert!(seq.lane.iter().any(|m| m == "d"), "the breakdown is in the form");
+        assert!(
+            seq.tracks[0].steps.iter().any(|st| st.active && st.prob < 100),
+            "probability is in play"
+        );
+        assert!(
+            seq.tracks[0].steps.iter().any(|st| st.active && st.repeats > 1),
+            "ratchets are in play"
+        );
+
+        let delay: crate::state::DelayParams =
+            crate::state::load_module_state("delay", 0).expect("delay state");
+        assert_eq!(delay.input.as_deref(), Some("send/0"));
+        assert_eq!(delay.tap.len(), 8);
+        assert!(delay.regen.unwrap() > 0.3, "audible feedback out of the box");
+        assert!(delay.tap[0].level > delay.tap[5].level, "tap levels decay");
+
+        let bank: crate::state::FilterbankParams =
+            crate::state::load_module_state("filterbank", 0).expect("bank state");
+        assert_eq!(bank.input.as_deref(), Some("send/1"));
+        assert_eq!(bank.morph_src.as_deref(), Some("envelope/1/ch1"));
+        assert_eq!(bank.wcent_src.as_deref(), Some("sequencer/0/t2"));
+        assert!(bank.wwidth.unwrap() < 1.0, "the window is engaged");
     }
 
     #[test]
