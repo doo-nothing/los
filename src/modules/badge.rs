@@ -23,8 +23,8 @@ use ratatui::{
 };
 
 use crate::shm::{Manifest, ShmTransport};
-use crate::theme;
 use crate::state;
+use crate::theme;
 
 /// The mark. Solid cells get re-textured by the breath wave.
 const LOGO: [&str; 4] = [
@@ -115,7 +115,12 @@ fn session_name() -> String {
             let mut entries: Vec<_> = rd
                 .flatten()
                 .filter(|e| e.file_name().to_str().is_some_and(|n| n.ends_with(".toml")))
-                .filter_map(|e| e.metadata().ok().and_then(|m| m.modified().ok()).map(|t| (t, e)))
+                .filter_map(|e| {
+                    e.metadata()
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .map(|t| (t, e))
+                })
                 .collect();
             entries.sort_by_key(|(t, _)| *t);
             entries.last().map(|(_, e)| {

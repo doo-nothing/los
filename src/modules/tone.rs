@@ -1,5 +1,5 @@
-use std::time::{Duration, Instant};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
@@ -7,8 +7,7 @@ use crate::shm::{AudioRingbuf, Manifest};
 
 pub fn run(frequency: f32, instance: usize) -> Result<()> {
     let shm_name = format!("/los_audio_tone_{}", instance);
-    let mut ringbuf = AudioRingbuf::create(&shm_name)
-        .context("creating SHM audio ringbuffer")?;
+    let mut ringbuf = AudioRingbuf::create(&shm_name).context("creating SHM audio ringbuffer")?;
 
     let mut manifest = Manifest::open().or_else(|_| Manifest::create())?;
     manifest.register("tone", instance, Some(&shm_name), 0)?;
@@ -32,9 +31,8 @@ pub fn run(frequency: f32, instance: usize) -> Result<()> {
     );
 
     let mut block = vec![0.0_f32; slot_len];
-    let slot_duration = Duration::from_nanos(
-        slot_frames as u64 * 1_000_000_000 / sample_rate as u64,
-    );
+    let slot_duration =
+        Duration::from_nanos(slot_frames as u64 * 1_000_000_000 / sample_rate as u64);
 
     loop {
         let tick = Instant::now();

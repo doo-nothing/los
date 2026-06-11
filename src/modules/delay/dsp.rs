@@ -66,8 +66,17 @@ pub struct DelayLine {
 impl DelayLine {
     pub fn new(sample_rate: f32) -> Self {
         // 8 stages of TIME_MAX plus interpolation slack.
-        let len = (MAX_TAPS as f32 * TIME_MAX * sample_rate) as usize + 64;
-        Self { buf: vec![0.0; len], write: 0 }
+        Self::with_capacity((MAX_TAPS as f32 * TIME_MAX * sample_rate) as usize + 64)
+    }
+
+    /// A line sized for a specific maximum delay in samples (the
+    /// filterbank's per-band spread lines are short; 16 full-size
+    /// lines would be silly).
+    pub fn with_capacity(samples: usize) -> Self {
+        Self {
+            buf: vec![0.0; samples.max(8)],
+            write: 0,
+        }
     }
 
     #[inline]
@@ -102,7 +111,11 @@ pub struct Follower {
 impl Follower {
     pub fn new(sample_rate: f32) -> Self {
         let coeff = |tau: f32| 1.0 - (-1.0 / (tau * sample_rate)).exp();
-        Self { y: 0.0, atk: coeff(0.002), rel: coeff(0.150) }
+        Self {
+            y: 0.0,
+            atk: coeff(0.002),
+            rel: coeff(0.150),
+        }
     }
 
     #[inline]
@@ -263,9 +276,8 @@ impl DelayCore {
             // The feedback sum: plain regen per-sample, shimmer/wash
             // from the previous block's Faust pass, soft-clipped so
             // runaway settles into saturation.
-            let fb = soft_clip(
-                p.regen * tap8 + p.shim * self.shim_buf[f] + p.wash * self.wash_buf[f],
-            );
+            let fb =
+                soft_clip(p.regen * tap8 + p.shim * self.shim_buf[f] + p.wash * self.wash_buf[f]);
             self.line.push(x + fb);
             self.tap8_buf[f] = tap8;
 
@@ -325,11 +337,19 @@ mod tests {
         for _ in 0..480 {
             f.tick(1.0); // 10 ms of full scale
         }
-        assert!(f.value() > 0.95, "attack reaches in 10 ms, got {}", f.value());
+        assert!(
+            f.value() > 0.95,
+            "attack reaches in 10 ms, got {}",
+            f.value()
+        );
         for _ in 0..480 {
             f.tick(0.0); // 10 ms of silence
         }
-        assert!(f.value() > 0.5, "release holds past 10 ms, got {}", f.value());
+        assert!(
+            f.value() > 0.5,
+            "release holds past 10 ms, got {}",
+            f.value()
+        );
         for _ in 0..48_000 {
             f.tick(0.0);
         }
@@ -405,7 +425,13 @@ mod tests {
         let (i2, _) = block2
             .iter()
             .enumerate()
-            .fold((0, 0.0_f32), |acc, (i, &s)| if s.abs() > acc.1 { (i, s.abs()) } else { acc });
+            .fold((0, 0.0_f32), |acc, (i, &s)| {
+                if s.abs() > acc.1 {
+                    (i, s.abs())
+                } else {
+                    acc
+                }
+            });
         assert!(
             b2[i2] * block2[i2] < 0.0,
             "inverted phase flips polarity: {} vs {}",

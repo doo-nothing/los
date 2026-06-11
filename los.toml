@@ -1,17 +1,36 @@
 session_name = "los"
 
+# The house: window 1 (the console) + window 2 (the fx rack).
+# create_session builds this layout directly (conductor.rs:
+# build_house_layout + build_fx_window); this file mirrors it for the
+# declarative-layout path.
+
 [[modules]]
 type = "conductor"
 
 [[modules]]
 type = "sequencer"
+count = 2
 
 [[modules]]
 type = "voice"
-count = 1
+count = 2
+
+[[modules]]
+type = "envelope"
+count = 3
 
 [[modules]]
 type = "mixer"
 
 [[modules]]
 type = "scope"
+
+[[modules]]
+type = "delay"
+
+[[modules]]
+type = "filterbank"
+
+[[modules]]
+type = "badge"

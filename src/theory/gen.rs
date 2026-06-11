@@ -90,8 +90,7 @@ pub fn mutate(steps: &mut [GenStep], intensity: f32, pitch_span: u8, seed: u64) 
             3 => {
                 let i = rng.below(len as u64) as usize;
                 let delta = signed(5 + rng.below(16) as i16, &mut rng);
-                steps[i].velocity =
-                    (i16::from(steps[i].velocity) + delta).clamp(1, 127) as u8;
+                steps[i].velocity = (i16::from(steps[i].velocity) + delta).clamp(1, 127) as u8;
             }
             // `below(5) < 5`, so this arm is exactly kind 4.
             _ => {
@@ -238,8 +237,7 @@ pub fn markov(target: &mut [GenStep], sources: &[Vec<GenStep>], seed: u64) {
 
     // Learn: trigger transitions, note transitions, velocity stats.
     let mut trig = [[0u64; 2]; 2];
-    let mut note_next: std::collections::BTreeMap<u8, Vec<u8>> =
-        std::collections::BTreeMap::new();
+    let mut note_next: std::collections::BTreeMap<u8, Vec<u8>> = std::collections::BTreeMap::new();
     let mut notes_seen: Vec<u8> = Vec::new();
     let mut vels: Vec<f32> = Vec::new();
     let mut active_total = 0usize;
@@ -475,7 +473,11 @@ mod tests {
             mutate(&mut steps, 1.0, 3, seed);
             for s in &steps {
                 assert!((57..=63).contains(&s.note), "note {} out of span", s.note);
-                assert!((1..=127).contains(&s.velocity), "vel {} clamped wrong", s.velocity);
+                assert!(
+                    (1..=127).contains(&s.velocity),
+                    "vel {} clamped wrong",
+                    s.velocity
+                );
                 assert!(s.prob <= 100, "prob {} out of range", s.prob);
             }
         }
@@ -791,7 +793,12 @@ mod tests {
 
     #[test]
     fn lsystem_empty_no_panic() {
-        for rule in [LRule::Cantor, LRule::ThueMorse, LRule::Fibonacci, LRule::Sierpinski] {
+        for rule in [
+            LRule::Cantor,
+            LRule::ThueMorse,
+            LRule::Fibonacci,
+            LRule::Sierpinski,
+        ] {
             let mut steps: Vec<GenStep> = vec![];
             lsystem(&mut steps, rule, 0);
             assert!(steps.is_empty());
@@ -849,14 +856,10 @@ mod tests {
     #[test]
     fn lsystem_fibonacci_matches_rewrite() {
         // 0→01, 1→0 from 0; 0 = on. Expected mask computed from the rules.
-        let expected: Vec<bool> = expand(
-            &[0],
-            |s| if s == 0 { vec![0, 1] } else { vec![0] },
-            21,
-        )
-        .into_iter()
-        .map(|s| s == 0)
-        .collect();
+        let expected: Vec<bool> = expand(&[0], |s| if s == 0 { vec![0, 1] } else { vec![0] }, 21)
+            .into_iter()
+            .map(|s| s == 0)
+            .collect();
         let mut steps = vec![GenStep::default(); 21];
         lsystem(&mut steps, LRule::Fibonacci, 0);
         assert_eq!(mask_of(&steps), expected);
@@ -876,15 +879,17 @@ mod tests {
         for (i, &on) in m.iter().enumerate() {
             assert_eq!(on, (i & (i >> 1)) == 0, "fibbinary mismatch at {i}");
         }
-        assert_eq!(
-            &m[..8],
-            [true, true, true, false, true, true, false, false]
-        );
+        assert_eq!(&m[..8], [true, true, true, false, true, true, false, false]);
     }
 
     #[test]
     fn lsystem_only_touches_active() {
-        for rule in [LRule::Cantor, LRule::ThueMorse, LRule::Fibonacci, LRule::Sierpinski] {
+        for rule in [
+            LRule::Cantor,
+            LRule::ThueMorse,
+            LRule::Fibonacci,
+            LRule::Sierpinski,
+        ] {
             let mut steps = pattern16();
             let before = steps.clone();
             lsystem(&mut steps, rule, 1);
@@ -898,7 +903,12 @@ mod tests {
 
     #[test]
     fn lsystem_seed_is_ignored() {
-        for rule in [LRule::Cantor, LRule::ThueMorse, LRule::Fibonacci, LRule::Sierpinski] {
+        for rule in [
+            LRule::Cantor,
+            LRule::ThueMorse,
+            LRule::Fibonacci,
+            LRule::Sierpinski,
+        ] {
             let mut a = vec![GenStep::default(); 32];
             let mut b = vec![GenStep::default(); 32];
             lsystem(&mut a, rule, 0);

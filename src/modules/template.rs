@@ -104,8 +104,14 @@ pub enum Param {
 }
 
 /// Row order — also the undo-slot order (see `ParamUndo` below).
-const ROWS: [Param; 6] =
-    [Param::Rate, Param::Shape, Param::Depth, Param::Pitch, Param::Level, Param::Polar];
+const ROWS: [Param; 6] = [
+    Param::Rate,
+    Param::Shape,
+    Param::Depth,
+    Param::Pitch,
+    Param::Level,
+    Param::Polar,
+];
 
 /// Which params accept a mod-source binding, in `srcs[]` index order.
 /// Shape and Polar stay manual-only on purpose: switching a waveform from
@@ -292,7 +298,9 @@ impl crate::undo::ParamUndo for TemplateState {
             }
             return;
         }
-        let Some(p) = ROWS.get(slot).copied() else { return };
+        let Some(p) = ROWS.get(slot).copied() else {
+            return;
+        };
         match (p, value) {
             (Param::Shape, V::Usize(v)) => self.shape = v.min(SHAPES.len() - 1),
             (Param::Polar, V::Bool(v)) => self.unipolar = v,
@@ -349,7 +357,12 @@ fn apply_params(s: &mut TemplateState, p: &state::TemplateParams) {
         s.unipolar = v;
     }
     let parse = |o: &Option<String>| o.as_deref().and_then(SourceAddr::parse);
-    s.srcs = [parse(&p.rate_src), parse(&p.depth_src), parse(&p.pitch_src), parse(&p.level_src)];
+    s.srcs = [
+        parse(&p.rate_src),
+        parse(&p.depth_src),
+        parse(&p.pitch_src),
+        parse(&p.level_src),
+    ];
     s.resolved = Default::default();
 }
 
@@ -377,8 +390,7 @@ fn audio_thread(state: Arc<Mutex<TemplateState>>, instance: usize) -> Result<()>
     //    the mixer labels the strip from it, and DESIGN.md §7.1 reserves
     //    the /los_audio_<module>_<instance> namespace.
     let shm_name = format!("/los_audio_template_{}", instance);
-    let mut ringbuf =
-        AudioRingbuf::create(&shm_name).context("creating SHM audio ringbuffer")?;
+    let mut ringbuf = AudioRingbuf::create(&shm_name).context("creating SHM audio ringbuffer")?;
 
     // 2. Register in the manifest: name, instance, our audio SHM, and a
     //    claim of 1 modbus channel for the LFO output. The claim is a
@@ -392,7 +404,9 @@ fn audio_thread(state: Arc<Mutex<TemplateState>>, instance: usize) -> Result<()>
     // 3. The modbus: 64 shared f32 channels. We write ours, we read the
     //    ones our bindings resolve to. Open-or-create because module
     //    start order is undefined.
-    let mut modbus = ModulationBus::open().or_else(|_| ModulationBus::create()).ok();
+    let mut modbus = ModulationBus::open()
+        .or_else(|_| ModulationBus::create())
+        .ok();
 
     let channels = ringbuf.channels() as usize;
     let slot_frames = ringbuf.slot_frames() as usize;
@@ -404,7 +418,10 @@ fn audio_thread(state: Arc<Mutex<TemplateState>>, instance: usize) -> Result<()>
     // started before the mixer.
     let mut transport = ShmTransport::open().ok();
     let rate_of = |t: &Option<ShmTransport>| {
-        t.as_ref().map(|t| t.sample_rate() as f32).filter(|r| *r > 0.0).unwrap_or(FALLBACK_RATE)
+        t.as_ref()
+            .map(|t| t.sample_rate() as f32)
+            .filter(|r| *r > 0.0)
+            .unwrap_or(FALLBACK_RATE)
     };
     let mut sample_rate = rate_of(&transport);
     let mut slot_duration =
@@ -434,8 +451,9 @@ fn audio_thread(state: Arc<Mutex<TemplateState>>, instance: usize) -> Result<()>
             let entries = manifest.entries();
             let mut s = state.lock().unwrap();
             for i in 0..s.srcs.len() {
-                s.resolved[i] =
-                    s.srcs[i].as_ref().and_then(|a| routing::resolve(&entries, a));
+                s.resolved[i] = s.srcs[i]
+                    .as_ref()
+                    .and_then(|a| routing::resolve(&entries, a));
             }
         }
 
@@ -557,7 +575,12 @@ fn draw_ui(
         // House chrome: header line, body, then rule + status anchored to
         // the bottom. Every theme:: call here is shared with the other
         // modules — never hardcode colors (docs/plans/design-language.md).
-        lines.push(theme::header("TEMPLATE", &format!("lfo {}", instance), "", w));
+        lines.push(theme::header(
+            "TEMPLATE",
+            &format!("lfo {}", instance),
+            "",
+            w,
+        ));
 
         // A live one-character meter of the published LFO, because a
         // modulation source you can't see is a modulation source you
@@ -566,9 +589,16 @@ fn draw_ui(
         let m = 0.5 + 0.5 * s.lfo_now;
         lines.push(Line::from(vec![
             Span::styled("  lfo ".to_string(), theme::chrome()),
-            Span::styled(theme::meter_char(m).to_string(), theme::signal(theme::cv_ramp(m))),
             Span::styled(
-                format!(" {} {:+.2}", if s.unipolar { "uni" } else { "bi " }, s.lfo_now),
+                theme::meter_char(m).to_string(),
+                theme::signal(theme::cv_ramp(m)),
+            ),
+            Span::styled(
+                format!(
+                    " {} {:+.2}",
+                    if s.unipolar { "uni" } else { "bi " },
+                    s.lfo_now
+                ),
                 theme::dim(),
             ),
         ]));
@@ -587,7 +617,11 @@ fn draw_ui(
                 Some(i) if bound => s.eff[i],
                 _ => s.get(*p),
             };
-            let label_style = if selected { theme::selected() } else { theme::chrome() };
+            let label_style = if selected {
+                theme::selected()
+            } else {
+                theme::chrome()
+            };
             let mut spans: Vec<Span> =
                 vec![Span::styled(format!(" {:<6}", p.label()), label_style)];
             // Cable color: a bound param wears its connection's hue, so
@@ -596,7 +630,12 @@ fn draw_ui(
                 .src_index()
                 .and_then(|i| s.srcs[i].as_ref())
                 .map(|a| routing::cable_color(entries, a));
-            spans.extend(theme::bar(norm(*p, shown), None, bar_w, hue.unwrap_or_else(theme::cv)));
+            spans.extend(theme::bar(
+                norm(*p, shown),
+                None,
+                bar_w,
+                hue.unwrap_or_else(theme::cv),
+            ));
             let vstyle = if selected {
                 theme::selected()
             } else if let Some(hue) = hue {
@@ -605,7 +644,10 @@ fn draw_ui(
                 theme::value()
             };
             let mark = if bound { theme::BIND } else { ' ' };
-            spans.push(Span::styled(format!(" {}{}", mark, param_text(*p, shown)), vstyle));
+            spans.push(Span::styled(
+                format!(" {}{}", mark, param_text(*p, shown)),
+                vstyle,
+            ));
             if let Some(addr) = p.src_index().and_then(|i| s.srcs[i].as_ref()) {
                 spans.push(Span::styled(format!("  ◂ {}", addr), theme::dim()));
             }
@@ -661,7 +703,11 @@ fn draw_ui(
                 .iter()
                 .enumerate()
                 .map(|(i, row)| {
-                    let style = if i == sel { theme::selected() } else { theme::value() };
+                    let style = if i == sel {
+                        theme::selected()
+                    } else {
+                        theme::value()
+                    };
                     ratatui::widgets::ListItem::new(row.clone()).style(style)
                 })
                 .collect();
@@ -777,8 +823,7 @@ pub fn run(instance: usize) -> Result<()> {
             let _ = state::save_module_state("template", instance, &params);
         }
         if state::check_reload_signal() {
-            if let Ok(p) = state::load_module_state::<state::TemplateParams>("template", instance)
-            {
+            if let Ok(p) = state::load_module_state::<state::TemplateParams>("template", instance) {
                 apply_params(&mut shared.lock().unwrap(), &p);
             }
         }
@@ -790,7 +835,11 @@ pub fn run(instance: usize) -> Result<()> {
             ui_entries_at = Some(Instant::now());
         }
 
-        let overlay = if ex.is_active() { Some(ex.display()) } else { ex_msg.clone() };
+        let overlay = if ex.is_active() {
+            Some(ex.display())
+        } else {
+            ex_msg.clone()
+        };
         {
             let s = shared.lock().unwrap();
             let picker_rows = picker.is_active().then(|| picker.rows());
@@ -821,7 +870,11 @@ pub fn run(instance: usize) -> Result<()> {
             }
             match m.kind {
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                    let steps = if m.kind == MouseEventKind::ScrollUp { 1 } else { -1 };
+                    let steps = if m.kind == MouseEventKind::ScrollUp {
+                        1
+                    } else {
+                        -1
+                    };
                     use crate::undo::ParamUndo;
                     let mut s = shared.lock().unwrap();
                     let slot = s.selected;
@@ -857,7 +910,12 @@ pub fn run(instance: usize) -> Result<()> {
                     s.srcs[i] = addr.clone();
                     s.resolved[i] = None;
                     if let Some(old) = old {
-                        history.record(slot, "Bind", old, ParamValue::Src(addr.map(|a| a.to_string())));
+                        history.record(
+                            slot,
+                            "Bind",
+                            old,
+                            ParamValue::Src(addr.map(|a| a.to_string())),
+                        );
                     }
                 }
             }
@@ -872,7 +930,12 @@ pub fn run(instance: usize) -> Result<()> {
                 match cmd {
                     ExCommand::Write(name) => {
                         ex_msg = Some(
-                            match crate::excmd::ex_write(name, &mut patch_name, &mut baseline, &params) {
+                            match crate::excmd::ex_write(
+                                name,
+                                &mut patch_name,
+                                &mut baseline,
+                                &params,
+                            ) {
                                 Ok(m) | Err(m) => m,
                             },
                         );
@@ -930,7 +993,9 @@ pub fn run(instance: usize) -> Result<()> {
         if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::CONTROL {
             let n = count.take();
             let mut s = shared.lock().unwrap();
-            ex_msg = Some(crate::undo::history_status("Redo", n, || history.redo(&mut *s)));
+            ex_msg = Some(crate::undo::history_status("Redo", n, || {
+                history.redo(&mut *s)
+            }));
             continue;
         }
         if key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL {
@@ -986,7 +1051,9 @@ pub fn run(instance: usize) -> Result<()> {
                 let old = s.get_param(slot);
                 s.set(p, p.default_value());
                 if let Some(old) = old {
-                    let new = s.get_param(slot).unwrap_or(ParamValue::F32(p.default_value()));
+                    let new = s
+                        .get_param(slot)
+                        .unwrap_or(ParamValue::F32(p.default_value()));
                     history.record(slot, "Reset", old, new);
                 }
             }
@@ -1027,7 +1094,9 @@ pub fn run(instance: usize) -> Result<()> {
             KeyCode::Char('u') => {
                 let n = count.take();
                 let mut s = shared.lock().unwrap();
-                ex_msg = Some(crate::undo::history_status("Undo", n, || history.undo(&mut *s)));
+                ex_msg = Some(crate::undo::history_status("Undo", n, || {
+                    history.undo(&mut *s)
+                }));
             }
             KeyCode::Char('g') => {
                 count.clear();
@@ -1087,7 +1156,10 @@ fn ex_set(
 ) -> String {
     use crate::undo::ParamUndo;
     let Some(p) = ROWS.iter().find(|p| p.label() == key).copied() else {
-        return format!("Unknown setting: {} (rate shape depth pitch level polar)", key);
+        return format!(
+            "Unknown setting: {} (rate shape depth pitch level polar)",
+            key
+        );
     };
     let parsed = match p {
         Param::Shape => SHAPES
@@ -1100,7 +1172,9 @@ fn ex_set(
             "bi" | "bipolar" | "±" => Ok(0.0),
             _ => Err(String::from("polar: uni or bi")),
         },
-        _ => value.parse::<f32>().map_err(|_| format!("{}: not a number: {}", key, value)),
+        _ => value
+            .parse::<f32>()
+            .map_err(|_| format!("{}: not a number: {}", key, value)),
     };
     match parsed {
         Ok(v) => {
@@ -1155,7 +1229,10 @@ mod tests {
         assert!((mid - 311.1).abs() < 1.0, "got {}", mid);
         // unbound effective() falls back to the manual knob
         let s = TemplateState::new();
-        assert_eq!(s.effective(Param::Level, None), Param::Level.default_value());
+        assert_eq!(
+            s.effective(Param::Level, None),
+            Param::Level.default_value()
+        );
     }
 
     #[test]

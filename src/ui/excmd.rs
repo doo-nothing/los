@@ -332,8 +332,14 @@ mod tests {
     #[test]
     fn parse_write_forms() {
         assert_eq!(parse("w"), ExCommand::Write(None));
-        assert_eq!(parse("w bass-lead"), ExCommand::Write(Some("bass-lead".into())));
-        assert_eq!(parse("write  spaced "), ExCommand::Write(Some("spaced".into())));
+        assert_eq!(
+            parse("w bass-lead"),
+            ExCommand::Write(Some("bass-lead".into()))
+        );
+        assert_eq!(
+            parse("write  spaced "),
+            ExCommand::Write(Some("spaced".into()))
+        );
     }
 
     #[test]
@@ -352,7 +358,10 @@ mod tests {
 
     #[test]
     fn parse_set() {
-        assert_eq!(parse("set bpm 128"), ExCommand::Set("bpm".into(), "128".into()));
+        assert_eq!(
+            parse("set bpm 128"),
+            ExCommand::Set("bpm".into(), "128".into())
+        );
         assert_eq!(parse("set bpm"), ExCommand::Unknown("set bpm".into()));
         assert_eq!(parse("nonsense"), ExCommand::Unknown("nonsense".into()));
     }
@@ -426,8 +435,7 @@ mod tests {
 
     #[test]
     fn up_recalls_history_down_walks_menu() {
-        let completer =
-            standard_completer(vec!["bass".into(), "lead".into()]);
+        let completer = standard_completer(vec!["bass".into(), "lead".into()]);
         let mut ex = ExLine::default();
         // submit once to seed history
         ex.open();

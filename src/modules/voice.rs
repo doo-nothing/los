@@ -113,18 +113,18 @@ fn voice_thread(
     instance: usize,
 ) -> Result<()> {
     let shm_name = format!("/los_audio_voice_{}", instance);
-    let mut ringbuf = AudioRingbuf::open(&shm_name)
-        .or_else(|_| AudioRingbuf::create(&shm_name))?;
+    let mut ringbuf = AudioRingbuf::open(&shm_name).or_else(|_| AudioRingbuf::create(&shm_name))?;
 
     let mut manifest = Manifest::open().or_else(|_| Manifest::create())?;
     let _ = manifest.register("voice", instance, Some(&shm_name), 0);
 
     let consumer_id = crate::shm::consumer_id("voice", instance);
     let mut events = EventRingbuf::open(consumer_id).ok();
-    let mut modbus = ModulationBus::open().or_else(|_| ModulationBus::create()).ok();
+    let mut modbus = ModulationBus::open()
+        .or_else(|_| ModulationBus::create())
+        .ok();
 
-    let transport = ShmTransport::open()
-        .or_else(|_| ShmTransport::create(48000))?;
+    let transport = ShmTransport::open().or_else(|_| ShmTransport::create(48000))?;
 
     let mut phase = 0.0f64;
     let mut sub_phase = 0.0f64;
@@ -158,7 +158,9 @@ fn voice_thread(
             events = EventRingbuf::open(consumer_id).ok();
         }
         if modbus.is_none() {
-            modbus = ModulationBus::open().or_else(|_| ModulationBus::create()).ok();
+            modbus = ModulationBus::open()
+                .or_else(|_| ModulationBus::create())
+                .ok();
         }
 
         // Re-resolve bindings through the manifest (~every 256 blocks)
@@ -169,10 +171,22 @@ fn voice_thread(
             sample_rate = f64::from(transport.sample_rate()).max(1.0);
             let entries = manifest.entries();
             let s = state.lock().unwrap();
-            ch_shape = s.shape_src.as_ref().and_then(|a| routing::resolve(&entries, a));
-            ch_sub = s.sub_src.as_ref().and_then(|a| routing::resolve(&entries, a));
-            ch_fm = s.fm_src.as_ref().and_then(|a| routing::resolve(&entries, a));
-            ch_amp = s.amp_src.as_ref().and_then(|a| routing::resolve(&entries, a));
+            ch_shape = s
+                .shape_src
+                .as_ref()
+                .and_then(|a| routing::resolve(&entries, a));
+            ch_sub = s
+                .sub_src
+                .as_ref()
+                .and_then(|a| routing::resolve(&entries, a));
+            ch_fm = s
+                .fm_src
+                .as_ref()
+                .and_then(|a| routing::resolve(&entries, a));
+            ch_amp = s
+                .amp_src
+                .as_ref()
+                .and_then(|a| routing::resolve(&entries, a));
             note_filter = s.notes_src.as_ref().and_then(routing::note_source_track);
             // publish what this voice listens to (the sequencer's
             // who's-listening markers read it back)
@@ -197,12 +211,14 @@ fn voice_thread(
                 }
                 let mut s = state.lock().unwrap();
                 match event.event_type {
-                    0 => { // Note on
+                    0 => {
+                        // Note on
                         s.freq = event.value; // frequency from note
                         s.velocity = event.param as f32 / 127.0;
                         s.gate = true;
                     }
-                    1 => { // Note off
+                    1 => {
+                        // Note off
                         s.gate = false;
                         // velocity stays as last value for release tail
                     }
@@ -218,7 +234,11 @@ fn voice_thread(
         // If gate is on but velocity hasn't been set (no note_on received),
         // default to full velocity so the voice produces sound immediately
         // on session load or when the sequencer hasn't started yet.
-        let velocity = if s.gate && s.velocity < 0.001 { 1.0 } else { s.velocity };
+        let velocity = if s.gate && s.velocity < 0.001 {
+            1.0
+        } else {
+            s.velocity
+        };
 
         let lpg = s.lpg;
 
@@ -276,8 +296,7 @@ fn voice_thread(
                 // 25Hz closed to ~12kHz open — and the VCA leans on the
                 // filter (gain ~ sqrt(level)) like a vactrol LPG.
                 let fc = lpg_cutoff(level_smooth);
-                let g = 1.0
-                    - (-2.0 * std::f32::consts::PI * fc / sample_rate as f32).exp();
+                let g = 1.0 - (-2.0 * std::f32::consts::PI * fc / sample_rate as f32).exp();
                 lp_state += (sample - lp_state) * g;
                 let plain = sample * level_smooth;
                 let gated = lp_state * level_smooth.max(0.0).sqrt();
@@ -388,14 +407,20 @@ fn draw_ui(
                     format!("{}{} ✗ offline = silent", theme::BIND, a),
                     theme::flash(theme::note()),
                 ),
-                Some(a) => Span::styled(format!("{}{}", theme::BIND, a), theme::signal(crate::routing::cable_color(entries, a))),
+                Some(a) => Span::styled(
+                    format!("{}{}", theme::BIND, a),
+                    theme::signal(crate::routing::cable_color(entries, a)),
+                ),
                 None => Span::styled("unbound = 1.0".to_string(), theme::dim()),
             },
         ]));
         lines.push(Line::from(vec![
             label(5, "notes"),
             match &state.notes_src {
-                Some(a) => Span::styled(format!("{}{}", theme::BIND, a), theme::signal(crate::routing::cable_color(entries, a))),
+                Some(a) => Span::styled(
+                    format!("{}{}", theme::BIND, a),
+                    theme::signal(crate::routing::cable_color(entries, a)),
+                ),
                 None => Span::styled("all tracks".to_string(), theme::dim()),
             },
         ]));
@@ -416,9 +441,16 @@ fn draw_ui(
         lines.push(theme::rule(w));
 
         // live output line (AUDIO hue)
-        let gate = if state.gate { theme::GATE_HI } else { theme::GATE_LO };
+        let gate = if state.gate {
+            theme::GATE_HI
+        } else {
+            theme::GATE_LO
+        };
         lines.push(Line::from(vec![
-            Span::styled(format!(" {} ", theme::AUDIO_GLYPH), theme::signal(theme::audio())),
+            Span::styled(
+                format!(" {} ", theme::AUDIO_GLYPH),
+                theme::signal(theme::audio()),
+            ),
             Span::styled(
                 (0..8)
                     .map(|i| theme::meter_char((state.level - i as f32 * 0.06).clamp(0.0, 1.0)))
@@ -426,7 +458,12 @@ fn draw_ui(
                 theme::signal(theme::audio()),
             ),
             Span::styled(
-                format!("  {:.0}Hz {} vel {:.0}%", state.freq, gate, state.velocity * 100.0),
+                format!(
+                    "  {:.0}Hz {} vel {:.0}%",
+                    state.freq,
+                    gate,
+                    state.velocity * 100.0
+                ),
                 theme::dim(),
             ),
         ]));
@@ -454,10 +491,12 @@ fn draw_ui(
             ];
             let help = Paragraph::new(help_text)
                 .style(Style::default().fg(theme::ink()).bg(theme::bg()))
-                .block(Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(theme::chrome())
-                    .title(Span::styled(" VOICE ", theme::chrome_hi())));
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(theme::chrome())
+                        .title(Span::styled(" VOICE ", theme::chrome_hi())),
+                );
             f.render_widget(help, area);
         }
 
@@ -526,15 +565,33 @@ fn snapshot_params(s: &VoiceState) -> state::VoiceParams {
 }
 
 fn apply_params(s: &mut VoiceState, params: &state::VoiceParams) {
-    if let Some(v) = params.shape { s.shape = v; }
-    if let Some(v) = params.sub { s.sub = v; }
-    if let Some(v) = params.fm { s.fm = v; }
-    if let Some(v) = params.output { s.output = v; }
-    if let Some(v) = params.freq { s.freq = v; }
-    if let Some(v) = params.gate { s.gate = v; }
-    if let Some(v) = params.level { s.level = v; }
-    if let Some(v) = params.velocity { s.velocity = v; }
-    if let Some(v) = params.lpg { s.lpg = v; }
+    if let Some(v) = params.shape {
+        s.shape = v;
+    }
+    if let Some(v) = params.sub {
+        s.sub = v;
+    }
+    if let Some(v) = params.fm {
+        s.fm = v;
+    }
+    if let Some(v) = params.output {
+        s.output = v;
+    }
+    if let Some(v) = params.freq {
+        s.freq = v;
+    }
+    if let Some(v) = params.gate {
+        s.gate = v;
+    }
+    if let Some(v) = params.level {
+        s.level = v;
+    }
+    if let Some(v) = params.velocity {
+        s.velocity = v;
+    }
+    if let Some(v) = params.lpg {
+        s.lpg = v;
+    }
     // Binding fields only exist in format-2 files. An old file simply lacks
     // them — keep the defaults (e.g. amp -> envelope/0/ch1) rather than
     // unbinding everything.
@@ -584,8 +641,9 @@ impl crate::undo::ParamUndo for VoiceState {
             2 => Some(V::F32(self.fm)),
             3 => Some(V::U8(self.output)),
             6 => Some(V::F32(self.lpg)),
-            s if s >= BIND_SLOT => row_binding(self, s - BIND_SLOT)
-                .map(|b| V::Src(b.as_ref().map(|a| a.to_string()))),
+            s if s >= BIND_SLOT => {
+                row_binding(self, s - BIND_SLOT).map(|b| V::Src(b.as_ref().map(|a| a.to_string())))
+            }
             _ => None,
         }
     }
@@ -599,7 +657,11 @@ impl crate::undo::ParamUndo for VoiceState {
             (3, V::U8(v)) => self.output = v,
             (6, V::F32(v)) => self.lpg = v,
             (s, V::Src(a)) if s >= BIND_SLOT => {
-                set_row_binding(self, s - BIND_SLOT, a.as_deref().and_then(SourceAddr::parse));
+                set_row_binding(
+                    self,
+                    s - BIND_SLOT,
+                    a.as_deref().and_then(SourceAddr::parse),
+                );
             }
             _ => {}
         }
@@ -633,7 +695,10 @@ pub fn run(instance: usize) -> Result<()> {
                 if attempt < 19 {
                     std::thread::sleep(Duration::from_millis(200));
                 } else {
-                    return Err(anyhow::anyhow!("Failed to enable raw mode after 20 attempts: {}", e));
+                    return Err(anyhow::anyhow!(
+                        "Failed to enable raw mode after 20 attempts: {}",
+                        e
+                    ));
                 }
             }
         }
@@ -644,12 +709,12 @@ pub fn run(instance: usize) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let state = Arc::new(Mutex::new(VoiceState::default_for_instance(instance)));
-    
+
     // Load saved state if available
     if let Ok(params) = state::load_module_state::<state::VoiceParams>("voice", instance) {
         apply_params(&mut state.lock().unwrap(), &params);
     }
-    
+
     let state_clone = Arc::clone(&state);
 
     let (_tx, rx) = std::sync::mpsc::channel();
@@ -671,7 +736,8 @@ pub fn run(instance: usize) -> Result<()> {
     let mut ex = crate::excmd::ExLine::default();
     let mut ex_msg: Option<String> = None;
     let mut patch_name: Option<String> = None;
-    let mut baseline = state::to_toml_string(&snapshot_params(&state.lock().unwrap())).unwrap_or_default();
+    let mut baseline =
+        state::to_toml_string(&snapshot_params(&state.lock().unwrap())).unwrap_or_default();
     let mut should_quit = false;
     // Live modbus reads for gauge ghosts (§5)
     let mut ui_modbus = ModulationBus::open().ok();
@@ -684,14 +750,14 @@ pub fn run(instance: usize) -> Result<()> {
             let params = snapshot_params(&state.lock().unwrap());
             let _ = state::save_module_state("voice", instance, &params);
         }
-        
+
         // Check for reload-on-signal
         if state::check_reload_signal() {
             if let Ok(params) = state::load_module_state::<state::VoiceParams>("voice", instance) {
                 apply_params(&mut state.lock().unwrap(), &params);
             }
         }
-        
+
         let current_state = state.lock().unwrap().clone();
         if ui_refresh == 0 {
             ui_refresh = 40;
@@ -720,7 +786,11 @@ pub fn run(instance: usize) -> Result<()> {
         } else {
             ex_msg.clone()
         };
-        let picker_rows = if picker.is_active() { Some(picker.rows()) } else { None };
+        let picker_rows = if picker.is_active() {
+            Some(picker.rows())
+        } else {
+            None
+        };
         let picker_colors: Vec<Option<ratatui::style::Color>> = if picker.is_active() {
             picker
                 .row_sources()
@@ -730,20 +800,36 @@ pub fn run(instance: usize) -> Result<()> {
         } else {
             Vec::new()
         };
-        draw_ui(&mut terminal, &current_state, selected, show_help, overlay.as_deref(), picker_rows, &ghosts, &ui_entries, &picker_colors, instance, bpm, playing)?;
+        draw_ui(
+            &mut terminal,
+            &current_state,
+            selected,
+            show_help,
+            overlay.as_deref(),
+            picker_rows,
+            &ghosts,
+            &ui_entries,
+            &picker_colors,
+            instance,
+            bpm,
+            playing,
+        )?;
 
         if event::poll(Duration::from_millis(50))? {
             let ev = event::read()?;
             if let Event::Mouse(m) = ev {
-                use crossterm::event::{MouseButton, MouseEventKind};
                 use crate::undo::{ParamUndo, ParamValue};
+                use crossterm::event::{MouseButton, MouseEventKind};
                 // rows 1..=7 are shape/sub/fm/out/amp/notes/lpg
-                let row_at = |y: u16| -> Option<usize> {
-                    (1..=7).contains(&y).then(|| y as usize - 1)
-                };
+                let row_at =
+                    |y: u16| -> Option<usize> { (1..=7).contains(&y).then(|| y as usize - 1) };
                 match m.kind {
                     MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                        let steps = if m.kind == MouseEventKind::ScrollUp { 1 } else { -1 };
+                        let steps = if m.kind == MouseEventKind::ScrollUp {
+                            1
+                        } else {
+                            -1
+                        };
                         let mut s = state.lock().unwrap();
                         let old = s.get_param(selected);
                         adjust(&mut s, selected, steps, false);
@@ -766,7 +852,8 @@ pub fn run(instance: usize) -> Result<()> {
                                 let w = terminal.size().map(|r| r.width as usize).unwrap_or(60);
                                 let bar_w = crate::theme::bar_width(w, 24);
                                 let x = (m.column as usize).saturating_sub(7);
-                                let v = (x as f32 / bar_w.saturating_sub(1).max(1) as f32).clamp(0.0, 1.0);
+                                let v = (x as f32 / bar_w.saturating_sub(1).max(1) as f32)
+                                    .clamp(0.0, 1.0);
                                 let mut s = state.lock().unwrap();
                                 let old = s.get_param(row);
                                 s.set_param(row, ParamValue::F32(v));
@@ -790,47 +877,74 @@ pub fn run(instance: usize) -> Result<()> {
                         let old = s.get_param(slot);
                         set_row_binding(&mut s, selected, addr.clone());
                         if let Some(old) = old {
-                            history.record(slot, "Bind", old, ParamValue::Src(addr.map(|a| a.to_string())));
+                            history.record(
+                                slot,
+                                "Bind",
+                                old,
+                                ParamValue::Src(addr.map(|a| a.to_string())),
+                            );
                         }
                     }
                     continue;
                 }
                 if ex.is_active() {
-                    let completer = crate::excmd::standard_completer(
-                        crate::excmd::patch_names(&state::patches_dir()),
-                    );
-                    if let crate::excmd::ExEvent::Submit(cmd) = ex.handle_key(key.code, &completer) {
+                    let completer = crate::excmd::standard_completer(crate::excmd::patch_names(
+                        &state::patches_dir(),
+                    ));
+                    if let crate::excmd::ExEvent::Submit(cmd) = ex.handle_key(key.code, &completer)
+                    {
                         use crate::excmd::ExCommand;
                         let params = snapshot_params(&state.lock().unwrap());
                         match cmd {
                             ExCommand::Write(name) => {
-                                ex_msg = Some(match crate::excmd::ex_write(name, &mut patch_name, &mut baseline, &params) {
-                                    Ok(m) | Err(m) => m,
-                                });
+                                ex_msg = Some(
+                                    match crate::excmd::ex_write(
+                                        name,
+                                        &mut patch_name,
+                                        &mut baseline,
+                                        &params,
+                                    ) {
+                                        Ok(m) | Err(m) => m,
+                                    },
+                                );
                             }
-                            ExCommand::Edit(name) => match state::load_patch::<state::VoiceParams>(&name) {
-                                Ok(p) => {
-                                    apply_params(&mut state.lock().unwrap(), &p);
-                                    baseline = state::to_toml_string(&snapshot_params(&state.lock().unwrap())).unwrap_or_default();
-                                    patch_name = Some(name.clone());
-                                    ex_msg = Some(format!("Loaded {}", name));
+                            ExCommand::Edit(name) => {
+                                match state::load_patch::<state::VoiceParams>(&name) {
+                                    Ok(p) => {
+                                        apply_params(&mut state.lock().unwrap(), &p);
+                                        baseline = state::to_toml_string(&snapshot_params(
+                                            &state.lock().unwrap(),
+                                        ))
+                                        .unwrap_or_default();
+                                        patch_name = Some(name.clone());
+                                        ex_msg = Some(format!("Loaded {}", name));
+                                    }
+                                    Err(e) => ex_msg = Some(e.to_string()),
                                 }
-                                Err(e) => ex_msg = Some(e.to_string()),
-                            },
+                            }
                             ExCommand::Quit { force } => {
                                 if !force && crate::excmd::is_dirty(&params, &baseline) {
-                                    ex_msg = Some(String::from("Unsaved changes (:q! to discard, :w <name> to save)"));
+                                    ex_msg = Some(String::from(
+                                        "Unsaved changes (:q! to discard, :w <name> to save)",
+                                    ));
                                 } else {
                                     should_quit = true;
                                 }
                             }
                             ExCommand::WriteQuit(name) => {
-                                match crate::excmd::ex_write(name, &mut patch_name, &mut baseline, &params) {
+                                match crate::excmd::ex_write(
+                                    name,
+                                    &mut patch_name,
+                                    &mut baseline,
+                                    &params,
+                                ) {
                                     Ok(_) => should_quit = true,
                                     Err(m) => ex_msg = Some(m),
                                 }
                             }
-                            ExCommand::Set(k, _) => ex_msg = Some(format!("Unknown setting: {}", k)),
+                            ExCommand::Set(k, _) => {
+                                ex_msg = Some(format!("Unknown setting: {}", k))
+                            }
                             ExCommand::Unknown(c) => ex_msg = Some(format!("Not a command: {}", c)),
                         }
                     }
@@ -845,7 +959,9 @@ pub fn run(instance: usize) -> Result<()> {
                 if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::CONTROL {
                     let n = count.take();
                     let mut s = state.lock().unwrap();
-                    ex_msg = Some(crate::undo::history_status("Redo", n, || history.redo(&mut *s)));
+                    ex_msg = Some(crate::undo::history_status("Redo", n, || {
+                        history.redo(&mut *s)
+                    }));
                     continue;
                 }
                 // Ctrl-s: save module state
@@ -900,7 +1016,9 @@ pub fn run(instance: usize) -> Result<()> {
                     KeyCode::Char('u') => {
                         let n = count.take();
                         let mut s = state.lock().unwrap();
-                        ex_msg = Some(crate::undo::history_status("Undo", n, || history.undo(&mut *s)));
+                        ex_msg = Some(crate::undo::history_status("Undo", n, || {
+                            history.undo(&mut *s)
+                        }));
                     }
                     KeyCode::Char('@') => {
                         count.clear();
@@ -1003,14 +1121,20 @@ mod tests {
             ..Default::default()
         };
         apply_params(&mut s, &p);
-        assert!(s.amp_src.is_none(), "format-2 file with no amp_src = unbound");
+        assert!(
+            s.amp_src.is_none(),
+            "format-2 file with no amp_src = unbound"
+        );
     }
 
     #[test]
     fn lpg_cutoff_tracks_level_exponentially() {
         assert!((lpg_cutoff(0.0) - 25.0).abs() < 0.1, "closed = 25Hz");
         assert!(lpg_cutoff(1.0) > 11_000.0, "open = ~12kHz");
-        assert!(lpg_cutoff(0.5) > 400.0 && lpg_cutoff(0.5) < 700.0, "midpoint is midrange");
+        assert!(
+            lpg_cutoff(0.5) > 400.0 && lpg_cutoff(0.5) < 700.0,
+            "midpoint is midrange"
+        );
         assert!(lpg_cutoff(0.6) > lpg_cutoff(0.4), "monotonic");
     }
 
@@ -1044,14 +1168,29 @@ mod tests {
     #[test]
     fn per_instance_default_wiring() {
         let v0 = VoiceState::default_for_instance(0);
-        assert_eq!(v0.amp_src.as_ref().map(|a| a.to_string()), Some("envelope/0/ch1".into()));
-        assert_eq!(v0.notes_src.as_ref().map(|a| a.to_string()), Some("sequencer/0/t1".into()));
+        assert_eq!(
+            v0.amp_src.as_ref().map(|a| a.to_string()),
+            Some("envelope/0/ch1".into())
+        );
+        assert_eq!(
+            v0.notes_src.as_ref().map(|a| a.to_string()),
+            Some("sequencer/0/t1".into())
+        );
         let v1 = VoiceState::default_for_instance(1);
-        assert_eq!(v1.amp_src.as_ref().map(|a| a.to_string()), Some("envelope/0/ch3".into()));
-        assert_eq!(v1.notes_src.as_ref().map(|a| a.to_string()), Some("sequencer/0/t3".into()));
+        assert_eq!(
+            v1.amp_src.as_ref().map(|a| a.to_string()),
+            Some("envelope/0/ch3".into())
+        );
+        assert_eq!(
+            v1.notes_src.as_ref().map(|a| a.to_string()),
+            Some("sequencer/0/t3".into())
+        );
         // beyond the wired range: unpatched, never panics
         let v3 = VoiceState::default_for_instance(3);
         assert!(v3.amp_src.is_none(), "ch7 does not exist — amp unbound");
-        assert_eq!(v3.notes_src.as_ref().map(|a| a.to_string()), Some("sequencer/0/t7".into()));
+        assert_eq!(
+            v3.notes_src.as_ref().map(|a| a.to_string()),
+            Some("sequencer/0/t7".into())
+        );
     }
 }

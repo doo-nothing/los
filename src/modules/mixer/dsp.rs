@@ -30,7 +30,10 @@ impl Biquad {
 
     /// Identity (flat) coefficients.
     pub fn unity() -> Self {
-        Self { b0: 1.0, ..Default::default() }
+        Self {
+            b0: 1.0,
+            ..Default::default()
+        }
     }
 
     fn set(&mut self, b0: f32, b1: f32, b2: f32, a0: f32, a1: f32, a2: f32) {
@@ -123,7 +126,10 @@ pub struct Smoother {
 
 impl Smoother {
     pub fn new(v: f32) -> Self {
-        Self { current: v, target: v }
+        Self {
+            current: v,
+            target: v,
+        }
     }
 
     #[inline]
@@ -141,6 +147,9 @@ pub struct ChannelDsp {
     pub level: Smoother,
     pub pan: Smoother,
     pub drive_amt: Smoother,
+    /// Post-fader fx send taps (mixer sends A/B).
+    pub send_a: Smoother,
+    pub send_b: Smoother,
     /// Last EQ params the coefficients were computed for.
     coeffs_for: (f32, f32, f32, f32),
 }
@@ -154,6 +163,8 @@ impl ChannelDsp {
             level: Smoother::new(0.0),
             pan: Smoother::new(0.0),
             drive_amt: Smoother::new(0.0),
+            send_a: Smoother::new(0.0),
+            send_b: Smoother::new(0.0),
             coeffs_for: (f32::NAN, f32::NAN, f32::NAN, f32::NAN),
         }
     }
@@ -280,7 +291,10 @@ mod tests {
     fn mid_sweep_is_log_200_to_5k() {
         assert!((mid_freq_hz(0.0) - 200.0).abs() < 1e-3);
         assert!((mid_freq_hz(1.0) - 5000.0).abs() < 0.5);
-        assert!((mid_freq_hz(0.5) - 1000.0).abs() < 1.0, "log midpoint = 1 kHz");
+        assert!(
+            (mid_freq_hz(0.5) - 1000.0).abs() < 1.0,
+            "log midpoint = 1 kHz"
+        );
     }
 
     #[test]

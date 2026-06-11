@@ -2,8 +2,10 @@
 
 The second fx module (after docs/plans/delay-288.md, whose input
 architecture this reuses unchanged) and the first with an **all-Faust
-DSP core** (docs/writing-dsp.md). Status: planned — this doc pins scope
-and the hardware facts so implementation can start cold.
+filter core** (docs/writing-dsp.md). Status: **shipped** — implemented
+as designed below, with two deltas: the per-band delay spread uses one
+shared knob staggering bands linearly (not skewed), and follower decay
+is one global (CV-able) knob rather than per-band.
 
 ## 1. The hardware
 

@@ -1,6 +1,6 @@
 use std::ffi::CString;
 use std::ptr;
-use std::sync::atomic::{AtomicU32, compiler_fence, Ordering};
+use std::sync::atomic::{compiler_fence, AtomicU32, Ordering};
 
 use anyhow::{Context, Result};
 
@@ -79,7 +79,7 @@ pub struct AudioRingbuf {
     channels: u16,
     slot_frames: u32,
     num_slots: u32,
-    slot_len: usize,  // total floats per slot
+    slot_len: usize, // total floats per slot
     total_size: usize,
     owned: bool,
 }
@@ -135,19 +135,21 @@ impl AudioRingbuf {
 
         // Create or open the shared memory object
         let fd = unsafe {
-            let fd = libc::shm_open(
-                cname.as_ptr(),
-                libc::O_CREAT | libc::O_RDWR,
-                0o644,
-            );
+            let fd = libc::shm_open(cname.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o644);
             if fd < 0 {
-                anyhow::bail!("shm_open failed for {name}: {}", std::io::Error::last_os_error());
+                anyhow::bail!(
+                    "shm_open failed for {name}: {}",
+                    std::io::Error::last_os_error()
+                );
             }
             // Set the size
             if libc::ftruncate(fd, total_size as libc::off_t) < 0 {
                 libc::close(fd);
                 libc::shm_unlink(cname.as_ptr());
-                anyhow::bail!("ftruncate failed for {name}: {}", std::io::Error::last_os_error());
+                anyhow::bail!(
+                    "ftruncate failed for {name}: {}",
+                    std::io::Error::last_os_error()
+                );
             }
             fd
         };
@@ -165,7 +167,10 @@ impl AudioRingbuf {
             if p == libc::MAP_FAILED {
                 libc::close(fd);
                 libc::shm_unlink(cname.as_ptr());
-                anyhow::bail!("mmap failed for {name}: {}", std::io::Error::last_os_error());
+                anyhow::bail!(
+                    "mmap failed for {name}: {}",
+                    std::io::Error::last_os_error()
+                );
             }
             p as *mut u8
         };
@@ -178,7 +183,7 @@ impl AudioRingbuf {
         //  20: slot_frames (u32, aligned 4)
         //  24: num_slots   (u32, aligned 4)
         unsafe {
-            ptr::write_unaligned(ptr as *mut u64, 0);        // write_index
+            ptr::write_unaligned(ptr as *mut u64, 0); // write_index
             ptr::write_unaligned(ptr.add(8) as *mut u64, 0); // read_index
             ptr::write_unaligned(ptr.add(16) as *mut u32, channels as u32);
             ptr::write_unaligned(ptr.add(20) as *mut u32, slot_frames);
@@ -204,7 +209,10 @@ impl AudioRingbuf {
         let fd = unsafe {
             let fd = libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0);
             if fd < 0 {
-                anyhow::bail!("shm_open failed for {name}: {}", std::io::Error::last_os_error());
+                anyhow::bail!(
+                    "shm_open failed for {name}: {}",
+                    std::io::Error::last_os_error()
+                );
             }
             fd
         };
@@ -224,7 +232,10 @@ impl AudioRingbuf {
             );
             if p == libc::MAP_FAILED {
                 libc::close(fd);
-                anyhow::bail!("mmap failed for {name}: {}", std::io::Error::last_os_error());
+                anyhow::bail!(
+                    "mmap failed for {name}: {}",
+                    std::io::Error::last_os_error()
+                );
             }
             p as *mut u8
         };
@@ -369,7 +380,11 @@ impl ShmTransport {
         let fd = unsafe {
             let fd = libc::shm_open(cname.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o644);
             if fd < 0 {
-                anyhow::bail!("shm_open({}) failed: {}", Self::name(), std::io::Error::last_os_error());
+                anyhow::bail!(
+                    "shm_open({}) failed: {}",
+                    Self::name(),
+                    std::io::Error::last_os_error()
+                );
             }
             let r = libc::ftruncate(fd, total as libc::off_t);
             if r < 0 {
@@ -396,18 +411,26 @@ impl ShmTransport {
             if p == libc::MAP_FAILED {
                 libc::close(fd);
                 libc::shm_unlink(cname.as_ptr());
-                anyhow::bail!("mmap({}) failed: {}", Self::name(), std::io::Error::last_os_error());
+                anyhow::bail!(
+                    "mmap({}) failed: {}",
+                    Self::name(),
+                    std::io::Error::last_os_error()
+                );
             }
             p as *mut u8
         };
 
         unsafe {
-            ptr::write_unaligned(ptr as *mut u64, 0);                    // clock
-            ptr::write_unaligned(ptr.add(8) as *mut u32, sample_rate);   // sample_rate
-            ptr::write_unaligned(ptr.add(12) as *mut u32, 1);            // playing
+            ptr::write_unaligned(ptr as *mut u64, 0); // clock
+            ptr::write_unaligned(ptr.add(8) as *mut u32, sample_rate); // sample_rate
+            ptr::write_unaligned(ptr.add(12) as *mut u32, 1); // playing
         }
 
-        Ok(Self { ptr, fd, owned: true })
+        Ok(Self {
+            ptr,
+            fd,
+            owned: true,
+        })
     }
 
     pub fn open() -> Result<Self> {
@@ -417,7 +440,11 @@ impl ShmTransport {
         let fd = unsafe {
             let fd = libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0);
             if fd < 0 {
-                anyhow::bail!("shm_open({}) failed: {}", Self::name(), std::io::Error::last_os_error());
+                anyhow::bail!(
+                    "shm_open({}) failed: {}",
+                    Self::name(),
+                    std::io::Error::last_os_error()
+                );
             }
             fd
         };
@@ -433,12 +460,20 @@ impl ShmTransport {
             );
             if p == libc::MAP_FAILED {
                 libc::close(fd);
-                anyhow::bail!("mmap({}) failed: {}", Self::name(), std::io::Error::last_os_error());
+                anyhow::bail!(
+                    "mmap({}) failed: {}",
+                    Self::name(),
+                    std::io::Error::last_os_error()
+                );
             }
             p as *mut u8
         };
 
-        Ok(Self { ptr, fd, owned: false })
+        Ok(Self {
+            ptr,
+            fd,
+            owned: false,
+        })
     }
 
     pub fn clock(&self) -> u64 {
@@ -491,7 +526,11 @@ impl ShmTransport {
     /// Session BPM, published by the sequencer (offset 16; 0 = unset → 120).
     pub fn bpm(&self) -> f32 {
         let v: f32 = unsafe { ptr::read_unaligned(self.ptr.add(16) as *const f32) };
-        if v > 0.0 { v } else { 120.0 }
+        if v > 0.0 {
+            v
+        } else {
+            120.0
+        }
     }
 
     pub fn set_bpm(&mut self, bpm: f32) {
@@ -766,7 +805,11 @@ impl EventRingbuf {
         let fd = unsafe {
             let fd = libc::shm_open(cname.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o644);
             if fd < 0 {
-                anyhow::bail!("shm_open({}) failed: {}", Self::name(), std::io::Error::last_os_error());
+                anyhow::bail!(
+                    "shm_open({}) failed: {}",
+                    Self::name(),
+                    std::io::Error::last_os_error()
+                );
             }
             let r = libc::ftruncate(fd, total_size as libc::off_t);
             if r < 0 {
@@ -792,13 +835,17 @@ impl EventRingbuf {
             if p == libc::MAP_FAILED {
                 libc::close(fd);
                 libc::shm_unlink(cname.as_ptr());
-                anyhow::bail!("mmap({}) failed: {}", Self::name(), std::io::Error::last_os_error());
+                anyhow::bail!(
+                    "mmap({}) failed: {}",
+                    Self::name(),
+                    std::io::Error::last_os_error()
+                );
             }
             p as *mut u8
         };
 
         unsafe {
-            ptr::write_unaligned(ptr as *mut u64, 0);            // write_index
+            ptr::write_unaligned(ptr as *mut u64, 0); // write_index
             for i in 0..NUM_CONSUMERS {
                 ptr::write_unaligned(ptr.add(16 + i * 8) as *mut u64, u64::MAX);
                 ptr::write_unaligned(ptr.add(144 + i * 4) as *mut u32, 0); // pid registry
@@ -825,7 +872,11 @@ impl EventRingbuf {
         let fd = unsafe {
             let fd = libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0);
             if fd < 0 {
-                anyhow::bail!("shm_open({}) failed: {}", Self::name(), std::io::Error::last_os_error());
+                anyhow::bail!(
+                    "shm_open({}) failed: {}",
+                    Self::name(),
+                    std::io::Error::last_os_error()
+                );
             }
             fd
         };
@@ -841,7 +892,11 @@ impl EventRingbuf {
             );
             if p == libc::MAP_FAILED {
                 libc::close(fd);
-                anyhow::bail!("mmap({}) failed: {}", Self::name(), std::io::Error::last_os_error());
+                anyhow::bail!(
+                    "mmap({}) failed: {}",
+                    Self::name(),
+                    std::io::Error::last_os_error()
+                );
             }
             p as *mut u8
         };
@@ -857,7 +912,11 @@ impl EventRingbuf {
     }
 
     pub fn open(consumer_id: usize) -> Result<Self> {
-        anyhow::ensure!(consumer_id < NUM_CONSUMERS, "consumer_id must be < {}", NUM_CONSUMERS);
+        anyhow::ensure!(
+            consumer_id < NUM_CONSUMERS,
+            "consumer_id must be < {}",
+            NUM_CONSUMERS
+        );
         let num_slots = 256u32;
         let data_bytes = num_slots as usize * EVENT_SIZE;
         let total_size = EVENT_DATA_OFFSET + data_bytes;
@@ -866,7 +925,11 @@ impl EventRingbuf {
         let fd = unsafe {
             let fd = libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0);
             if fd < 0 {
-                anyhow::bail!("shm_open({}) failed: {}", Self::name(), std::io::Error::last_os_error());
+                anyhow::bail!(
+                    "shm_open({}) failed: {}",
+                    Self::name(),
+                    std::io::Error::last_os_error()
+                );
             }
             fd
         };
@@ -882,7 +945,11 @@ impl EventRingbuf {
             );
             if p == libc::MAP_FAILED {
                 libc::close(fd);
-                anyhow::bail!("mmap({}) failed: {}", Self::name(), std::io::Error::last_os_error());
+                anyhow::bail!(
+                    "mmap({}) failed: {}",
+                    Self::name(),
+                    std::io::Error::last_os_error()
+                );
             }
             p as *mut u8
         };
@@ -894,7 +961,10 @@ impl EventRingbuf {
         unsafe {
             let w = ptr::read_volatile(ptr as *const u64);
             ptr::write_volatile(ptr.add(16 + consumer_id * 8) as *mut u64, w);
-            ptr::write_volatile(ptr.add(144 + consumer_id * 4) as *mut u32, std::process::id());
+            ptr::write_volatile(
+                ptr.add(144 + consumer_id * 4) as *mut u32,
+                std::process::id(),
+            );
         }
 
         Ok(Self {
@@ -934,11 +1004,7 @@ impl EventRingbuf {
 
         let dest = self.slot_ptr(w);
         unsafe {
-            ptr::copy_nonoverlapping(
-                event as *const AudioEvent as *const u8,
-                dest,
-                EVENT_SIZE,
-            );
+            ptr::copy_nonoverlapping(event as *const AudioEvent as *const u8, dest, EVENT_SIZE);
         }
         atomic_store_release(self.write_idx_ptr(), w + 1);
         Ok(())
@@ -955,11 +1021,7 @@ impl EventRingbuf {
         let src = self.slot_ptr(r);
         let mut event = AudioEvent::default();
         unsafe {
-            ptr::copy_nonoverlapping(
-                src,
-                &mut event as *mut AudioEvent as *mut u8,
-                EVENT_SIZE,
-            );
+            ptr::copy_nonoverlapping(src, &mut event as *mut AudioEvent as *mut u8, EVENT_SIZE);
         }
         atomic_store_release(self.read_idx_ptr(self.consumer_id), r + 1);
         Some(event)
@@ -981,7 +1043,13 @@ impl EventRingbuf {
 ///   [4..8)     num_channels : u32 = 32
 ///   [8..64)    reserved
 ///   [64..4160) 32 x f32 channels (aligned 4)
-const MODBUS_NUM_CHANNELS: usize = 64;
+/// v2: grew 64 → 128 so a full fx rack (two sequencers, three
+/// envelopes, the delay's 9 followers, the filterbank's 16) fits with
+/// headroom. Note: `consumes_channels` listening markers are a u64
+/// bitmap, so channels ≥ 64 simply don't display who's-listening hints
+/// — display-only, nothing functional.
+const MODBUS_NUM_CHANNELS: usize = 128;
+const MODBUS_VERSION: u32 = 2;
 const MODBUS_DATA_OFFSET: usize = 64;
 const MODBUS_TOTAL_SIZE: usize = MODBUS_DATA_OFFSET + MODBUS_NUM_CHANNELS * size_of::<f32>();
 
@@ -1014,7 +1082,10 @@ impl ModulationBus {
     }
 
     fn channel_ptr(&self, channel: usize) -> *mut f32 {
-        unsafe { self.ptr.add(MODBUS_DATA_OFFSET + channel * size_of::<f32>()) as *mut f32 }
+        unsafe {
+            self.ptr
+                .add(MODBUS_DATA_OFFSET + channel * size_of::<f32>()) as *mut f32
+        }
     }
 
     pub fn create() -> Result<Self> {
@@ -1024,8 +1095,17 @@ impl ModulationBus {
         let fd = unsafe {
             let fd = libc::shm_open(cname.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o644);
             if fd < 0 {
-                anyhow::bail!("shm_open({}) failed: {}", Self::name(), std::io::Error::last_os_error());
+                anyhow::bail!(
+                    "shm_open({}) failed: {}",
+                    Self::name(),
+                    std::io::Error::last_os_error()
+                );
             }
+            // NOTE: no size validation here — macOS rounds SHM objects
+            // up to page size (16 KB), so fstat can't distinguish
+            // layouts and any leftover comfortably fits our mapping.
+            // The version header below is the real discriminator; the
+            // unconditional re-init makes a stale v1 bus into a v2 one.
             let r = libc::ftruncate(fd, total as libc::off_t);
             if r < 0 {
                 let err = std::io::Error::last_os_error();
@@ -1050,13 +1130,17 @@ impl ModulationBus {
             if p == libc::MAP_FAILED {
                 libc::close(fd);
                 libc::shm_unlink(cname.as_ptr());
-                anyhow::bail!("mmap({}) failed: {}", Self::name(), std::io::Error::last_os_error());
+                anyhow::bail!(
+                    "mmap({}) failed: {}",
+                    Self::name(),
+                    std::io::Error::last_os_error()
+                );
             }
             p as *mut u8
         };
 
         unsafe {
-            ptr::write_unaligned(ptr as *mut u32, 1); // version
+            ptr::write_unaligned(ptr as *mut u32, MODBUS_VERSION);
             ptr::write_unaligned(ptr.add(4) as *mut u32, MODBUS_NUM_CHANNELS as u32);
             // Zero all channel values
             for i in 0..MODBUS_NUM_CHANNELS {
@@ -1067,7 +1151,11 @@ impl ModulationBus {
             }
         }
 
-        Ok(Self { ptr, fd, owned: true })
+        Ok(Self {
+            ptr,
+            fd,
+            owned: true,
+        })
     }
 
     pub fn open() -> Result<Self> {
@@ -1077,7 +1165,11 @@ impl ModulationBus {
         let fd = unsafe {
             let fd = libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0);
             if fd < 0 {
-                anyhow::bail!("shm_open({}) failed: {}", Self::name(), std::io::Error::last_os_error());
+                anyhow::bail!(
+                    "shm_open({}) failed: {}",
+                    Self::name(),
+                    std::io::Error::last_os_error()
+                );
             }
             fd
         };
@@ -1093,12 +1185,40 @@ impl ModulationBus {
             );
             if p == libc::MAP_FAILED {
                 libc::close(fd);
-                anyhow::bail!("mmap({}) failed: {}", Self::name(), std::io::Error::last_os_error());
+                anyhow::bail!(
+                    "mmap({}) failed: {}",
+                    Self::name(),
+                    std::io::Error::last_os_error()
+                );
             }
             p as *mut u8
         };
 
-        Ok(Self { ptr, fd, owned: false })
+        // A stale bus from an older binary (v1: 64 channels) declares
+        // itself in the header — refuse it so open().or_else(create())
+        // re-initializes the object instead of misreading it. (Size
+        // checks don't work here: macOS page-rounds SHM objects.)
+        let version = unsafe { ptr::read_unaligned(ptr as *const u32) };
+        let channels = unsafe { ptr::read_unaligned(ptr.add(4) as *const u32) };
+        if version != MODBUS_VERSION || channels != MODBUS_NUM_CHANNELS as u32 {
+            unsafe {
+                libc::munmap(ptr as *mut libc::c_void, total);
+                libc::close(fd);
+            }
+            anyhow::bail!(
+                "modbus v{} ({} ch) != v{} ({} ch) — stale SHM from an old binary",
+                version,
+                channels,
+                MODBUS_VERSION,
+                MODBUS_NUM_CHANNELS
+            );
+        }
+
+        Ok(Self {
+            ptr,
+            fd,
+            owned: false,
+        })
     }
 
     /// Read a channel value (volatile, atomic on aligned f32).
@@ -1196,7 +1316,10 @@ impl Manifest {
     }
 
     fn entry_data_ptr(&self, slot: usize) -> *mut u8 {
-        unsafe { self.ptr.add(MANIFEST_HEADER_SIZE + slot * MANIFEST_ENTRY_SIZE + 4) }
+        unsafe {
+            self.ptr
+                .add(MANIFEST_HEADER_SIZE + slot * MANIFEST_ENTRY_SIZE + 4)
+        }
     }
 
     pub fn create() -> Result<Self> {
@@ -1206,7 +1329,11 @@ impl Manifest {
         let fd = unsafe {
             let mut fd = libc::shm_open(cname.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o644);
             if fd < 0 {
-                anyhow::bail!("shm_open({}) failed: {}", SHM_MANIFEST_NAME, std::io::Error::last_os_error());
+                anyhow::bail!(
+                    "shm_open({}) failed: {}",
+                    SHM_MANIFEST_NAME,
+                    std::io::Error::last_os_error()
+                );
             }
             // POSIX shm objects can only be sized once on macOS. A wrong-sized
             // object is a leftover from an older layout: unlink it and start
@@ -1214,14 +1341,22 @@ impl Manifest {
             let mut st: libc::stat = std::mem::zeroed();
             if libc::fstat(fd, &mut st) < 0 {
                 libc::close(fd);
-                anyhow::bail!("fstat({}) failed: {}", SHM_MANIFEST_NAME, std::io::Error::last_os_error());
+                anyhow::bail!(
+                    "fstat({}) failed: {}",
+                    SHM_MANIFEST_NAME,
+                    std::io::Error::last_os_error()
+                );
             }
             if st.st_size != total as libc::off_t {
                 if st.st_size == 0 {
                     if libc::ftruncate(fd, total as libc::off_t) < 0 {
                         libc::close(fd);
                         libc::shm_unlink(cname.as_ptr());
-                        anyhow::bail!("ftruncate({}) failed: {}", SHM_MANIFEST_NAME, std::io::Error::last_os_error());
+                        anyhow::bail!(
+                            "ftruncate({}) failed: {}",
+                            SHM_MANIFEST_NAME,
+                            std::io::Error::last_os_error()
+                        );
                     }
                 } else {
                     libc::close(fd);
@@ -1231,7 +1366,11 @@ impl Manifest {
                         if fd >= 0 {
                             libc::close(fd);
                         }
-                        anyhow::bail!("recreate({}) failed: {}", SHM_MANIFEST_NAME, std::io::Error::last_os_error());
+                        anyhow::bail!(
+                            "recreate({}) failed: {}",
+                            SHM_MANIFEST_NAME,
+                            std::io::Error::last_os_error()
+                        );
                     }
                 }
             }
@@ -1250,7 +1389,11 @@ impl Manifest {
             if p == libc::MAP_FAILED {
                 libc::close(fd);
                 libc::shm_unlink(cname.as_ptr());
-                anyhow::bail!("mmap({}) failed: {}", SHM_MANIFEST_NAME, std::io::Error::last_os_error());
+                anyhow::bail!(
+                    "mmap({}) failed: {}",
+                    SHM_MANIFEST_NAME,
+                    std::io::Error::last_os_error()
+                );
             }
             p as *mut u8
         };
@@ -1273,7 +1416,13 @@ impl Manifest {
             }
         }
 
-        Ok(Self { ptr, fd, owned: true, my_slot: None, my_mod_base: None })
+        Ok(Self {
+            ptr,
+            fd,
+            owned: true,
+            my_slot: None,
+            my_mod_base: None,
+        })
     }
 
     pub fn open() -> Result<Self> {
@@ -1282,7 +1431,11 @@ impl Manifest {
         let fd = unsafe {
             let fd = libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0);
             if fd < 0 {
-                anyhow::bail!("shm_open({}) failed: {}", SHM_MANIFEST_NAME, std::io::Error::last_os_error());
+                anyhow::bail!(
+                    "shm_open({}) failed: {}",
+                    SHM_MANIFEST_NAME,
+                    std::io::Error::last_os_error()
+                );
             }
             fd
         };
@@ -1298,7 +1451,11 @@ impl Manifest {
             );
             if p == libc::MAP_FAILED {
                 libc::close(fd);
-                anyhow::bail!("mmap({}) failed: {}", SHM_MANIFEST_NAME, std::io::Error::last_os_error());
+                anyhow::bail!(
+                    "mmap({}) failed: {}",
+                    SHM_MANIFEST_NAME,
+                    std::io::Error::last_os_error()
+                );
             }
             p as *mut u8
         };
@@ -1319,7 +1476,13 @@ impl Manifest {
             );
         }
 
-        Ok(Self { ptr, fd, owned: false, my_slot: None, my_mod_base: None })
+        Ok(Self {
+            ptr,
+            fd,
+            owned: false,
+            my_slot: None,
+            my_mod_base: None,
+        })
     }
 
     /// Atomically claim `count` modbus channels; returns the base index.
@@ -1408,7 +1571,10 @@ impl Manifest {
         audio_shm: Option<&str>,
         mod_channels: u32,
     ) -> Result<usize> {
-        anyhow::ensure!(module_name.len() < 16, "module name too long (max 15 chars)");
+        anyhow::ensure!(
+            module_name.len() < 16,
+            "module name too long (max 15 chars)"
+        );
         if let Some(shm) = audio_shm {
             anyhow::ensure!(shm.len() < 32, "audio SHM name too long (max 31 chars)");
         }
@@ -1458,7 +1624,11 @@ impl Manifest {
                     }
                     valid.store(1, Ordering::Release);
                     self.my_slot = Some(slot);
-                    self.my_mod_base = if mod_channels > 0 { Some(mod_base as usize) } else { None };
+                    self.my_mod_base = if mod_channels > 0 {
+                        Some(mod_base as usize)
+                    } else {
+                        None
+                    };
                     return Ok(slot);
                 }
                 _ => continue,
@@ -1531,18 +1701,29 @@ impl Manifest {
             if valid.load(Ordering::Acquire) != 1 {
                 continue;
             }
-            let data = unsafe { std::slice::from_raw_parts(self.entry_data_ptr(slot), MANIFEST_ENTRY_SIZE - 4) };
+            let data = unsafe {
+                std::slice::from_raw_parts(self.entry_data_ptr(slot), MANIFEST_ENTRY_SIZE - 4)
+            };
             let name_end = data[..16].iter().position(|&b| b == 0).unwrap_or(16);
             let module_name = String::from_utf8_lossy(&data[..name_end]).to_string();
-            let instance = unsafe { ptr::read_unaligned(data.as_ptr().add(16) as *const u32) as usize };
+            let instance =
+                unsafe { ptr::read_unaligned(data.as_ptr().add(16) as *const u32) as usize };
             let pid = unsafe { ptr::read_unaligned(data.as_ptr().add(20) as *const u32) };
             let audio_shm = {
                 let shm_end = data[24..56].iter().position(|&b| b == 0).unwrap_or(32);
-                if shm_end == 0 { None } else { Some(String::from_utf8_lossy(&data[24..24 + shm_end]).to_string()) }
+                if shm_end == 0 {
+                    None
+                } else {
+                    Some(String::from_utf8_lossy(&data[24..24 + shm_end]).to_string())
+                }
             };
             let raw_base = unsafe { ptr::read_unaligned(data.as_ptr().add(56) as *const u32) };
             let mod_count = unsafe { ptr::read_unaligned(data.as_ptr().add(60) as *const u32) };
-            let mod_base = if raw_base == u32::MAX || mod_count == 0 { None } else { Some(raw_base as usize) };
+            let mod_base = if raw_base == u32::MAX || mod_count == 0 {
+                None
+            } else {
+                Some(raw_base as usize)
+            };
             let consumes_channels =
                 unsafe { ptr::read_unaligned(data.as_ptr().add(64) as *const u64) };
             let consumes_notes = data[72];
@@ -1602,7 +1783,12 @@ mod shm_tests {
         // resolves to a production name, `cargo test` destroys the shared
         // memory of a live los session (this wiped the manifest out from
         // under a running mixer once).
-        for name in [SHM_TRANSPORT_NAME, SHM_EVENTS_NAME, SHM_MODBUS_NAME, SHM_MANIFEST_NAME] {
+        for name in [
+            SHM_TRANSPORT_NAME,
+            SHM_EVENTS_NAME,
+            SHM_MODBUS_NAME,
+            SHM_MANIFEST_NAME,
+        ] {
             assert!(
                 name.starts_with("/los_test_"),
                 "{name} would clobber a live session's SHM"
@@ -1620,7 +1806,10 @@ mod shm_tests {
 
         // A second handle (another process in real life) toggles the flag
         let mut other = ShmTransport::open().expect("open transport");
-        assert!(!other.toggle_playing(), "toggle from playing should return stopped");
+        assert!(
+            !other.toggle_playing(),
+            "toggle from playing should return stopped"
+        );
         assert!(!owner.playing(), "owner must see the stop");
 
         other.set_playing(true);
@@ -1636,7 +1825,11 @@ mod shm_tests {
     fn audio_event_note_on_computes_frequency() {
         let ev = AudioEvent::note_on(69, 100, 0);
         assert_eq!(ev.event_type, EVENT_NOTE_ON);
-        assert!((ev.value - 440.0).abs() < 0.01, "A4 should be ~440 Hz, got {}", ev.value);
+        assert!(
+            (ev.value - 440.0).abs() < 0.01,
+            "A4 should be ~440 Hz, got {}",
+            ev.value
+        );
         assert_eq!(ev.param, 100);
         assert_eq!(ev.step, 0);
     }
@@ -1644,7 +1837,11 @@ mod shm_tests {
     #[test]
     fn audio_event_note_on_c4_frequency() {
         let ev = AudioEvent::note_on(60, 127, 5);
-        assert!((ev.value - 261.63).abs() < 0.1, "C4 should be ~261.63 Hz, got {}", ev.value);
+        assert!(
+            (ev.value - 261.63).abs() < 0.1,
+            "C4 should be ~261.63 Hz, got {}",
+            ev.value
+        );
     }
 
     #[test]
@@ -1693,7 +1890,9 @@ mod shm_tests {
 
         // a live consumer joining now still works
         let mut live = EventRingbuf::open(0).expect("join live");
-        producer.write_event(&AudioEvent::note_on(61, 100, 0)).expect("write after join");
+        producer
+            .write_event(&AudioEvent::note_on(61, 100, 0))
+            .expect("write after join");
         assert!(live.read_event().is_some(), "live consumer sees new events");
     }
 
@@ -1706,12 +1905,18 @@ mod shm_tests {
 
         let mut wrote = 0u32;
         for i in 0..600u32 {
-            if producer.write_event(&AudioEvent::note_on(60, 100, i)).is_err() {
+            if producer
+                .write_event(&AudioEvent::note_on(60, 100, i))
+                .is_err()
+            {
                 break;
             }
             wrote += 1;
         }
-        assert_eq!(wrote, 256, "a live lagging consumer must still bound the ring");
+        assert_eq!(
+            wrote, 256,
+            "a live lagging consumer must still bound the ring"
+        );
     }
 
     #[test]
@@ -1801,7 +2006,10 @@ mod shm_tests {
         }
 
         let ev = AudioEvent::note_on(60, 100, 256);
-        assert!(rb.write_event(&ev).is_err(), "producer should block when buffer full");
+        assert!(
+            rb.write_event(&ev).is_err(),
+            "producer should block when buffer full"
+        );
     }
 
     #[test]
@@ -1819,7 +2027,10 @@ mod shm_tests {
         let _ = c0.read_event();
 
         let ev = AudioEvent::note_on(60, 100, 256);
-        assert!(rb.write_event(&ev).is_ok(), "producer should unblock after consumer reads");
+        assert!(
+            rb.write_event(&ev).is_ok(),
+            "producer should unblock after consumer reads"
+        );
     }
 
     #[test]
@@ -1893,11 +2104,18 @@ mod shm_tests {
         producer.write_event(&note_ev).unwrap();
 
         // Step 2: Both voice and envelope receive the note_on
-        let voice_ev = voice_consumer.read_event().expect("voice should receive note_on");
-        let env_ev = env_consumer.read_event().expect("envelope should receive note_on");
+        let voice_ev = voice_consumer
+            .read_event()
+            .expect("voice should receive note_on");
+        let env_ev = env_consumer
+            .read_event()
+            .expect("envelope should receive note_on");
 
         assert_eq!(voice_ev.event_type, EVENT_NOTE_ON);
-        assert!((voice_ev.value - 261.63).abs() < 0.1, "voice gets C4 frequency");
+        assert!(
+            (voice_ev.value - 261.63).abs() < 0.1,
+            "voice gets C4 frequency"
+        );
         assert_eq!(voice_ev.param, 100, "voice gets velocity");
 
         assert_eq!(env_ev.event_type, EVENT_NOTE_ON);
@@ -1907,13 +2125,18 @@ mod shm_tests {
 
         // Step 4: Voice reads envelope from modbus ch0
         let envelope_level = modbus.get(0);
-        assert!((envelope_level - 0.75).abs() < 0.001, "voice reads envelope level");
+        assert!(
+            (envelope_level - 0.75).abs() < 0.001,
+            "voice reads envelope level"
+        );
 
         // Step 5: Voice amplitude = envelope × velocity
         let velocity = voice_ev.param as f32 / 127.0;
         let level = envelope_level * velocity;
-        assert!((level - (0.75 * 100.0 / 127.0)).abs() < 0.01,
-            "amplitude = envelope * velocity");
+        assert!(
+            (level - (0.75 * 100.0 / 127.0)).abs() < 0.01,
+            "amplitude = envelope * velocity"
+        );
 
         // Step 6: Sequencer sends note_off
         let off_ev = AudioEvent::note_off(60, 1);
@@ -1933,7 +2156,10 @@ mod shm_tests {
         let _ = unsafe { libc::shm_unlink(CString::new(SHM_MODBUS_NAME).unwrap().as_ptr()) };
 
         // open() without create() should fail
-        assert!(ModulationBus::open().is_err(), "open() should fail when modbus doesn't exist");
+        assert!(
+            ModulationBus::open().is_err(),
+            "open() should fail when modbus doesn't exist"
+        );
 
         // But create() should succeed
         let mut bus = ModulationBus::create().expect("create should succeed");
@@ -1944,7 +2170,9 @@ mod shm_tests {
         assert!((bus2.get(0) - 0.42).abs() < 0.001);
 
         // And the fallback pattern used in modules: open().or_else(|_| create())
-        let bus3 = ModulationBus::open().or_else(|_| ModulationBus::create()).expect("fallback works");
+        let bus3 = ModulationBus::open()
+            .or_else(|_| ModulationBus::create())
+            .expect("fallback works");
         assert!((bus3.get(0) - 0.42).abs() < 0.001);
     }
 
@@ -1956,7 +2184,9 @@ mod shm_tests {
         let _ = unsafe { libc::shm_unlink(CString::new(SHM_MANIFEST_NAME).unwrap().as_ptr()) };
         let mut m = Manifest::create().expect("create manifest");
 
-        let slot = m.register("voice", 0, Some("/los_audio_voice_0"), 0).expect("register");
+        let slot = m
+            .register("voice", 0, Some("/los_audio_voice_0"), 0)
+            .expect("register");
         assert_eq!(slot, 0, "first registration should get slot 0");
 
         let entries = m.entries();
@@ -1966,7 +2196,10 @@ mod shm_tests {
         assert_eq!(entries[0].audio_shm.as_deref(), Some("/los_audio_voice_0"));
 
         m.unregister();
-        assert!(m.entries().is_empty(), "after unregister, entries should be empty");
+        assert!(
+            m.entries().is_empty(),
+            "after unregister, entries should be empty"
+        );
     }
 
     #[test]
@@ -1974,15 +2207,26 @@ mod shm_tests {
         let _guard = SHM_TEST_MUTEX.lock().unwrap();
         let _ = unsafe { libc::shm_unlink(CString::new(SHM_MANIFEST_NAME).unwrap().as_ptr()) };
         let mut m = Manifest::create().expect("create manifest");
-        m.register("delay", 7, Some("/los_audio_delay_7"), 0).expect("register");
+        m.register("delay", 7, Some("/los_audio_delay_7"), 0)
+            .expect("register");
 
         let find = |m: &Manifest, name: &str| {
-            m.entries().into_iter().find(|e| e.module_name == name).unwrap()
+            m.entries()
+                .into_iter()
+                .find(|e| e.module_name == name)
+                .unwrap()
         };
-        assert_eq!(find(&m, "delay").input_shm, None, "no claim at registration");
+        assert_eq!(
+            find(&m, "delay").input_shm,
+            None,
+            "no claim at registration"
+        );
 
         m.publish_input(Some("/los_audio_voice_0"));
-        assert_eq!(find(&m, "delay").input_shm.as_deref(), Some("/los_audio_voice_0"));
+        assert_eq!(
+            find(&m, "delay").input_shm.as_deref(),
+            Some("/los_audio_voice_0")
+        );
         m.publish_input(Some("/los_audio_tone_1"));
         assert_eq!(
             find(&m, "delay").input_shm.as_deref(),
@@ -1999,8 +2243,13 @@ mod shm_tests {
         m.my_slot = None; // abandon without unregistering (no Drop cleanup)
         let mut m2 = Manifest::open().expect("open");
         m2.reap_dead();
-        m2.register("scope", 0, None, 0).expect("register into reused slot");
-        assert_eq!(find(&m2, "scope").input_shm, None, "reused slot starts clean");
+        m2.register("scope", 0, None, 0)
+            .expect("register into reused slot");
+        assert_eq!(
+            find(&m2, "scope").input_shm,
+            None,
+            "reused slot starts clean"
+        );
     }
 
     #[test]
@@ -2009,15 +2258,22 @@ mod shm_tests {
         let _ = unsafe { libc::shm_unlink(CString::new(SHM_MANIFEST_NAME).unwrap().as_ptr()) };
         let mut m = Manifest::create().expect("create manifest");
 
-        m.register("sequencer", 0, None, 8).expect("register sequencer");
-        m.register("voice", 0, Some("/los_audio_voice_0"), 0).expect("register voice 0");
-        m.register("voice", 1, Some("/los_audio_voice_1"), 0).expect("register voice 1");
-        m.register("envelope", 0, None, 8).expect("register envelope");
+        m.register("sequencer", 0, None, 8)
+            .expect("register sequencer");
+        m.register("voice", 0, Some("/los_audio_voice_0"), 0)
+            .expect("register voice 0");
+        m.register("voice", 1, Some("/los_audio_voice_1"), 0)
+            .expect("register voice 1");
+        m.register("envelope", 0, None, 8)
+            .expect("register envelope");
 
         let entries = m.entries();
         assert_eq!(entries.len(), 4);
 
-        let voice_entries: Vec<_> = entries.iter().filter(|e| e.module_name == "voice").collect();
+        let voice_entries: Vec<_> = entries
+            .iter()
+            .filter(|e| e.module_name == "voice")
+            .collect();
         assert_eq!(voice_entries.len(), 2);
     }
 
@@ -2026,7 +2282,8 @@ mod shm_tests {
         let _guard = SHM_TEST_MUTEX.lock().unwrap();
         let _ = unsafe { libc::shm_unlink(CString::new(SHM_MANIFEST_NAME).unwrap().as_ptr()) };
         let mut m1 = Manifest::create().expect("create manifest");
-        m1.register("voice", 0, Some("/los_audio_voice_0"), 0).expect("register");
+        m1.register("voice", 0, Some("/los_audio_voice_0"), 0)
+            .expect("register");
 
         // Simulate another process opening the same manifest
         let m2 = Manifest::open().expect("open manifest");
@@ -2044,7 +2301,9 @@ mod shm_tests {
         unsafe { ptr::write_unaligned(m.ptr as *mut u32, 1) };
         assert!(Manifest::open().is_err(), "v1 manifest must be refused");
         // the standard fallback chain recovers by re-initializing
-        let m2 = Manifest::open().or_else(|_| Manifest::create()).expect("recreate");
+        let m2 = Manifest::open()
+            .or_else(|_| Manifest::create())
+            .expect("recreate");
         assert!(m2.entries().is_empty());
         drop(m2);
         std::mem::forget(m); // owner drop would unlink mid-test otherwise
@@ -2069,9 +2328,15 @@ mod shm_tests {
         assert_eq!(m3.claimed_base(), None, "no channels claimed");
 
         let entries = m.entries();
-        let seq = entries.iter().find(|e| e.module_name == "sequencer").unwrap();
+        let seq = entries
+            .iter()
+            .find(|e| e.module_name == "sequencer")
+            .unwrap();
         assert_eq!((seq.mod_base, seq.mod_count), (Some(0), 8));
-        let env = entries.iter().find(|e| e.module_name == "envelope").unwrap();
+        let env = entries
+            .iter()
+            .find(|e| e.module_name == "envelope")
+            .unwrap();
         assert_eq!((env.mod_base, env.mod_count), (Some(8), 8));
         let voice = entries.iter().find(|e| e.module_name == "voice").unwrap();
         assert_eq!((voice.mod_base, voice.mod_count), (None, 0));
@@ -2086,7 +2351,10 @@ mod shm_tests {
             m.register("mod", i, None, 8).expect("claim");
             m.my_slot = None; // keep registering from the same handle
         }
-        assert!(m.register("over", 0, None, 8).is_err(), "65th channel must fail");
+        assert!(
+            m.register("over", 0, None, 8).is_err(),
+            "65th channel must fail"
+        );
     }
 
     #[test]
@@ -2096,7 +2364,11 @@ mod shm_tests {
             assert!(seen.insert(consumer_id("voice", i)), "voice {} collides", i);
         }
         for i in 0..4 {
-            assert!(seen.insert(consumer_id("envelope", i)), "envelope {} collides", i);
+            assert!(
+                seen.insert(consumer_id("envelope", i)),
+                "envelope {} collides",
+                i
+            );
         }
     }
 
@@ -2127,7 +2399,11 @@ mod shm_tests {
 
         assert_eq!(m.reap_dead(), 2, "both dead entries reaped");
         assert!(m.entries().is_empty());
-        assert_eq!(m.next_channel(), 0, "allocator fully reset with no live claimers");
+        assert_eq!(
+            m.next_channel(),
+            0,
+            "allocator fully reset with no live claimers"
+        );
 
         // and registration works again in the freed space
         m.register("sequencer", 0, None, 8).expect("re-register");
@@ -2154,7 +2430,11 @@ mod shm_tests {
 
         m.reap_dead();
         assert_eq!(m.entries().len(), 1, "live entry survives");
-        assert_eq!(m.next_channel(), 8, "dead top range reclaimed, live claim kept");
+        assert_eq!(
+            m.next_channel(),
+            8,
+            "dead top range reclaimed, live claim kept"
+        );
     }
 
     #[test]
@@ -2174,7 +2454,8 @@ mod shm_tests {
             m.force_entry_pid(slot, dead_pid);
         }
         // full of corpses — registration must reap and succeed
-        m.register("voice", 0, None, 0).expect("register over corpses");
+        m.register("voice", 0, None, 0)
+            .expect("register over corpses");
         assert_eq!(m.entries().len(), 1);
     }
 
@@ -2228,7 +2509,9 @@ mod shm_tests {
 
         // Write multiple slots
         for slot in 0..5u32 {
-            let data: Vec<f32> = (0..writer.slot_len()).map(|i| (slot as f32 * 100.0 + i as f32) * 0.01).collect();
+            let data: Vec<f32> = (0..writer.slot_len())
+                .map(|i| (slot as f32 * 100.0 + i as f32) * 0.01)
+                .collect();
             writer.write(&data).expect("write should succeed");
         }
 
@@ -2237,7 +2520,9 @@ mod shm_tests {
         for slot in 0..5u32 {
             let result = reader.read(&mut buf).expect("read should succeed");
             assert!(result, "read {} should return true", slot);
-            let expected: Vec<f32> = (0..reader.slot_len()).map(|i| (slot as f32 * 100.0 + i as f32) * 0.01).collect();
+            let expected: Vec<f32> = (0..reader.slot_len())
+                .map(|i| (slot as f32 * 100.0 + i as f32) * 0.01)
+                .collect();
             assert_eq!(buf, expected, "read {} data mismatch", slot);
         }
     }
@@ -2268,10 +2553,15 @@ mod shm_tests {
         // Fill all slots
         let data = vec![1.0f32; writer.slot_len()];
         for i in 0..writer.num_slots() {
-            writer.write(&data).unwrap_or_else(|_| panic!("write {} should succeed", i));
+            writer
+                .write(&data)
+                .unwrap_or_else(|_| panic!("write {} should succeed", i));
         }
 
         // Next write should fail (full)
-        assert!(writer.write(&data).is_err(), "write should fail when ringbuf is full");
+        assert!(
+            writer.write(&data).is_err(),
+            "write should fail when ringbuf is full"
+        );
     }
 }
