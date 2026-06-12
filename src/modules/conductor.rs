@@ -356,6 +356,7 @@ pub fn canonical_module(name: &str) -> Option<&'static str> {
         "swarm" | "brass" | "cs80" => "swarm",
         "dld" | "looper" | "dual" => "dld",
         "sampler" | "morph" | "splice" => "sampler",
+        "wasp" | "vcf" | "a124" => "wasp",
         "conductor" => "conductor",
         _ => return None,
     })
@@ -376,6 +377,7 @@ pub const ADDABLE_MODULES: &[&str] = &[
     "swarm",
     "dld",
     "sampler",
+    "wasp",
 ];
 
 /// Spawn a new module instance in a fresh pane of the modules window.
