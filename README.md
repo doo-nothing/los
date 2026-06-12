@@ -90,7 +90,10 @@ passage, a 90 BPM peak, a swelling return, a 58 BPM outro) walked by
 the macro lane, with probability and pushed notes keeping every bar
 alive, a drunk modulation track strolling the filterbank's window, and
 a ping-pong bass running 12 steps against 16. It's a worked example of
-the sequencer's depth as much as a patch.
+the sequencer's depth as much as a patch — and it ships as a loadable
+song file too: [examples/house-drone.toml](examples/house-drone.toml),
+next to [examples/first-song.toml](examples/first-song.toml), a heavily
+annotated minimal song to copy from.
 
 ![the fx rack: the delay's tap ladders answering the pattern, the filterbank strolling](docs/demo-fx.gif)
 

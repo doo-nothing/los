@@ -1683,6 +1683,37 @@ instance = 0
     }
 
     #[test]
+    fn every_example_validates() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).expect("examples/ directory") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().is_none_or(|e| e != "toml") {
+                continue;
+            }
+            let r = validate_file(&path);
+            assert!(
+                r.errors.is_empty(),
+                "{} has errors: {:?}",
+                path.display(),
+                r.errors
+            );
+            // The hand-written teaching example must be beyond reproach;
+            // the house drone ships two known stock-cable warnings.
+            if path.file_name().is_some_and(|n| n == "first-song.toml") {
+                assert!(
+                    r.warnings.is_empty(),
+                    "{} has warnings: {:?}",
+                    path.display(),
+                    r.warnings
+                );
+            }
+            checked += 1;
+        }
+        assert!(checked >= 2, "expected at least 2 example files, found {checked}");
+    }
+
+    #[test]
     fn edit_distance_sanity() {
         assert_eq!(edit_distance("velocity", "velocity"), 0);
         assert_eq!(edit_distance("vellocity", "velocity"), 1);
