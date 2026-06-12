@@ -355,12 +355,16 @@ impl Exciter {
     }
 
     fn granular(&mut self, out: &mut [f32], samples: &SampleData) {
-        // grain restart probability 1%, restart point from parameter,
-        // pitch from timbre (−60…+12 st), reading the noise sample
-        let restart_prob = (0.01 * 4_294_967_296.0) as u32;
+        // grain restart probability 1% per sample at 32 kHz (retargeted
+        // so the expected grain length is sr-invariant), restart point
+        // from parameter, pitch from timbre (−60…+12 st), reading the
+        // noise sample at the firmware's 32 kHz playback rate
+        let restart_prob = ((1.0 - 0.99_f32.powf(32_000.0 / self.sample_rate))
+            * 4_294_967_296.0) as u32;
         let restart_point = ((self.parameter * 32_767.0) as u32) << 17;
-        let increment =
-            (131_072.0 * semitones_to_ratio(72.0 * self.timbre - 60.0)) as u32;
+        let increment = (131_072.0
+            * semitones_to_ratio(72.0 * self.timbre - 60.0)
+            * (32_000.0 / self.sample_rate)) as u32;
         let base = (self.signature * 8_192.0) as usize;
         let n = samples.noise_sample.len();
         for v in out.iter_mut() {
@@ -391,15 +395,20 @@ impl Exciter {
         let off2 = b[ii + 1] as usize;
         let len1 = off2 - off1 - 1;
         let len2 = b[(ii + 2).min(b.len() - 1)] as usize - off2 - 1;
-        let increment =
-            (65_536.0 * semitones_to_ratio(72.0 * self.timbre - 36.0 + 7.0)) as u32;
+        // the sample data is 32 kHz PCM; play it at its own rate
+        let increment = (65_536.0
+            * semitones_to_ratio(72.0 * self.timbre - 36.0 + 7.0)
+            * (32_000.0 / self.sample_rate)) as u32;
         let mut damp = self.damp_state;
         if flags & FLAG_RISING != 0 {
             damp = 0.0;
             self.phase = 0;
         }
         if flags & FLAG_GATE == 0 {
-            damp = 1.0 - 0.95 * (1.0 - damp);
+            // upstream runs this once per 16-sample control tick at
+            // 32 kHz (0.5 ms); retarget for our block length / rate
+            let ticks = (out.len() as f32 / self.sample_rate) / 0.0005;
+            damp = 1.0 - 0.95_f32.powf(ticks) * (1.0 - damp);
         }
         for v in out.iter_mut() {
             let pi = (self.phase >> 16) as usize;
@@ -438,7 +447,9 @@ impl Exciter {
             out[0] = pulse_amplitude(self.timbre);
         }
         if flags & FLAG_GATE == 0 {
-            self.damp_state = 1.0 - 0.95 * (1.0 - self.damp_state);
+            // one 0.5 ms control tick upstream; retarget per block
+            let ticks = (out.len() as f32 / self.sample_rate) / 0.0005;
+            self.damp_state = 1.0 - 0.95_f32.powf(ticks) * (1.0 - self.damp_state);
         }
         self.damping = self.damp_state * (1.0 - self.parameter);
     }
@@ -447,20 +458,25 @@ impl Exciter {
         let amplitude = pulse_amplitude(self.timbre);
         let mut damp = self.damp_state;
         let mut impulse = 0.0;
+        // per-sample laws are written for 32 kHz; retarget the
+        // coefficients and the pre-release delay for our rate
+        let s = self.sample_rate / 32_000.0;
+        let damp_rise = 0.997_f32.powf(32_000.0 / self.sample_rate);
+        let damp_fall = 0.9_f32.powf(32_000.0 / self.sample_rate);
         if flags & FLAG_RISING != 0 {
             impulse = -amplitude * (0.05 + self.signature * 0.2);
-            self.plectrum_delay = (4_096.0 * self.parameter * self.parameter) as u32 + 64;
+            self.plectrum_delay =
+                ((4_096.0 * self.parameter * self.parameter + 64.0) * s).round() as u32;
         }
         for v in out.iter_mut() {
             if self.plectrum_delay > 0 {
                 self.plectrum_delay -= 1;
                 if self.plectrum_delay == 0 {
                     impulse = amplitude;
-                    damp = 1.0;
                 }
-            }
-            if damp > 0.005 {
-                damp *= 0.9;
+                damp = 1.0 - damp_rise * (1.0 - damp);
+            } else {
+                damp *= damp_fall;
             }
             *v = impulse;
             impulse = 0.0;
@@ -506,7 +522,9 @@ impl Exciter {
 
     fn flow(&mut self, flags: u8, out: &mut [f32]) {
         let scale = self.parameter.powi(4);
-        let threshold = 0.0001 + scale * 0.125;
+        // per-sample flip probability at 32 kHz; retarget so the flip
+        // rate per second is sr-invariant
+        let threshold = (0.0001 + scale * 0.125) * (32_000.0 / self.sample_rate);
         if flags & FLAG_RISING != 0 {
             self.particle_state = 0.5;
         }
@@ -896,9 +914,18 @@ impl MultistageEnvelope {
                 s => s,
             };
         } else {
-            // expo-ish curve (the firmware's env_expo flavor)
+            // stage shapes per set_adsr + lookup_tables.py: attack is
+            // the quartic LUT (t^3.32), decay/release the normalized
+            // expo LUT
             let t = self.phase;
-            let curved = 1.0 - (-4.0 * t).exp() / (1.0 - (-4.0_f32).exp()).abs();
+            let curved = match self.stage {
+                EnvStage::Attack => t.powf(3.32),
+                EnvStage::Decay | EnvStage::Release => {
+                    (1.0 - (-4.0 * t).exp()) / (1.0 - (-4.0_f32).exp())
+                }
+                // unreachable: both return early above
+                EnvStage::Sustain | EnvStage::Idle => t,
+            };
             let curved = curved.clamp(0.0, 1.0);
             self.value = self.start_value + (target - self.start_value) * curved;
         }
@@ -1088,6 +1115,74 @@ mod tests {
             last = e.process(0, 64);
         }
         assert!(last < v, "release releases: {v} -> {last}");
+    }
+
+    #[test]
+    fn sample_player_pitch_is_sample_rate_invariant() {
+        let samples = SampleData::load();
+        let zero_crossing_rate = |sr: f32| -> f32 {
+            let mut e = Exciter::new(ExciterModel::SamplePlayer, sr, 0x5eed);
+            e.timbre = 0.5;
+            e.parameter = 0.5;
+            let total = (sr * 0.25) as usize;
+            let mut rendered = Vec::with_capacity(total);
+            let mut remaining = total;
+            let mut first = true;
+            while remaining > 0 {
+                let n = remaining.min(64);
+                let mut out = vec![0.0; n];
+                let flags = if first {
+                    FLAG_RISING | FLAG_GATE
+                } else {
+                    FLAG_GATE
+                };
+                first = false;
+                e.process(flags, &mut out, &samples);
+                rendered.extend_from_slice(&out);
+                remaining -= n;
+            }
+            let crossings = rendered
+                .windows(2)
+                .filter(|w| (w[0] >= 0.0) != (w[1] >= 0.0))
+                .count();
+            crossings as f32 / 0.25
+        };
+        let r32 = zero_crossing_rate(32_000.0);
+        let r48 = zero_crossing_rate(48_000.0);
+        assert!(r32 > 0.0, "the sample sounds at 32k");
+        let ratio = r48 / r32;
+        assert!(
+            (0.9..=1.1).contains(&ratio),
+            "pitch is sr-invariant: zcr/s 32k={r32} 48k={r48}"
+        );
+    }
+
+    #[test]
+    fn envelope_attack_concave_up_and_decay_expo() {
+        let sr = 48_000.0;
+        let mut e = MultistageEnvelope::new(sr);
+        e.set_adsr(0.6, 0.6, 0.0, 0.6);
+        e.process(FLAG_RISING | FLAG_GATE, 16);
+        let mut attack_mid = None;
+        let mut decay_mid = None;
+        for _ in 0..200_000 {
+            let v = e.process(FLAG_GATE, 16);
+            if e.stage == EnvStage::Attack && e.phase >= 0.5 && attack_mid.is_none() {
+                attack_mid = Some(v);
+            }
+            if e.stage == EnvStage::Decay && e.phase >= 0.5 && decay_mid.is_none() {
+                decay_mid = Some(v);
+                break;
+            }
+        }
+        // quartic LUT t^3.32: at half-phase the value is ~0.1, well
+        // below the linear midpoint — concave-up
+        let attack_mid = attack_mid.expect("attack midpoint sampled");
+        assert!(attack_mid < 0.25, "attack is concave-up: {attack_mid}");
+        // expo LUT (1-e^-4t)/(1-e^-4): the decay sheds ~88% of the
+        // span by half-phase — convex
+        let decay_mid = decay_mid.expect("decay midpoint sampled");
+        assert!(decay_mid < 0.3, "decay is convex (expo): {decay_mid}");
     }
 
     #[test]

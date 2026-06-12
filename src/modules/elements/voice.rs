@@ -59,6 +59,9 @@ pub struct Voice {
     blow: Exciter,
     strike: Exciter,
     tube: Tube,
+    /// Granular diffuser on the blow path (fx/diffuser.h): 4 series
+    /// allpasses, k = 0.625.
+    diffuser: [Ap; 4],
     pub resonator: Resonator,
     previous_gate: bool,
     envelope_value: f32,
@@ -78,12 +81,21 @@ impl Voice {
         bow.timbre = 0.5;
         let blow = Exciter::new(ExciterModel::GranularSamplePlayer, sample_rate, seed ^ 0x2222);
         let strike = Exciter::new(ExciterModel::Mallet, sample_rate, seed ^ 0x3333);
+        // diffuser sizes are at the firmware's 32 kHz; scale to ours
+        let s = sample_rate / 32_000.0;
+        let sz = |n: f32| ((n * s).round() as usize).max(2);
         Voice {
             envelope: MultistageEnvelope::new(sample_rate),
             bow,
             blow,
             strike,
             tube: Tube::new(),
+            diffuser: [
+                Ap::new(sz(126.0)),
+                Ap::new(sz(180.0)),
+                Ap::new(sz(269.0)),
+                Ap::new(sz(444.0)),
+            ],
             resonator: Resonator::new(),
             previous_gate: false,
             envelope_value: 0.0,
@@ -191,17 +203,32 @@ impl Voice {
             frequency,
             envelope_value,
             patch.resonator_damping,
-            patch.exciter_blow_timbre,
-            &mut self.blow_buffer[..size],
             tube_level,
+            &mut self.blow_buffer[..size],
+            tube_level * 0.5,
         );
         for v in self.blow_buffer[..size].iter_mut() {
             *v *= blow_level;
+            // diffuse the blow path (voice.cc runs the granular
+            // diffuser after the level scaling)
+            for ap in self.diffuser.iter_mut() {
+                *v = ap.process(*v, 0.625);
+            }
         }
 
         self.strike
             .process(flags, &mut self.strike_buffer[..size], samples);
-        let strike_level = (patch.exciter_strike_level * 1.5).min(1.0) * 1.5;
+
+        // Past unity the strike level stops growing the exciter
+        // amplitude and instead bleeds the raw exciter into the
+        // resonator output (voice.cc).
+        let mut strike_level = patch.exciter_strike_level * 1.25;
+        let strike_bleed = if strike_level > 1.0 {
+            (strike_level - 1.0) * 2.0
+        } else {
+            0.0
+        };
+        strike_level = strike_level.min(1.0) * 1.5;
 
         // strength smoothing + accent law (voice.cc tail)
         let strength_target = strength.clamp(0.0, 1.0);
@@ -209,13 +236,19 @@ impl Voice {
         for (i, r) in raw.iter_mut().enumerate() {
             self.strength += strength_increment;
             self.envelope_value += envelope_increment;
-            let e = self.envelope_value;
+            let mut e = self.envelope_value;
             let accent = accent_gain(self.strength);
             self.bow_strength[i] = e * patch.exciter_bow_level;
+
+            // accent scales the strike buffer in place so the bleed
+            // tap downstream picks it up too (voice.cc)
+            self.strike_buffer[i] *= accent;
+            e *= accent;
+
             let mut input_sample = 0.0;
             input_sample += self.bow_buffer[i] * self.bow_strength[i] * 0.125 * accent;
-            input_sample += self.blow_buffer[i] * e * accent;
-            input_sample += self.strike_buffer[i] * accent * strike_level;
+            input_sample += self.blow_buffer[i] * e;
+            input_sample += self.strike_buffer[i] * strike_level;
             *r = input_sample * 0.5;
         }
         for &r in raw.iter() {
@@ -238,6 +271,12 @@ impl Voice {
         self.resonator.modulation_offset = 0.1;
         self.resonator
             .process(&self.bow_strength[..size], raw, center, sides);
+
+        // the raw mallet signal bleeds through the exciter output
+        // past unity strike level (voice.cc)
+        for (c, s) in center.iter_mut().zip(self.strike_buffer[..size].iter()) {
+            *c += strike_bleed * s;
+        }
     }
 }
 
@@ -263,6 +302,29 @@ impl Ap {
         self.buf[self.pos] = w;
         self.pos = (self.pos + 1) % self.buf.len();
         tail - w * k
+    }
+
+    /// Interpolated read at `offset` samples back from the write head
+    /// (same convention and underflow clamp as `Delay::read_mod`).
+    #[inline]
+    fn read_at(&self, offset: f32) -> f32 {
+        let n = self.buf.len();
+        let offset = offset.clamp(1.0, (n - 2) as f32);
+        let int = offset as usize;
+        let frac = offset - int as f32;
+        let a = self.buf[(self.pos + n - 1 - int) % n];
+        let b = self.buf[(self.pos + n - 2 - int) % n];
+        a + (b - a) * frac
+    }
+
+    /// Write `v` at `offset` samples back from the write head
+    /// (fx_engine.h `Write(line, offset, ...)` with a decrementing
+    /// head maps to "write position minus offset" here).
+    #[inline]
+    fn write_at(&mut self, offset: usize, v: f32) {
+        let n = self.buf.len();
+        let off = offset.min(n - 1);
+        self.buf[(self.pos + n - off) % n] = v;
     }
 }
 
@@ -320,8 +382,12 @@ pub struct Reverb {
     del2: Delay,
     lp1: f32,
     lp2: f32,
-    lfo: f32,
-    lfo_inc: f32,
+    /// LFO phases: \[0\] = 0.5 Hz (ap1 smear), \[1\] = 0.3 Hz (del2
+    /// shimmer), both read as unipolar cosines (fx_engine.h).
+    lfo_phase: [f32; 2],
+    lfo_inc: [f32; 2],
+    /// `sample_rate / 32_000` — converts firmware sample offsets.
+    rate_scale: f32,
     pub amount: f32,
     pub diffusion: f32,
     pub time: f32,
@@ -349,8 +415,9 @@ impl Reverb {
             del2: Delay::new(sz(6312.0)),
             lp1: 0.0,
             lp2: 0.0,
-            lfo: 0.0,
-            lfo_inc: 0.5 / sample_rate,
+            lfo_phase: [0.0, 0.0],
+            lfo_inc: [0.5 / sample_rate, 0.3 / sample_rate],
+            rate_scale: s,
             amount: 0.0,
             diffusion: 0.625,
             time: 0.35,
@@ -359,41 +426,55 @@ impl Reverb {
         }
     }
 
-    pub fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
+    /// Process one block in place. `main` is the upstream main mix
+    /// (the del2-modulated branch lands here, per fx/reverb.h `*left`);
+    /// `aux` gets the del1 branch.
+    pub fn process(&mut self, main: &mut [f32], aux: &mut [f32]) {
         let kap = self.diffusion;
         let klp = self.lp;
         let krt = self.time;
         let amount = self.amount;
         let gain = self.input_gain;
-        let del2_len = self.del2.buf.len() as f32;
-        for i in 0..left.len() {
-            self.lfo += self.lfo_inc;
-            if self.lfo >= 1.0 {
-                self.lfo -= 1.0;
+        let s = self.rate_scale;
+        for i in 0..main.len() {
+            // two unipolar cosine LFOs (fx_engine.h CosineOscillator):
+            // 0.5 Hz smears ap1, 0.3 Hz shimmers the del2 tap
+            for (phase, inc) in self.lfo_phase.iter_mut().zip(self.lfo_inc.iter()) {
+                *phase += inc;
+                if *phase >= 1.0 {
+                    *phase -= 1.0;
+                }
             }
-            let lfo = (self.lfo * std::f32::consts::TAU).sin();
+            let lfo1 = 0.5 - 0.5 * (self.lfo_phase[0] * std::f32::consts::TAU).cos();
+            let lfo2 = 0.5 - 0.5 * (self.lfo_phase[1] * std::f32::consts::TAU).cos();
 
-            let mut acc = (left[i] + right[i]) * gain;
+            // smear AP1 inside the loop (reverb.h): re-inject a
+            // modulated early tap further down the same line
+            let smear = self.ap[0].read_at((10.0 + 80.0 * lfo1) * s);
+            self.ap[0].write_at((100.0 * s).round() as usize, smear);
+
+            let mut acc = (main[i] + aux[i]) * gain;
             for ap in self.ap.iter_mut() {
                 acc = ap.process(acc, kap);
             }
             let apout = acc;
 
-            // branch 1: + modulated del2 tail. The firmware's
-            // c.Write(del1, 2.0) writes the accumulator into the line
-            // FIRST and only then scales the running value for the wet
-            // tap — writing the doubled value into the loop doubles the
-            // loop gain per pass and the tail never decays (caught by
-            // the decay test).
-            let mod_offset = (del2_len - 101.0) + lfo * (del2_len / 63.0);
+            // branch 1: + modulated del2 tail (upstream
+            // c.Interpolate(del2, 6211, LFO_2, 100, krt)). The
+            // firmware's c.Write(del1, 2.0) writes the accumulator
+            // into the line FIRST and only then scales the running
+            // value for the wet tap — writing the doubled value into
+            // the loop doubles the loop gain per pass and the tail
+            // never decays (caught by the decay test).
+            let mod_offset = (6211.0 + 100.0 * lfo2) * s;
             acc = apout + self.del2.read_mod(mod_offset) * krt;
             self.lp1 += klp * (acc - self.lp1);
             let mut b = self.lp1;
             b = self.dap1a.process(b, -kap);
             b = self.dap1b.process(b, kap);
             self.del1.write(b);
-            let wet_l = b * 2.0;
-            left[i] += (wet_l - left[i]) * amount;
+            let wet_main = b * 2.0;
+            main[i] += (wet_main - main[i]) * amount;
 
             // branch 2: + del1 tail
             acc = apout + self.del1.read_tail() * krt;
@@ -402,8 +483,8 @@ impl Reverb {
             b = self.dap2a.process(b, kap);
             b = self.dap2b.process(b, -kap);
             self.del2.write(b);
-            let wet_r = b * 2.0;
-            right[i] += (wet_r - right[i]) * amount;
+            let wet_aux = b * 2.0;
+            aux[i] += (wet_aux - aux[i]) * amount;
         }
     }
 }
@@ -483,7 +564,9 @@ impl Part {
         self.reverb.time = reverb_time;
         self.reverb.input_gain = 0.2;
         self.reverb.lp = 0.7;
-        self.reverb.process(out_l, out_r);
+        // part.cc: reverb_.Process(main, aux) — main is the center
+        // minus side mix, which this port writes to out_r
+        self.reverb.process(out_r, out_l);
     }
 }
 
@@ -512,6 +595,50 @@ mod tests {
         }
         assert!(energy > 1e-4, "the strike sounds: {energy}");
         assert!(peak.is_finite() && peak <= 1.2, "soft-limited: {peak}");
+    }
+
+    #[test]
+    fn strike_bleed_reaches_center_past_unity_level() {
+        let center_energy = |level: f32| -> f32 {
+            let samples = SampleData::load();
+            let mut voice = Voice::new(48_000.0, 64, 0xfeed);
+            let patch = Patch {
+                exciter_strike_level: level,
+                resonator_damping: 0.9,
+                ..Default::default()
+            };
+            let mut raw = vec![0.0; 64];
+            let mut center = vec![0.0; 64];
+            let mut sides = vec![0.0; 64];
+            let mut energy = 0.0_f32;
+            for blk in 0..8 {
+                voice.process(
+                    &patch,
+                    220.0,
+                    0.8,
+                    blk < 4,
+                    &mut raw,
+                    &mut center,
+                    &mut sides,
+                    &samples,
+                );
+                energy += center.iter().map(|s| s * s).sum::<f32>();
+            }
+            energy
+        };
+        // levels ≥ 0.8 saturate the exciter gain (min(level·1.25, 1)),
+        // so 0.8 vs 1.0 isolates the bleed term exactly
+        let sub_unity = center_energy(0.6); // 0.75 after the 1.25 gain
+        let saturated = center_energy(0.8); // gain saturated, bleed 0
+        let bleeding = center_energy(1.0); // bleed = 0.5
+        assert!(
+            bleeding > sub_unity,
+            "bleed beats the sub-unity level: {sub_unity} vs {bleeding}"
+        );
+        assert!(
+            bleeding > saturated * 1.2,
+            "with identical exciter gain only the bleed differs: {saturated} vs {bleeding}"
+        );
     }
 
     #[test]

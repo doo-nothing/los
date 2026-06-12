@@ -491,11 +491,14 @@ fn row_text(s: &ElementsState, r: Row) -> String {
         }
         Row::StrikeM => {
             let v = s.get(r);
-            let zone = if v <= 0.26 {
+            // zone boundaries after the voice.cc meta remap:
+            // samples < 0.40, mallet 0.40–0.60, plectrum 0.60–0.80,
+            // particles ≥ 0.80
+            let zone = if v < 0.4 {
                 "samples"
-            } else if v <= 0.55 {
+            } else if v < 0.6 {
                 "mallet"
-            } else if v <= 0.8 {
+            } else if v < 0.8 {
                 "plectrum"
             } else {
                 "particles"
