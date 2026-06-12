@@ -366,6 +366,15 @@ probabilistically; the same four outputs sit on the bus as gate
 levels for trigger inputs (dld hold, lfo reset). Both p knobs take
 cables.
 
+**grids** (the Mutable Instruments topographic drum sequencer,
+full port): transport-clocked (8 steps per beat, 32-step patterns).
+`mode` drums | euclid; `x`/`y` walk the 5×5 map of beats (the 25
+node tables are the firmware's, byte-exact), `chaos` perturbs per
+pattern, `fill1`–`fill3` set kick/snare/hat density, `len1`–`len3`
+the euclid lengths — every knob has a `*_src` twin (an LFO on `x`
+is the classic move). Emits notes on `grids/N/bd·sd·hh` (bind a
+peaks channel or any voice); triggers + accent publish on the bus.
+
 **mixer**: per-track `level` (0–1), `pan` (−1–1), `drive` (0–1), 3-band
 EQ (±15 dB, `eq_freq` 0–1), `mute`/`solo`; a master strip with the
 same console plus `master_width` (0–2).
@@ -398,6 +407,7 @@ Sources:
 | `tides/N/` | `o1`–`o4` (the four slopes) |
 | `peaks/N/` | `ch1`, `ch2` (the two channel outputs) |
 | `branches/N/` | `1a`, `1b`, `2a`, `2b` (gate levels; also note re-emit sources) |
+| `grids/N/` | `bd`, `sd`, `hh` (triggers; also note sources), `acc` |
 | `template/N/` | `lfo` |
 
 Audio `input` fields are 2-segment: a producing module (`voice`,
