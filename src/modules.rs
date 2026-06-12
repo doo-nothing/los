@@ -26,6 +26,7 @@ pub mod filterbank;
 pub mod mixer;
 pub mod sampler;
 pub mod scope;
+pub mod wasp;
 pub mod sequencer;
 pub mod tape;
 pub mod swarm;

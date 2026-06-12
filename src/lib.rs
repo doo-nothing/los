@@ -33,7 +33,7 @@ pub mod ui;
 pub use ipc::{routing, shm};
 pub use modules::{
     badge, conductor, delay, dld, envelope, filterbank, mixer, sampler, scope, sequencer, swarm,
-    tape,
+    tape, wasp,
     template,
     tone, voice,
 };

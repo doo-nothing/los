@@ -500,6 +500,32 @@ pub struct SamplerParams {
     pub slots: Vec<SamplerSlotParams>,
 }
 
+/// The Wasp filter (modules/wasp.rs) — A-124-style dirty multimode SVF.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WaspParams {
+    #[serde(default)]
+    pub format: u32,
+    pub freq: Option<f32>,
+    pub res: Option<f32>,
+    /// LP→notch→HP blend.
+    pub mix: Option<f32>,
+    /// The CMOS rasp drive.
+    pub dirt: Option<f32>,
+    /// Bandpass-output blend.
+    pub bp: Option<f32>,
+    pub dry: Option<f32>,
+    #[serde(default)]
+    pub input: Option<String>,
+    #[serde(default)]
+    pub freq_src: Option<String>,
+    #[serde(default)]
+    pub res_src: Option<String>,
+    #[serde(default)]
+    pub mix_src: Option<String>,
+    #[serde(default)]
+    pub dirt_src: Option<String>,
+}
+
 /// The swarm voice (modules/swarm.rs) — the CS-80-flavored brass pad:
 /// chord by name ("min7"), the five knobs, glide, and the three kinds
 /// of binding (knob sources, amp, notes).

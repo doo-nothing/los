@@ -9,6 +9,7 @@
 use anyhow::Result;
 use los::{
     badge, conductor, delay, dld, envelope, filterbank, mixer, sampler, scope, sequencer, shm,
+    wasp,
     state,
     swarm,
     tape, template, tone, voice,
@@ -96,6 +97,7 @@ fn usage() {
     eprintln!("  swarm              CS-80-ish brass voice: 7 detuned saws, ladder, chords");
     eprintln!("  dld                Dual looping delay (4ms DLD): clean, clock-locked, holds");
     eprintln!("  sampler            Reels from a-u.supply + Morphagene-ish designer, kit mode");
+    eprintln!("  wasp               Dirty multimode VCF (Doepfer A-124 / EDP Wasp)");
     eprintln!("  badge              Los faceplate (beat-synced animation, session info)");
     eprintln!();
     eprintln!("Aliases:");
@@ -123,6 +125,7 @@ fn dispatch_module(name: &str, instance: usize) -> Result<()> {
         "swarm" => swarm::run(instance),
         "dld" => dld::run(instance),
         "sampler" => sampler::run(instance),
+        "wasp" => wasp::run(instance),
         "badge" => badge::run(instance),
         other => anyhow::bail!("unknown module: {other}"),
     }

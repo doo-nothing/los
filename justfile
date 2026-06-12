@@ -19,6 +19,7 @@ dsp:
     faust -lang rust -cn Tap8Fx src/modules/delay/tap8fx.dsp -o src/modules/delay/tap8fx_gen.rs
     faust -lang rust -cn Bank16 src/modules/filterbank/bank16.dsp -o src/modules/filterbank/bank16_gen.rs
     faust -lang rust -cn Swarm src/modules/swarm/swarm.dsp -o src/modules/swarm/swarm_gen.rs
+    faust -lang rust -cn Wasp src/modules/wasp/wasp.dsp -o src/modules/wasp/wasp_gen.rs
     cargo fmt --version >/dev/null 2>&1 && cargo fmt || true
 
 # install to ~/.cargo/bin
