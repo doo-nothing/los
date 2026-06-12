@@ -165,6 +165,20 @@ Per step (entries map by position; inactive steps are placeholders):
 | `delay` / `delay_unit` / `delay_prob` | ≥0, `"ms"`/`"pct"` | push a note late — a 45 ms late ornament reads as a hand |
 | `mod_value` | −1–1 | the CV a modulation-track step emits |
 
+**Held notes (the gate trick):** a note's gate closes at the next
+step boundary, so a *held* tone is the same note repeated on
+consecutive steps — the off/on flip lands inside one audio block and
+nothing retriggers. A swarm pad that should bloom across a whole bar
+is 15 held steps and one rest; the rest is what lets the swell (and
+any gate-driven envelope) breathe before the next bloom.
+
+**Entrances and exits are pattern slots.** A slot whose steps are all
+inactive is a voice's silence; `switch_pattern` into a quiet slot is a
+clean entrance, back out is a clean exit — no level automation needed.
+For slow builds, keep two copies of a line in different slots (one at
+velocity 45–60, one at 85–110) and let the form walk a voice from
+soft to hot: entries that *grow* instead of arriving.
+
 ### Macros and the lane — the arrangement
 
 Macros are the song's verbs; each is a *section* expressed as absolute
@@ -222,7 +236,16 @@ lpg ≈ 0.35. Required cables: `amp_src` (an envelope channel) and
 **swarm** (CS-80-ish brass): one track becomes chords — seven detuned
 saws through a swelling ladder. `chord` ∈ uni, oct, 5th, sus4, min,
 maj, min7, maj7; knobs `detune`/`cutoff`/`res`/`swell`/`glide` 0–1; its
-bloom is itself a source (`swarm/N/swl`).
+bloom is itself a source (`swarm/N/swl`). For *lush* rather than
+chordal, `"uni"` and `"oct"` are detuned clouds — held-step roots
+(see the gate trick above) with `swell` 0.7+ and `glide` 0.4+ is the
+heavenly-pad recipe. The swell only re-blooms after a rest step; a
+fixed `chord` spread is diatonic to nothing, so on mixed major/minor
+progressions feed it roots and let `uni`/`oct`/`5th` stay neutral.
+
+The raspy Cortini/Buchla texture that suits slow builds lives in the
+**voice**, not the swarm: shape 0.5–0.62 (the rasp), lpg 0.5–0.7,
+long envelope rises (0.4+) so stacked entries smear into each other.
 
 **envelope** (MATHs, ≤6 channels): `rise`/`fall`/`shape` are 0–1 knobs
 over a logarithmic 0.5 ms–25 min range; `loop_mode = true` turns a

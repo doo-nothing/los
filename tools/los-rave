@@ -58,15 +58,22 @@ def process(model_path: str, wav_in: str, wav_out: str) -> None:
     total = mono.shape[-1]
     for start in range(0, total, chunk):
         piece = mono[..., start : start + chunk]
-        out = model.forward(piece)
-        outs.append(out.squeeze().numpy())
+        out = model.forward(piece).squeeze(0).numpy()
+        # models decode mono (N,) or stereo (2, N) — and the last chunk
+        # comes back padded to the model's block size, so shapes differ:
+        # normalize to (C, N) and concatenate along time, never rows
+        if out.ndim == 1:
+            out = out[None, :]
+        outs.append(out)
         print(f"PROGRESS {min(1.0, (start + chunk) / total):.2f}", flush=True)
-    y = np.concatenate(outs)[: total]
-    # back to stereo, normalized only if it clipped
+    chans = min(o.shape[0] for o in outs)
+    y = np.concatenate([o[:chans] for o in outs], axis=-1)[:, :total]
+    # normalized only if it clipped
     peak = float(np.abs(y).max() or 1.0)
     if peak > 1.0:
         y = y / peak
-    sf.write(wav_out, np.stack([y, y], axis=1), rate, subtype="PCM_16")
+    stereo = y.T if chans == 2 else np.stack([y[0], y[0]], axis=1)
+    sf.write(wav_out, stereo, rate, subtype="PCM_16")
     print("DONE")
 
 

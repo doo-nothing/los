@@ -1673,6 +1673,11 @@ pub fn render(song_path: &str, out_path: &str, secs: Option<f32>, tail: f32) -> 
          (render spawns and kills a throwaway one)"
     );
 
+    // Fresh control plane: a SIGHUP'd previous session leaves manifest,
+    // modbus, event ring, and transport SHM behind, and an inherited
+    // bump allocator can refuse every registration (= a silent render).
+    crate::shm::unlink_control_plane();
+
     // Duration: explicit --secs, or the macro lane walked into seconds
     // plus a tail for the delay/filterbank to ring out.
     // (spawn_session_from_state validates; failures land before spawn.)
