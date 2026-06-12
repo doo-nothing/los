@@ -1648,6 +1648,57 @@ struct RenderSession;
 impl Drop for RenderSession {
     fn drop(&mut self) {
         let _ = tmux_cmd(&["kill-session", "-t", "los"]);
+        // Killing the session is not enough: a module can outlive its
+        // pane's SIGHUP long enough to overlap the next render — two
+        // mixers on one device is audible clicking, and the second
+        // render's duration clock goes wrong. Reap by exact pid.
+        reap_manifest_modules();
+    }
+}
+
+/// Kill every module process the manifest knows about (exact pids,
+/// SIGTERM then SIGKILL after a grace period) and wait for them to
+/// exit. Only called when the los tmux session is gone or being torn
+/// down: every pid in the manifest is a module of that dead world.
+fn reap_manifest_modules() {
+    let Ok(m) = crate::shm::Manifest::open() else {
+        return;
+    };
+    let pids: Vec<i32> = m
+        .entries()
+        .iter()
+        .map(|e| e.pid as i32)
+        .filter(|p| *p > 1)
+        .collect();
+    drop(m);
+    if pids.is_empty() {
+        return;
+    }
+    for &pid in &pids {
+        // SAFETY: pid comes from the manifest of a session we own the
+        // teardown of; kill(2) with a specific pid affects only it.
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let alive: Vec<i32> = pids
+            .iter()
+            .copied()
+            // SAFETY: signal 0 only probes liveness.
+            .filter(|&p| unsafe { libc::kill(p, 0) } == 0)
+            .collect();
+        if alive.is_empty() {
+            return;
+        }
+        if std::time::Instant::now() > deadline {
+            for &p in &alive {
+                // SAFETY: as above — exact pids, last resort.
+                unsafe { libc::kill(p, libc::SIGKILL) };
+            }
+            std::thread::sleep(Duration::from_millis(200));
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -1673,9 +1724,12 @@ pub fn render(song_path: &str, out_path: &str, secs: Option<f32>, tail: f32) -> 
          (render spawns and kills a throwaway one)"
     );
 
-    // Fresh control plane: a SIGHUP'd previous session leaves manifest,
-    // modbus, event ring, and transport SHM behind, and an inherited
-    // bump allocator can refuse every registration (= a silent render).
+    // Stragglers first: a previous session's modules can outlive their
+    // panes; their pids are in the stale manifest. Then a fresh control
+    // plane — a SIGHUP'd session leaves manifest/modbus/events/transport
+    // SHM behind, and an inherited bump allocator can refuse every
+    // registration (= a silent render).
+    reap_manifest_modules();
     crate::shm::unlink_control_plane();
 
     // Duration: explicit --secs, or the macro lane walked into seconds
