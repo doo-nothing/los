@@ -307,7 +307,7 @@ fn main() -> Result<()> {
                             .cloned()
                             .collect::<Vec<_>>()
                             .join(" ");
-                        let hits = sampler::fetch::search(&query, raw, n)?;
+                        let hits = sampler::fetch::search(&query, raw, n, 1)?;
                         anyhow::ensure!(!hits.is_empty(), "no hits for {query:?}");
                         for h in &hits {
                             match sampler::fetch::fetch(h) {
