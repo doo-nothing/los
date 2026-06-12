@@ -1296,6 +1296,7 @@ fn check_lfo(p: &LfoParams, loc: &str, declared: &BTreeSet<(String, usize)>, r: 
         range01(c.freq, &format!("ch{}: freq", i + 1), loc, r);
         range01(c.phase, &format!("ch{}: phase", i + 1), loc, r);
         check_src(&c.freq_src, "freq_src", loc, declared, r);
+        check_src(&c.phase_src, "phase_src", loc, declared, r);
     }
     check_src(&p.rst_src, "rst_src", loc, declared, r);
 }

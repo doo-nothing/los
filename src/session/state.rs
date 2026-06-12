@@ -583,6 +583,8 @@ pub struct LfoChannelParams {
     pub phase: Option<f32>,
     #[serde(default)]
     pub freq_src: Option<String>,
+    #[serde(default)]
+    pub phase_src: Option<String>,
 }
 
 /// The quad LFO (modules/lfo.rs) — Batumi-style bank.

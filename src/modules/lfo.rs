@@ -282,6 +282,8 @@ struct LfoState {
     /// Per-channel rate CV bindings.
     freq_srcs: [Option<SourceAddr>; NUM_CH],
     freq_resolved: [Option<usize>; NUM_CH],
+    phase_srcs: [Option<SourceAddr>; NUM_CH],
+    phase_resolved: [Option<usize>; NUM_CH],
     rst_src: Option<SourceAddr>,
     rst_resolved: Option<usize>,
     rst_last: f32,
@@ -302,6 +304,8 @@ impl LfoState {
             ],
             freq_srcs: Default::default(),
             freq_resolved: Default::default(),
+            phase_srcs: Default::default(),
+            phase_resolved: Default::default(),
             rst_src: None,
             rst_resolved: None,
             rst_last: 0.0,
@@ -313,12 +317,19 @@ impl LfoState {
 
 const FREQ_SRC_BASE: usize = 50;
 const RST_SLOT: usize = 60;
+const PHASE_SRC_BASE: usize = 70;
 
 impl crate::undo::ParamUndo for LfoState {
     fn get_param(&self, slot: usize) -> Option<crate::undo::ParamValue> {
         use crate::undo::ParamValue as V;
         if slot == RST_SLOT {
             return Some(V::Src(self.rst_src.as_ref().map(|a| a.to_string())));
+        }
+        if let Some(i) = slot.checked_sub(PHASE_SRC_BASE) {
+            if i < NUM_CH {
+                return Some(V::Src(self.phase_srcs[i].as_ref().map(|a| a.to_string())));
+            }
+            return None;
         }
         if let Some(i) = slot.checked_sub(FREQ_SRC_BASE) {
             if i < NUM_CH {
@@ -341,6 +352,15 @@ impl crate::undo::ParamUndo for LfoState {
             if let V::Src(v) = value {
                 self.rst_src = v.as_deref().and_then(SourceAddr::parse);
                 self.rst_resolved = None;
+            }
+            return;
+        }
+        if let Some(i) = slot.checked_sub(PHASE_SRC_BASE) {
+            if i < NUM_CH {
+                if let V::Src(v) = value {
+                    self.phase_srcs[i] = v.as_deref().and_then(SourceAddr::parse);
+                    self.phase_resolved[i] = None;
+                }
             }
             return;
         }
@@ -384,6 +404,7 @@ fn snapshot_params(s: &LfoState) -> state::LfoParams {
                 shape: Some(c.shape.name().to_string()),
                 phase: Some(c.phase),
                 freq_src: s.freq_srcs[i].as_ref().map(|a| a.to_string()),
+                phase_src: s.phase_srcs[i].as_ref().map(|a| a.to_string()),
             })
             .collect(),
     }
@@ -411,6 +432,8 @@ fn apply_params(s: &mut LfoState, p: &state::LfoParams) {
         }
         s.freq_srcs[i] = cp.freq_src.as_deref().and_then(SourceAddr::parse);
         s.freq_resolved[i] = None;
+        s.phase_srcs[i] = cp.phase_src.as_deref().and_then(SourceAddr::parse);
+        s.phase_resolved[i] = None;
     }
 }
 
@@ -438,6 +461,9 @@ fn control_thread(shared: Arc<Mutex<LfoState>>, instance: usize) -> Result<()> {
                 s.freq_resolved[i] = s.freq_srcs[i]
                     .as_ref()
                     .and_then(|a| routing::resolve(&entries, a));
+                s.phase_resolved[i] = s.phase_srcs[i]
+                    .as_ref()
+                    .and_then(|a| routing::resolve(&entries, a));
             }
             s.rst_resolved = s
                 .rst_src
@@ -447,6 +473,7 @@ fn control_thread(shared: Arc<Mutex<LfoState>>, instance: usize) -> Result<()> {
                 .freq_resolved
                 .iter()
                 .flatten()
+                .chain(s.phase_resolved.iter().flatten())
                 .chain(s.rst_resolved.iter())
                 .filter(|&&c| c < 64)
                 .fold(0u64, |m, &c| m | (1 << c));
@@ -470,6 +497,9 @@ fn control_thread(shared: Arc<Mutex<LfoState>>, instance: usize) -> Result<()> {
             for (i, c) in cfg.iter_mut().enumerate() {
                 if let (Some(ch), Some(b)) = (s.freq_resolved[i], bus) {
                     c.freq = b.get(ch).max(0.0).min(1.0);
+                }
+                if let (Some(ch), Some(b)) = (s.phase_resolved[i], bus) {
+                    c.phase = b.get(ch).max(0.0).min(1.0);
                 }
             }
             (s.mode, cfg)
