@@ -10,3 +10,6 @@ pub mod dsp;
 pub mod models;
 pub mod part;
 pub mod string_synth;
+pub mod ui;
+
+pub use ui::run;

@@ -691,6 +691,48 @@ pub struct ElementsParams {
     pub notes_src: Option<String>,
 }
 
+/// Rings (modules/rings) — the Mutable Instruments resonator port:
+/// resonator + string-synth modes, six models, polyphony 1–4, the
+/// four macro knobs + chord (all bindable), optional audio input.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RingsParams {
+    #[serde(default)]
+    pub format: u32,
+    /// "resonator" | "synth"
+    pub mode: Option<String>,
+    /// modal · sympathetic · string · fm · chords · string+verb
+    pub model: Option<String>,
+    /// synth-mode fx: formant/chorus/reverb/formant2/ensemble/reverb2
+    pub fx: Option<String>,
+    pub poly: Option<usize>,
+    pub structure: Option<f32>,
+    pub brightness: Option<f32>,
+    pub damping: Option<f32>,
+    pub position: Option<f32>,
+    pub chord: Option<f32>,
+    /// true = internal exciter (pluck/pulse on note-on)
+    pub exciter: Option<bool>,
+    pub level: Option<f32>,
+    #[serde(default)]
+    pub input: Option<String>,
+    #[serde(default)]
+    pub structure_src: Option<String>,
+    #[serde(default)]
+    pub brightness_src: Option<String>,
+    #[serde(default)]
+    pub damping_src: Option<String>,
+    #[serde(default)]
+    pub position_src: Option<String>,
+    #[serde(default)]
+    pub chord_src: Option<String>,
+    #[serde(default)]
+    pub level_src: Option<String>,
+    #[serde(default)]
+    pub amp_src: Option<String>,
+    #[serde(default)]
+    pub notes_src: Option<String>,
+}
+
 /// The swarm voice (modules/swarm.rs) — the CS-80-flavored brass pad:
 /// chord by name ("min7"), the five knobs, glide, and the three kinds
 /// of binding (knob sources, amp, notes).
