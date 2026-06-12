@@ -26,9 +26,9 @@ use std::path::Path;
 
 use crate::routing::{output_labels, SourceAddr};
 use crate::state::{
-    DelayParams, EnvelopeParams, FilterbankParams, MacroCmd, MixerParams, ScopeParams,
-    SequencerParams, SessionState, StepParam, SwarmParams, TapeParams, TemplateParams, TrackMode,
-    VoiceParams, STATE_FORMAT,
+    DelayParams, DldParams, DpoParamsState, EnvelopeParams, FilterbankParams, MacroCmd,
+    MixerParams, SamplerParams, ScopeParams, SequencerParams, SessionState, StepParam,
+    SwarmParams, TapeParams, TemplateParams, TrackMode, VoiceParams, WaspParams, STATE_FORMAT,
 };
 use crate::theory;
 
@@ -251,6 +251,26 @@ fn validate_session(st: &SessionState, r: &mut Report) {
             "scope" => {
                 // ScopeParams is all view state; decode to catch typos.
                 let _ = decode::<ScopeParams>(value, &loc, r);
+            }
+            "dld" => {
+                if let Some(p) = decode::<DldParams>(value, &loc, r) {
+                    check_dld(&p, &loc, &declared, r);
+                }
+            }
+            "sampler" => {
+                if let Some(p) = decode::<SamplerParams>(value, &loc, r) {
+                    check_sampler(&p, &loc, &declared, r, &mut pending);
+                }
+            }
+            "wasp" => {
+                if let Some(p) = decode::<WaspParams>(value, &loc, r) {
+                    check_wasp(&p, &loc, &declared, r);
+                }
+            }
+            "dpo" => {
+                if let Some(p) = decode::<DpoParamsState>(value, &loc, r) {
+                    check_dpo(&p, &loc, &declared, r, &mut pending);
+                }
             }
             // No params structs: state is ephemeral or none.
             "tone" | "badge" | "conductor" => {}
@@ -1065,6 +1085,181 @@ fn check_tape(p: &TapeParams, loc: &str, declared: &BTreeSet<(String, usize)>, r
     }
 }
 
+/// DLD (dld/dsp.rs TimeSwitch): switch by name, knobs in range, the
+/// hold/rev rows take trigger sources.
+fn check_dld(p: &DldParams, loc: &str, declared: &BTreeSet<(String, usize)>, r: &mut Report) {
+    for (which, ch) in [("a", &p.a), ("b", &p.b)] {
+        let Some(ch) = ch else { continue };
+        if let Some(v) = ch.time {
+            if !(1.0..=16.0).contains(&v) {
+                r.error(loc, format!("{which}.time: {v} out of range 1–16"));
+            }
+        }
+        if let Some(name) = ch.switch.as_deref() {
+            if !["/8", "=", "+16", "eighth", "beats", "plus16"].contains(&name) {
+                r.error(loc, format!("{which}.switch: {name:?} — use \"/8\", \"=\", or \"+16\""));
+            }
+        }
+        if let Some(v) = ch.fdbk {
+            if !(0.0..=1.1).contains(&v) {
+                r.error(loc, format!("{which}.fdbk: {v} out of range 0–1.1"));
+            }
+        }
+        range01(ch.feed, "feed", loc, r);
+        range01(ch.mix, "mix", loc, r);
+        range01(ch.win, "win", loc, r);
+        for (field, src) in [
+            ("time_src", &ch.time_src),
+            ("fdbk_src", &ch.fdbk_src),
+            ("feed_src", &ch.feed_src),
+            ("win_src", &ch.win_src),
+            ("hold_src", &ch.hold_src),
+            ("rev_src", &ch.rev_src),
+        ] {
+            check_src(src, field, loc, declared, r);
+        }
+    }
+    if let Some(v) = p.ping_ms {
+        if !(0.0..=10_000.0).contains(&v) {
+            r.error(loc, format!("ping_ms: {v} out of range 0–10000"));
+        }
+    }
+    check_input(&p.input, "input", loc, declared, r);
+}
+
+/// Sampler: modes by name, sample paths exist, knobs in range.
+fn check_sampler(
+    p: &SamplerParams,
+    loc: &str,
+    declared: &BTreeSet<(String, usize)>,
+    r: &mut Report,
+    pending: &mut Vec<PendingTrackRef>,
+) {
+    const MODES: [&str; 4] = ["oneshot", "loop", "gated", "hold"];
+    for (i, sl) in p.slots.iter().enumerate() {
+        let slot = (b'a' + (i as u8).min(7)) as char;
+        if let Some(m) = sl.mode.as_deref() {
+            if !MODES.contains(&m) {
+                r.error(loc, format!("slot {slot}: mode {m:?} — one of {}", MODES.join(" ")));
+            }
+        }
+        if let Some(path) = sl.sample.as_deref() {
+            if !std::path::Path::new(path).exists() {
+                r.warn(
+                    loc,
+                    format!(
+                        "slot {slot}: sample not in cache: {path} (los samples pull, or load will stay empty)"
+                    ),
+                );
+            }
+        }
+        if let Some(v) = sl.pitch {
+            if !(-24.0..=24.0).contains(&v) {
+                r.error(loc, format!("slot {slot}: pitch {v} out of ±24"));
+            }
+        }
+        if let Some(v) = sl.speed {
+            if !(-2.0..=2.0).contains(&v) {
+                r.error(loc, format!("slot {slot}: speed {v} out of ±2"));
+            }
+        }
+        for (name, v) in [
+            ("start", sl.start),
+            ("len", sl.len),
+            ("gene", sl.gene),
+            ("slide", sl.slide),
+            ("atk", sl.atk),
+            ("dec", sl.dec),
+            ("level", sl.level),
+        ] {
+            range01(v, &format!("slot {slot}: {name}"), loc, r);
+        }
+    }
+    for (field, src) in [
+        ("pitch_src", &p.pitch_src),
+        ("speed_src", &p.speed_src),
+        ("gene_src", &p.gene_src),
+        ("slide_src", &p.slide_src),
+        ("level_src", &p.level_src),
+        ("amp_src", &p.amp_src),
+    ] {
+        check_src(src, field, loc, declared, r);
+    }
+    check_notes_src(&p.notes_src, loc, declared, r, pending);
+}
+
+/// Wasp: all knobs 0–1, sources resolvable, input two-segment.
+fn check_wasp(p: &WaspParams, loc: &str, declared: &BTreeSet<(String, usize)>, r: &mut Report) {
+    for (name, v) in [
+        ("freq", p.freq),
+        ("res", p.res),
+        ("mix", p.mix),
+        ("dirt", p.dirt),
+        ("bp", p.bp),
+        ("dry", p.dry),
+    ] {
+        range01(v, name, loc, r);
+    }
+    for (field, src) in [
+        ("freq_src", &p.freq_src),
+        ("res_src", &p.res_src),
+        ("mix_src", &p.mix_src),
+        ("dirt_src", &p.dirt_src),
+    ] {
+        check_src(src, field, loc, declared, r);
+    }
+    check_input(&p.input, "input", loc, declared, r);
+}
+
+/// DPO (dpo/dsp.rs AMode): mode by name, ratio 0.25–8, knobs 0–1.
+fn check_dpo(
+    p: &DpoParamsState,
+    loc: &str,
+    declared: &BTreeSet<(String, usize)>,
+    r: &mut Report,
+    pending: &mut Vec<PendingTrackRef>,
+) {
+    const MODES: [&str; 4] = ["free", "lock", "sync", "lfo"];
+    if let Some(m) = p.mode.as_deref() {
+        if !MODES.contains(&m) {
+            r.error(loc, format!("mode: {m:?} — one of {}", MODES.join(" ")));
+        }
+    }
+    if let Some(v) = p.ratio {
+        if !(0.25..=8.0).contains(&v) {
+            r.error(loc, format!("ratio: {v} out of range 0.25–8"));
+        }
+    }
+    for (name, v) in [
+        ("follow", p.follow),
+        ("index", p.index),
+        ("fm_a", p.fm_a),
+        ("fm_b", p.fm_b),
+        ("shape", p.shape),
+        ("angle", p.angle),
+        ("fold", p.fold),
+        ("mod_index", p.mod_index),
+        ("mix", p.mix),
+        ("level", p.level),
+    ] {
+        range01(v, name, loc, r);
+    }
+    for (field, src) in [
+        ("ratio_src", &p.ratio_src),
+        ("index_src", &p.index_src),
+        ("shape_src", &p.shape_src),
+        ("angle_src", &p.angle_src),
+        ("fold_src", &p.fold_src),
+        ("mod_src", &p.mod_src),
+        ("follow_src", &p.follow_src),
+        ("strike_src", &p.strike_src),
+        ("amp_src", &p.amp_src),
+    ] {
+        check_src(src, field, loc, declared, r);
+    }
+    check_notes_src(&p.notes_src, loc, declared, r, pending);
+}
+
 /// Template (template.rs SHAPES): shape by name.
 fn check_template(
     p: &TemplateParams,
@@ -1112,24 +1307,11 @@ const SOURCE_MODULES: [&str; 6] = [
 ];
 
 /// Modules that publish audio rings an fx/tape input can claim.
-const AUDIO_MODULES: [&str; 6] = ["voice", "swarm", "tone", "template", "delay", "filterbank"];
+const AUDIO_MODULES: [&str; 10] =
+    ["voice", "swarm", "tone", "template", "delay", "filterbank", "dld", "sampler", "wasp", "dpo"];
 
 /// Canonical module names, for misspelled-pane suggestions.
-const MODULE_NAMES: [&str; 13] = [
-    "sequencer",
-    "voice",
-    "mixer",
-    "scope",
-    "envelope",
-    "badge",
-    "tone",
-    "template",
-    "delay",
-    "filterbank",
-    "tape",
-    "swarm",
-    "conductor",
-];
+const MODULE_NAMES: [&str; 17] = ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo"];
 
 /// An optional `*_src` field: grammar, known output, declared instance.
 /// Returns the parsed address so callers can queue cross-module checks.
