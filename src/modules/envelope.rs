@@ -632,8 +632,7 @@ fn env_thread(
     shutdown: std::sync::mpsc::Receiver<()>,
     instance: usize,
 ) -> Result<()> {
-    let consumer_id = crate::shm::consumer_id("envelope", instance);
-    let mut events = EventRingbuf::open(consumer_id).ok();
+    let mut events = EventRingbuf::open_dynamic().ok();
     let mut modbus = ModulationBus::open()
         .or_else(|_| ModulationBus::create())
         .ok();
@@ -664,7 +663,7 @@ fn env_thread(
         }
 
         if events.is_none() {
-            events = EventRingbuf::open(consumer_id).ok();
+            events = EventRingbuf::open_dynamic().ok();
         }
         if modbus.is_none() {
             modbus = ModulationBus::open().ok();

@@ -86,8 +86,11 @@ convention everywhere in los: **a bound source replaces the manual
 value**, the knob becomes a display, and the UI shows the live value in
 the cable's color.
 
-**Consumes notes** → open the `EventRingbuf` with a consumer ID from
-`shm::consumer_id()` and drain it in your signal thread (see voice.rs).
+**Consumes notes** → open the `EventRingbuf` with
+`EventRingbuf::open_dynamic()` and drain it in your signal thread (see
+voice.rs). Slots are claimed atomically at boot (32 available) and
+freed on drop or unclean death — never hardcode a consumer ID; two
+processes sharing a cursor steal each other's notes at random.
 
 **Consumes audio** → today only the mixer consumes audio ringbuffers
 (they're single-consumer SPSC). FX-style modules that sit between a

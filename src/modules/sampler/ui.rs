@@ -224,8 +224,7 @@ fn audio_thread(shared: Arc<Mutex<SamplerState>>, instance: usize) -> Result<()>
     let mut modbus = ModulationBus::open()
         .or_else(|_| ModulationBus::create())
         .ok();
-    let consumer_id = crate::shm::consumer_id("sampler", instance);
-    let mut events = EventRingbuf::open(consumer_id).ok();
+    let mut events = EventRingbuf::open_dynamic().ok();
     let transport = ShmTransport::open().ok();
     let sample_rate = transport
         .as_ref()
@@ -246,7 +245,7 @@ fn audio_thread(shared: Arc<Mutex<SamplerState>>, instance: usize) -> Result<()>
     loop {
         if blocks.is_multiple_of(128) {
             if events.is_none() {
-                events = EventRingbuf::open(consumer_id).ok();
+                events = EventRingbuf::open_dynamic().ok();
             }
             let entries = manifest.entries();
             let mut s = shared.lock().unwrap();

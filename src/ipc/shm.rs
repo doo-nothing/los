@@ -17,7 +17,10 @@ const SHM_DATA_SIZE: usize = DEFAULT_SLOT_FRAMES as usize
     * DEFAULT_NUM_SLOTS as usize;
 
 const DATA_OFFSET: usize = 64;
-const EVENT_DATA_OFFSET: usize = 256; // larger header for 16 consumer read indices
+const EVENT_DATA_OFFSET: usize = 512; // header: write idx + 32 read indices + pid registry
+/// Byte offset of the consumer pid registry inside the events header
+/// (right after the per-consumer read indices).
+const EVENT_PID_OFFSET: usize = 16 + NUM_CONSUMERS * 8;
 
 // Names of the global SHM objects. Test builds get distinct `/los_test_*`
 // names so `cargo test` can never unlink or overwrite the shared memory of a
@@ -26,7 +29,7 @@ const EVENT_DATA_OFFSET: usize = 256; // larger header for 16 consumer read indi
 #[cfg(not(test))]
 const SHM_TRANSPORT_NAME: &str = "/los_transport";
 #[cfg(not(test))]
-const SHM_EVENTS_NAME: &str = "/los_events_v2";
+const SHM_EVENTS_NAME: &str = "/los_events_v3";
 #[cfg(not(test))]
 const SHM_MODBUS_NAME: &str = "/los_mod";
 #[cfg(not(test))]
@@ -35,7 +38,7 @@ const SHM_MANIFEST_NAME: &str = "/los_manifest";
 #[cfg(test)]
 const SHM_TRANSPORT_NAME: &str = "/los_test_transport";
 #[cfg(test)]
-const SHM_EVENTS_NAME: &str = "/los_test_events_v2";
+const SHM_EVENTS_NAME: &str = "/los_test_events_v3";
 #[cfg(test)]
 const SHM_MODBUS_NAME: &str = "/los_test_mod";
 #[cfg(test)]
@@ -715,16 +718,17 @@ impl AudioEvent {
 // ── EventRingbuf (MPMC) ────────────────────────────────────────────────────
 
 const EVENT_SIZE: usize = 32;
-const NUM_CONSUMERS: usize = 16;
+const NUM_CONSUMERS: usize = 32;
 
 /// Lock-free multi-producer multi-consumer ringbuffer for fixed-size events
 /// backed by POSIX SHM.
 ///
-/// Layout:
-///   [0..8)     write_index    : u64
-///   [8..16)    reserved
-///   [16..N*8)  read_index_0..N : u64  (one per consumer)
-///   [256..)    event data  (EVENT_SIZE bytes each)
+/// Layout (v3 — 32 consumers, pid registry after the read indices):
+///   [0..8)       write_index     : u64
+///   [8..16)      reserved
+///   [16..272)    read_index_0..N : u64  (one per consumer)
+///   [272..400)   consumer pid_0..N : u32  (0 = slot free; CAS to claim)
+///   [512..)      event data  (EVENT_SIZE bytes each)
 pub struct EventRingbuf {
     fd: i32,
     ptr: *mut u8,
@@ -777,9 +781,10 @@ impl EventRingbuf {
     }
 
     /// Pid registry: one u32 per consumer slot, written on open so the
-    /// producer can tell a dead consumer from a slow one.
+    /// producer can tell a dead consumer from a slow one — and CAS'd by
+    /// [`Self::open_dynamic`] to claim a free slot.
     fn consumer_pid_ptr(&self, consumer_id: usize) -> *mut u32 {
-        unsafe { self.ptr.add(144 + consumer_id * 4) as *mut u32 }
+        unsafe { self.ptr.add(EVENT_PID_OFFSET + consumer_id * 4) as *mut u32 }
     }
 
     /// Smallest read index over *joined* consumers (None = no consumers, no
@@ -868,7 +873,7 @@ impl EventRingbuf {
             ptr::write_unaligned(ptr as *mut u64, 0); // write_index
             for i in 0..NUM_CONSUMERS {
                 ptr::write_unaligned(ptr.add(16 + i * 8) as *mut u64, u64::MAX);
-                ptr::write_unaligned(ptr.add(144 + i * 4) as *mut u32, 0); // pid registry
+                ptr::write_unaligned(ptr.add(EVENT_PID_OFFSET + i * 4) as *mut u32, 0);
             }
         }
 
@@ -931,12 +936,10 @@ impl EventRingbuf {
         })
     }
 
-    pub fn open(consumer_id: usize) -> Result<Self> {
-        anyhow::ensure!(
-            consumer_id < NUM_CONSUMERS,
-            "consumer_id must be < {}",
-            NUM_CONSUMERS
-        );
+    /// Map the existing ring without touching any consumer slot. The
+    /// returned handle has the producer sentinel consumer_id; callers
+    /// register or claim a slot afterwards.
+    fn map_unregistered() -> Result<Self> {
         let num_slots = 256u32;
         let data_bytes = num_slots as usize * EVENT_SIZE;
         let total_size = EVENT_DATA_OFFSET + data_bytes;
@@ -974,27 +977,76 @@ impl EventRingbuf {
             p as *mut u8
         };
 
+        Ok(Self {
+            fd,
+            ptr,
+            consumer_id: NUM_CONSUMERS, // not a consumer until registered
+            num_slots,
+            total_size,
+            owned: false,
+        })
+    }
+
+    pub fn open(consumer_id: usize) -> Result<Self> {
+        anyhow::ensure!(
+            consumer_id < NUM_CONSUMERS,
+            "consumer_id must be < {}",
+            NUM_CONSUMERS
+        );
+        let mut ring = Self::map_unregistered()?;
+
         // Initialize this consumer's read index to the current write index
         // so it only sees events written after it joins, and doesn't block
         // the producer with stale state. Register our pid so the producer
         // can vacate this slot if we die uncleanly.
         unsafe {
-            let w = ptr::read_volatile(ptr as *const u64);
-            ptr::write_volatile(ptr.add(16 + consumer_id * 8) as *mut u64, w);
+            let w = ptr::read_volatile(ring.ptr as *const u64);
+            ptr::write_volatile(ring.ptr.add(16 + consumer_id * 8) as *mut u64, w);
             ptr::write_volatile(
-                ptr.add(144 + consumer_id * 4) as *mut u32,
+                ring.ptr.add(EVENT_PID_OFFSET + consumer_id * 4) as *mut u32,
                 std::process::id(),
             );
         }
+        ring.consumer_id = consumer_id;
+        Ok(ring)
+    }
 
-        Ok(Self {
-            fd,
-            ptr,
-            consumer_id,
-            num_slots,
-            total_size,
-            owned: false,
-        })
+    /// Open as a consumer on the first free slot, claimed atomically.
+    ///
+    /// This replaces the old static module→slot map, whose documented
+    /// "deliberate" collisions made separate processes share one read
+    /// cursor and steal each other's events at random (this silenced
+    /// three of four gamelan voices). A slot is free when its pid is 0
+    /// or its registered process is gone; claiming CASes the pid word
+    /// so two modules booting simultaneously can never share a slot.
+    pub fn open_dynamic() -> Result<Self> {
+        let mut ring = Self::map_unregistered()?;
+        let my_pid = std::process::id();
+        for i in 0..NUM_CONSUMERS {
+            // SAFETY: the pid registry lives inside the mapped region and
+            // EVENT_PID_OFFSET + i*4 is 4-aligned from a page-aligned base.
+            let slot = unsafe { &*(ring.consumer_pid_ptr(i) as *const AtomicU32) };
+            let current = slot.load(Ordering::Acquire);
+            let dead = current != 0
+                && unsafe { libc::kill(current as i32, 0) } != 0
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+            if (current == 0 || dead)
+                && slot
+                    .compare_exchange(current, my_pid, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+            {
+                // claimed: join at the current write index so we only
+                // see events from now on
+                let w = atomic_load_acquire(ring.write_idx_ptr());
+                atomic_store_release(ring.read_idx_ptr(i), w);
+                ring.consumer_id = i;
+                return Ok(ring);
+            }
+        }
+        // ring still carries the non-consumer sentinel, so its Drop
+        // cannot vacate anyone else's slot.
+        drop(ring);
+        anyhow::bail!("all {NUM_CONSUMERS} event consumer slots are claimed")
     }
 
     /// One-line diagnostic: write index + every joined consumer's lag.
@@ -1298,6 +1350,10 @@ pub fn unlink_control_plane() {
         SHM_MODBUS_NAME,
         SHM_EVENTS_NAME,
         SHM_TRANSPORT_NAME,
+        // superseded events layout: a harmless few-KB straggler from
+        // sessions run under older binaries, unlinked so it can never
+        // be confused for the live ring
+        "/los_events_v2",
     ] {
         if let Ok(cname) = CString::new(name) {
             unsafe { libc::shm_unlink(cname.as_ptr()) };
@@ -1305,34 +1361,6 @@ pub fn unlink_control_plane() {
     }
 }
 
-pub fn consumer_id(module: &str, instance: usize) -> usize {
-    match module {
-        "voice" => instance.min(7),
-        // swarm shares the TOP of the voice range (swarm 0 → slot 7,
-        // swarm 1 → slot 6): growing NUM_CONSUMERS is an SHM layout bump,
-        // and a rig running eight voices plus swarms isn't real. The
-        // collision is documented, deliberate, and tested.
-        "swarm" => 7 - instance.min(1),
-        // sampler shares the next pair down (sampler 0 -> slot 5,
-        // 1 -> slot 4); collisions only with voice 4/5 in the same rig.
-        "sampler" => 5 - instance.min(1),
-        // dpo takes the pair below (dpo 0 -> slot 3, 1 -> slot 2);
-        // collides only with voice 2/3 in the same rig.
-        "dpo" => 3 - instance.min(1),
-        // elements uses the full voice range (it IS a voice): four
-        // instances get four DISTINCT cursors — sharing a slot between
-        // processes makes them steal each other's notes at random,
-        // which silenced three of four gamelan instances. Collides
-        // with voice N at the same instance number; offset instance
-        // numbers when mixing the two families.
-        "elements" => instance.min(7),
-        "envelope" => 8 + instance.min(5),
-        // `los tap` gets its own cursor so draining the backlog can't
-        // starve whichever module shares the default slot
-        "tap" => 14,
-        _ => 15,
-    }
-}
 const MANIFEST_TOTAL_SIZE: usize =
     MANIFEST_HEADER_SIZE + MANIFEST_MAX_ENTRIES * MANIFEST_ENTRY_SIZE;
 
@@ -2426,18 +2454,47 @@ mod shm_tests {
     }
 
     #[test]
-    fn consumer_ids_are_disjoint() {
-        let mut seen = std::collections::HashSet::new();
-        for i in 0..8 {
-            assert!(seen.insert(consumer_id("voice", i)), "voice {} collides", i);
-        }
-        for i in 0..4 {
-            assert!(
-                seen.insert(consumer_id("envelope", i)),
-                "envelope {} collides",
-                i
-            );
-        }
+    fn dynamic_claims_are_distinct_and_freed_on_drop() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ring = EventRingbuf::create().expect("create");
+        let a = EventRingbuf::open_dynamic().expect("claim a");
+        let b = EventRingbuf::open_dynamic().expect("claim b");
+        let c = EventRingbuf::open_dynamic().expect("claim c");
+        assert_ne!(a.consumer_id, b.consumer_id);
+        assert_ne!(b.consumer_id, c.consumer_id);
+        assert_ne!(a.consumer_id, c.consumer_id);
+        let freed = b.consumer_id;
+        drop(b);
+        let d = EventRingbuf::open_dynamic().expect("claim d");
+        assert_eq!(d.consumer_id, freed, "dropped slot must be reclaimed");
+    }
+
+    #[test]
+    fn dynamic_claim_steals_a_dead_consumers_slot() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ring = EventRingbuf::create().expect("create");
+        let a = EventRingbuf::open_dynamic().expect("claim");
+        let slot = a.consumer_id;
+        // forge an unclean death: pid registered but no such process
+        // (pid_max on macOS is 99998, so this can never be alive)
+        unsafe { ptr::write_volatile(a.consumer_pid_ptr(slot), 4_000_000) };
+        std::mem::forget(a); // skip Drop — the slot stays "claimed"
+        let b = EventRingbuf::open_dynamic().expect("steal");
+        assert_eq!(b.consumer_id, slot, "dead pid's slot must be stolen");
+    }
+
+    #[test]
+    fn dynamic_claim_fails_when_all_slots_are_live() {
+        let _guard = SHM_TEST_MUTEX.lock().unwrap();
+        let _ring = EventRingbuf::create().expect("create");
+        let held: Vec<_> = (0..NUM_CONSUMERS)
+            .map(|_| EventRingbuf::open_dynamic().expect("claim"))
+            .collect();
+        assert_eq!(held.len(), NUM_CONSUMERS);
+        assert!(
+            EventRingbuf::open_dynamic().is_err(),
+            "33rd consumer must be refused"
+        );
     }
 
     #[test]
