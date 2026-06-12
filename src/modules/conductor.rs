@@ -1479,7 +1479,39 @@ pub fn create_session() -> Result<()> {
     Ok(())
 }
 
+/// How [`spawn_session_from_state`] leaves the spawned session.
+pub struct SpawnOpts {
+    /// Attach the calling terminal (interactive load) or stay detached
+    /// (headless render).
+    pub attach: bool,
+    /// Force every sequencer's `playing` to false in the written state,
+    /// so the session boots waiting for an explicit transport start.
+    pub force_stopped: bool,
+}
+
 pub fn load_session(state_path: &str) -> Result<()> {
+    spawn_session_from_state(
+        state_path,
+        &SpawnOpts {
+            attach: true,
+            force_stopped: false,
+        },
+    )
+}
+
+/// Force a sequencer's inline params to boot stopped — render owns the
+/// transport start; the sequencer would otherwise push `playing = true`
+/// into the shared transport at startup (sequencer.rs).
+fn force_sequencer_stopped(value: &mut toml::Value) {
+    if let toml::Value::Table(table) = value {
+        table.insert(String::from("playing"), toml::Value::Boolean(false));
+    }
+}
+
+/// Everything `los load` does up to (optionally) attaching: validate,
+/// kill any existing `los` session, write the per-module tmp state,
+/// spawn the conductor + module panes detached, apply layout.
+pub fn spawn_session_from_state(state_path: &str, opts: &SpawnOpts) -> Result<()> {
     state::ensure_dirs()?;
 
     // Validate before touching tmux: a bad file must never cost a
@@ -1528,9 +1560,13 @@ pub fn load_session(state_path: &str) -> Result<()> {
     for win in &module_windows {
         for pane in &win.panes {
             if let Some(ref inline) = pane.patch_inline {
+                let mut value = inline.clone();
+                if opts.force_stopped && canonical_module(&pane.module) == Some("sequencer") {
+                    force_sequencer_stopped(&mut value);
+                }
                 let path = state::module_state_path(&pane.module, pane.instance);
                 let toml_str =
-                    toml::to_string_pretty(inline).context("serializing module params")?;
+                    toml::to_string_pretty(&value).context("serializing module params")?;
                 state::write_state_file(&path, &toml_str)?;
             }
         }
@@ -1597,10 +1633,123 @@ pub fn load_session(state_path: &str) -> Result<()> {
     install_shell_theme();
     install_resize_hook(&exe, false);
 
-    let _ = Command::new("tmux")
-        .args(["attach-session", "-t", "los"])
-        .status();
+    if opts.attach {
+        let _ = Command::new("tmux")
+            .args(["attach-session", "-t", "los"])
+            .status();
+    }
 
+    Ok(())
+}
+
+/// A render session is throwaway: kill it however we leave.
+struct RenderSession;
+
+impl Drop for RenderSession {
+    fn drop(&mut self) {
+        let _ = tmux_cmd(&["kill-session", "-t", "los"]);
+    }
+}
+
+/// `los render <song.toml> <out.wav>` — spawn the song in a detached
+/// throwaway session, record the master mix from bar 0, tear down.
+///
+/// Realtime by construction: the engine is a fleet of live processes
+/// around a device-driven clock (the mixer's cpal callback advances the
+/// transport), so a 3-minute song takes 3 minutes and is audible on the
+/// default output device while it renders. True offline rendering would
+/// mean a pull-driven graph in one process — an engine re-architecture,
+/// not a flag here.
+///
+/// Known jitter: the mixer polls the arm file every ≤500 ms and may
+/// momentarily create the transport playing — up to a few hundred ms of
+/// pre-roll can precede bar 0. `los audit --song` flags any resulting
+/// length mismatch.
+pub fn render(song_path: &str, out_path: &str, secs: Option<f32>, tail: f32) -> Result<()> {
+    state::ensure_dirs()?;
+    anyhow::ensure!(
+        !crate::tmux::session_exists("los"),
+        "a 'los' tmux session is already running — save and close it first \
+         (render spawns and kills a throwaway one)"
+    );
+
+    // Duration: explicit --secs, or the macro lane walked into seconds
+    // plus a tail for the delay/filterbank to ring out.
+    // (spawn_session_from_state validates; failures land before spawn.)
+    let secs = match secs {
+        Some(s) => s,
+        None => {
+            let st =
+                state::from_toml_file::<state::SessionState>(std::path::Path::new(song_path))?;
+            let seq = crate::song::sequencer_params(&st).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{song_path} has no sequencer 0 params to derive a duration from — pass --secs"
+                )
+            })?;
+            crate::song::timeline(&seq).total_secs as f32 + tail
+        }
+    };
+    anyhow::ensure!(secs > 0.0, "render duration must be positive");
+
+    let abs = if std::path::Path::new(out_path).is_absolute() {
+        std::path::PathBuf::from(out_path)
+    } else {
+        std::env::current_dir()?.join(out_path)
+    };
+    let abs = abs.to_string_lossy().to_string();
+    let done = format!("{abs}.done");
+    let _ = std::fs::remove_file(&abs);
+    let _ = std::fs::remove_file(&done);
+
+    eprintln!("[render] {song_path} → {abs} ({secs:.0}s, realtime — audible while it runs)");
+    spawn_session_from_state(
+        song_path,
+        &SpawnOpts {
+            attach: false,
+            force_stopped: true,
+        },
+    )?;
+    let _guard = RenderSession;
+
+    // Arm the tape before the transport moves: the mixer polls the arm
+    // file (≤500 ms) and creates the WAV the moment recording starts.
+    std::fs::write(
+        state::tmp_dir().join("record.arm"),
+        format!("{secs}\n{abs}"),
+    )?;
+
+    // Boot wait. The transport shm may pre-date this session (stale) or
+    // be created playing by the mixer (shm.rs creates flag = 1) — keep
+    // forcing it stopped until recording is rolling, so bar 0 is bar 0.
+    let boot_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !std::path::Path::new(&abs).exists() {
+        if let Ok(mut t) = ShmTransport::open() {
+            t.set_playing(false);
+        }
+        anyhow::ensure!(
+            std::time::Instant::now() < boot_deadline,
+            "mixer never started recording — is the audio device available?"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // Roll: rebase the clock to zero (the sequencer rebases its phase on
+    // clock regression and bar 0's lane slot fires) and start.
+    let mut transport = ShmTransport::open().context("transport vanished before start")?;
+    transport.set_clock(0);
+    transport.set_playing(true);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f32(secs + 30.0);
+    while !std::path::Path::new(&done).exists() {
+        anyhow::ensure!(
+            std::time::Instant::now() < deadline,
+            "render never finished — tape marker {done} missing"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let _ = std::fs::remove_file(&done);
+    eprintln!("[render] done: {abs}");
+    eprintln!("[render] hear it in numbers: los audit {abs} --song {song_path}");
     Ok(())
 }
 
@@ -2608,6 +2757,33 @@ mod tests {
         let loaded: state::SessionState = toml::from_str(&toml).expect("deserialize");
 
         assert_eq!(loaded.windows[0].layout, raw_layout);
+    }
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+
+    #[test]
+    fn force_stopped_overrides_sequencer_playing() {
+        let params = state::SequencerParams {
+            playing: Some(true),
+            bpm: Some(74.0),
+            ..Default::default()
+        };
+        let mut v = toml::Value::try_from(&params).expect("to value");
+        force_sequencer_stopped(&mut v);
+        let back: state::SequencerParams = v.try_into().expect("from value");
+        assert_eq!(back.playing, Some(false));
+        assert_eq!(back.bpm, Some(74.0), "only `playing` is touched");
+    }
+
+    #[test]
+    fn force_stopped_inserts_when_absent() {
+        let mut v = toml::Value::try_from(state::SequencerParams::default()).expect("to value");
+        force_sequencer_stopped(&mut v);
+        let back: state::SequencerParams = v.try_into().expect("from value");
+        assert_eq!(back.playing, Some(false));
     }
 }
 
