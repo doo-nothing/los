@@ -493,8 +493,6 @@ fn audio_thread(state: Arc<Mutex<SwarmState>>, instance: usize) -> Result<()> {
             .unwrap_or(FALLBACK_RATE)
     };
     let mut sample_rate = rate_of(&transport);
-    let mut slot_duration =
-        Duration::from_nanos((slot_frames as f64 / sample_rate as f64 * 1e9) as u64);
 
     // The paraphonic stack: one core per chord tone.
     let mut cores: Vec<core::Swarm> = (0..TONES).map(|_| core::Swarm::new()).collect();
@@ -516,9 +514,12 @@ fn audio_thread(state: Arc<Mutex<SwarmState>>, instance: usize) -> Result<()> {
     let mut note_filter: Option<u8> = None;
     let mut blocks: u64 = 0;
 
+    // Backpressure-clocked like voice.rs: produce until the ring is
+    // full and let the mixer's consumption be the clock. The first cut
+    // paced itself by wall-clock sleeps and kept a 0–4 slot backlog —
+    // any scheduler hiccup underran the ring and the mixer padded
+    // zeros, which is what the "glitchy 8-bit" complaint actually was.
     loop {
-        let tick = Instant::now();
-
         if blocks.is_multiple_of(128) {
             if transport.is_none() {
                 transport = ShmTransport::open().ok();
@@ -529,8 +530,6 @@ fn audio_thread(state: Arc<Mutex<SwarmState>>, instance: usize) -> Result<()> {
             let now_rate = rate_of(&transport);
             if (now_rate - sample_rate).abs() > 0.5 {
                 sample_rate = now_rate;
-                slot_duration =
-                    Duration::from_nanos((slot_frames as f64 / sample_rate as f64 * 1e9) as u64);
                 // Faust cores bake the rate into coefficients at init.
                 cores = (0..TONES).map(|_| core::Swarm::new()).collect();
                 init_cores(&mut cores, sample_rate);
@@ -693,10 +692,6 @@ fn audio_thread(state: Arc<Mutex<SwarmState>>, instance: usize) -> Result<()> {
         }
 
         blocks += 1;
-        let elapsed = tick.elapsed();
-        if elapsed < slot_duration {
-            thread::sleep(slot_duration - elapsed);
-        }
     }
 }
 

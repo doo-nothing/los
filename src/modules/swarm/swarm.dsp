@@ -20,13 +20,15 @@ cutoff = hslider("cutoff", 0.5, 0.0, 1.0, 0.001) : si.smoo;
 res = hslider("res", 0.25, 0.0, 1.0, 0.001) : si.smoo;
 level = hslider("level", 0.8, 0.0, 1.0, 0.001) : si.smoo;
 
-// seven saws fanned across ±1.4% (≈24 cents) at full detune, each with
+// seven saws fanned across ±0.9% (≈15 cents) at full detune, each with
 // its own slow drift so the swarm never phase-locks — the ensemble
-// shimmer is the instrument
-drift(i) = os.osc(0.07 + 0.013 * i) * 0.0012;
-ratio(i) = 1.0 + detune * 0.014 * (i - 3.0) / 3.0 + drift(i) * detune;
-saw(i) = os.sawtooth(freq * ratio(i));
-bank = sum(i, 7, saw(i)) / 7.0;
+// shimmer is the instrument. saw3 (3rd-order polynomial transition
+// region) keeps the top end silk instead of foldback grit; the wider
+// ±24-cent fan of the first cut read as detuned-broken, not lush.
+drift(i) = os.osc(0.05 + 0.011 * i) * 0.0009;
+ratio(i) = 1.0 + detune * 0.009 * (i - 3.0) / 3.0 + drift(i) * detune;
+saw(i) = os.saw3(max(20.0, freq * ratio(i)));
+bank = sum(i, 7, saw(i)) / 7.0 : fi.lowpass(1, 11000.0);
 
 // the ladder: cutoff sweeps exponentially, resonance stays musical.
 // moog_vcf_2b takes Hz + res 0..1 (moogLadder wants a NORMALIZED freq
