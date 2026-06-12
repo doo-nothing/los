@@ -27,6 +27,7 @@ pub mod envelope;
 pub mod filterbank;
 pub mod lfo;
 pub mod mixer;
+pub mod peaks;
 pub mod rings;
 pub mod sampler;
 pub mod scope;
