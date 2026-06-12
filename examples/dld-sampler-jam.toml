@@ -1,0 +1,289 @@
+[meta]
+name = "dld-sampler-jam"
+created = ""
+format = 2
+
+[[windows]]
+name = "modules"
+
+[[windows.panes]]
+module = "sequencer"
+instance = 0
+
+[windows.panes.patch_inline]
+bpm = 96.0
+playing = false
+lane = ["a", "", "", "", "", "", "", "", "b", "", "", "", "", "", "", "", "a", "", "", "", "", "", "", "", "c", "", "", "", "", "", "", ""]
+lane_len = 32
+
+[[windows.panes.patch_inline.tracks]]
+length = 16
+swing = 57
+humanize = 2.5
+active_slot = 0
+steps = [
+  { active = true, note = 60, velocity = 110 },
+  { active = false, note = 60, velocity = 80 },
+  { active = true, note = 62, velocity = 52, prob = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = true, note = 61, velocity = 96 },
+  { active = false, note = 60, velocity = 80 },
+  { active = true, note = 62, velocity = 58 },
+  { active = true, note = 63, velocity = 46, prob = 60 },
+  { active = true, note = 60, velocity = 104 },
+  { active = false, note = 60, velocity = 80 },
+  { active = true, note = 62, velocity = 50, prob = 80 },
+  { active = true, note = 60, velocity = 70, prob = 45 },
+  { active = true, note = 61, velocity = 98 },
+  { active = false, note = 60, velocity = 80 },
+  { active = true, note = 62, velocity = 56 },
+  { active = true, note = 63, velocity = 50, prob = 50 },
+]
+
+[[windows.panes.patch_inline.tracks]]
+length = 16
+active_slot = 0
+steps = [
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+]
+
+[[windows.panes.patch_inline.tracks.slots]]
+slot = 1
+length = 16
+steps = [
+  { active = true, note = 60, velocity = 100 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+]
+
+[[windows.panes.patch_inline.tracks]]
+length = 16
+active_slot = 0
+steps = [
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+]
+
+[[windows.panes.patch_inline.tracks.slots]]
+slot = 1
+length = 16
+steps = [
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = true, note = 60, velocity = 100 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+]
+
+[[windows.panes.patch_inline.tracks]]
+length = 16
+mode = "modulation"
+cycle = "drunk"
+steps = [
+  { active = true, note = 60, velocity = 100, mod_value = 0.45 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.52 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.48 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.6 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.5 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.65 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.42 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.58 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.47 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.62 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.44 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.55 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.5 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.4 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.57 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.46 },
+]
+
+[[windows.panes.patch_inline.macros]]
+id = "a"
+cmds = [
+  { switch_pattern = { track = 1, slot = 0 } },
+  { switch_pattern = { track = 2, slot = 0 } },
+]
+
+[[windows.panes.patch_inline.macros]]
+id = "b"
+cmds = [
+  { switch_pattern = { track = 1, slot = 1 } },
+]
+
+[[windows.panes.patch_inline.macros]]
+id = "c"
+cmds = [
+  { switch_pattern = { track = 1, slot = 1 } },
+  { switch_pattern = { track = 2, slot = 1 } },
+]
+
+[[windows.panes]]
+module = "sampler"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+kit = true
+edit = 0
+notes_src = "sequencer/0/t1"
+
+[[windows.panes.patch_inline.slots]]
+sample = "/Users/jake/.config/los/samples/4496279d-b74f-42b3-b517-0d7e36392afb.wav"
+mode = "oneshot"
+dec = 0.45
+level = 0.95
+
+[[windows.panes.patch_inline.slots]]
+sample = "/Users/jake/.config/los/samples/18f55217-3a38-4402-af00-e4bfbc452366.wav"
+mode = "oneshot"
+dec = 0.4
+level = 0.8
+
+[[windows.panes.patch_inline.slots]]
+sample = "/Users/jake/.config/los/samples/1a2cf0a8-3f5d-4937-a55e-75b8a3d85273.wav"
+mode = "oneshot"
+dec = 0.25
+level = 0.55
+
+[[windows.panes.patch_inline.slots]]
+sample = "/Users/jake/.config/los/samples/ea91b958-fffe-412b-b27f-d59dfd8b2265.wav"
+mode = "oneshot"
+dec = 0.5
+level = 0.5
+
+# the chain: sampler → wasp → dld. Each claims the one before; only
+# the DLD's strip reaches the console.
+[[windows.panes]]
+module = "wasp"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+input = "sampler/0"
+freq = 0.6
+res = 0.35
+mix = 0.0
+dirt = 0.65
+bp = 0.0
+dry = 0.25
+freq_src = "sequencer/0/t4"
+
+[[windows.panes]]
+module = "dld"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+input = "wasp/0"
+ping_ms = 0.0
+mono = false
+
+[windows.panes.patch_inline.a]
+time = 3.0
+switch = "/8"
+fdbk = 0.55
+feed = 1.0
+mix = 0.45
+hold_src = "sequencer/0/t2"
+rev_src = "sequencer/0/t3"
+
+[windows.panes.patch_inline.b]
+time = 4.0
+switch = "="
+fdbk = 0.65
+feed = 0.8
+mix = 0.35
+
+# a drone gated by the DLD's loop clock through an envelope — the
+# hardware's favorite patch, two cables
+[[windows.panes]]
+module = "voice"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+shape = 0.12
+sub = 0.85
+lpg = 0.4
+level = 0.45
+amp_src = "envelope/0/ch1"
+notes_src = "sequencer/0/t2"
+
+[[windows.panes]]
+module = "envelope"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+[[windows.panes.patch_inline.channels]]
+rise = 0.3
+fall = 0.75
+shape = 0.5
+loop_mode = false
+gate_mode = false
+pluck = 0.0
+offset = 0.0
+attenuverter = 1.0
+trigger_src = "dld/0/lpa"
+
+[[windows.panes]]
+module = "mixer"
+instance = 0
+
+[[windows.panes]]
+module = "scope"
+instance = 0
