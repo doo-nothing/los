@@ -21,6 +21,7 @@ pub mod badge;
 pub mod conductor;
 pub mod delay;
 pub mod dld;
+pub mod dpo;
 pub mod envelope;
 pub mod filterbank;
 pub mod mixer;
