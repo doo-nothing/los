@@ -35,6 +35,7 @@ struct VoiceState {
     shape_src: Option<SourceAddr>,
     sub_src: Option<SourceAddr>,
     fm_src: Option<SourceAddr>,
+    lpg_src: Option<SourceAddr>,
     level_src: Option<SourceAddr>,
     /// Amplitude control (replaces the old hardwired modbus ch 0).
     /// None = 1.0 (an unpatched voice is audible); bound but unresolvable
@@ -88,6 +89,7 @@ impl Default for VoiceState {
             shape_src: None,
             sub_src: None,
             fm_src: None,
+            lpg_src: None,
             level_src: None,
             amp_src: SourceAddr::parse("envelope/0/ch1"),
             notes_src: None,
@@ -143,6 +145,7 @@ fn voice_thread(
     let mut ch_shape: Option<usize> = None;
     let mut ch_sub: Option<usize> = None;
     let mut ch_fm: Option<usize> = None;
+    let mut ch_lpg: Option<usize> = None;
     let mut ch_amp: Option<usize> = None;
     let mut note_filter: Option<u8> = None;
     let mut refresh_in = 0u32;
@@ -182,6 +185,10 @@ fn voice_thread(
                 .fm_src
                 .as_ref()
                 .and_then(|a| routing::resolve(&entries, a));
+            ch_lpg = s
+                .lpg_src
+                .as_ref()
+                .and_then(|a| routing::resolve(&entries, a));
             ch_amp = s
                 .amp_src
                 .as_ref()
@@ -189,7 +196,7 @@ fn voice_thread(
             note_filter = s.notes_src.as_ref().and_then(routing::note_source_track);
             // publish what this voice listens to (the sequencer's
             // who's-listening markers read it back)
-            let channels = [ch_shape, ch_sub, ch_fm, ch_amp]
+            let channels = [ch_shape, ch_sub, ch_fm, ch_lpg, ch_amp]
                 .iter()
                 .flatten()
                 .filter(|&&c| c < 64)
@@ -239,10 +246,16 @@ fn voice_thread(
             s.velocity
         };
 
-        let lpg = s.lpg;
-
         let chan_val = |ch: Option<usize>| -> Option<f32> {
             ch.and_then(|c| modbus.as_ref().map(|m| m.get(c)))
+        };
+
+        // a plugged cable replaces the knob (los-wide convention);
+        // max/min not clamp — NaN from a stale channel must die here
+        #[allow(clippy::manual_clamp)]
+        let lpg = match chan_val(ch_lpg) {
+            Some(v) if s.lpg_src.is_some() => v.max(0.0).min(1.0),
+            _ => s.lpg,
         };
 
         // Amplitude: unbound -> 1.0 (a drone, by explicit choice). Bound ->
@@ -559,6 +572,7 @@ fn snapshot_params(s: &VoiceState) -> state::VoiceParams {
         shape_src: s.shape_src.as_ref().map(|a| a.to_string()),
         sub_src: s.sub_src.as_ref().map(|a| a.to_string()),
         fm_src: s.fm_src.as_ref().map(|a| a.to_string()),
+        lpg_src: s.lpg_src.as_ref().map(|a| a.to_string()),
         level_src: s.level_src.as_ref().map(|a| a.to_string()),
         amp_src: s.amp_src.as_ref().map(|a| a.to_string()),
         notes_src: s.notes_src.as_ref().map(|a| a.to_string()),
@@ -601,6 +615,7 @@ fn apply_params(s: &mut VoiceState, params: &state::VoiceParams) {
         s.shape_src = params.shape_src.as_deref().and_then(SourceAddr::parse);
         s.sub_src = params.sub_src.as_deref().and_then(SourceAddr::parse);
         s.fm_src = params.fm_src.as_deref().and_then(SourceAddr::parse);
+    s.lpg_src = params.lpg_src.as_deref().and_then(SourceAddr::parse);
         s.level_src = params.level_src.as_deref().and_then(SourceAddr::parse);
         s.amp_src = params.amp_src.as_deref().and_then(SourceAddr::parse);
         s.notes_src = params.notes_src.as_deref().and_then(SourceAddr::parse);
@@ -614,6 +629,7 @@ fn row_binding(s: &VoiceState, row: usize) -> Option<&Option<SourceAddr>> {
         0 => Some(&s.shape_src),
         1 => Some(&s.sub_src),
         2 => Some(&s.fm_src),
+        6 => Some(&s.lpg_src),
         4 => Some(&s.amp_src),
         5 => Some(&s.notes_src),
         _ => None, // output row has no binding
@@ -625,6 +641,7 @@ fn set_row_binding(s: &mut VoiceState, row: usize, addr: Option<SourceAddr>) {
         0 => s.shape_src = addr,
         1 => s.sub_src = addr,
         2 => s.fm_src = addr,
+        6 => s.lpg_src = addr,
         4 => s.amp_src = addr,
         5 => s.notes_src = addr,
         _ => {}

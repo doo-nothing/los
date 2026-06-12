@@ -758,6 +758,7 @@ fn check_voice(
         ("shape_src", &p.shape_src),
         ("sub_src", &p.sub_src),
         ("fm_src", &p.fm_src),
+        ("lpg_src", &p.lpg_src),
         ("level_src", &p.level_src),
         ("amp_src", &p.amp_src),
     ] {

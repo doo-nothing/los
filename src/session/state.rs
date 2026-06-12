@@ -187,6 +187,8 @@ pub struct VoiceParams {
     #[serde(default)]
     pub fm_src: Option<String>,
     #[serde(default)]
+    pub lpg_src: Option<String>,
+    #[serde(default)]
     pub level_src: Option<String>,
     #[serde(default)]
     pub amp_src: Option<String>,
