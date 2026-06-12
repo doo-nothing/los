@@ -733,6 +733,44 @@ pub struct RingsParams {
     pub notes_src: Option<String>,
 }
 
+/// Tides (modules/tides) — the MI tidal modulator (2018): three ramp
+/// modes, four output modes, control/audio ranges, transport lock;
+/// outputs tides/N/o1-o4 on the bus.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TidesParams {
+    #[serde(default)]
+    pub format: u32,
+    /// "ad" | "loop" | "ar"
+    pub mode: Option<String>,
+    /// "gates" | "amplitude" | "phase" | "frequency"
+    pub output: Option<String>,
+    /// "control" | "audio"
+    pub range: Option<String>,
+    pub freq: Option<f32>,
+    pub shape: Option<f32>,
+    pub slope: Option<f32>,
+    pub smooth: Option<f32>,
+    pub shift: Option<f32>,
+    pub sync: Option<bool>,
+    pub level: Option<f32>,
+    #[serde(default)]
+    pub freq_src: Option<String>,
+    #[serde(default)]
+    pub shape_src: Option<String>,
+    #[serde(default)]
+    pub slope_src: Option<String>,
+    #[serde(default)]
+    pub smooth_src: Option<String>,
+    #[serde(default)]
+    pub shift_src: Option<String>,
+    #[serde(default)]
+    pub level_src: Option<String>,
+    #[serde(default)]
+    pub amp_src: Option<String>,
+    #[serde(default)]
+    pub notes_src: Option<String>,
+}
+
 /// The swarm voice (modules/swarm.rs) — the CS-80-flavored brass pad:
 /// chord by name ("min7"), the five knobs, glide, and the three kinds
 /// of binding (knob sources, amp, notes).

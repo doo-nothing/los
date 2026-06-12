@@ -55,6 +55,7 @@ pub fn output_labels(module: &str) -> &'static [&'static str] {
         "dpo" => &["lfo"],
         "lfo" => &["s1", "s2", "s3", "s4", "a1", "a2", "a3", "a4"],
         "elements" => &["exc"],
+        "tides" => &["o1", "o2", "o3", "o4"],
         "delay" => &["in", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"],
         "filterbank" => &[
             "b1", "b2", "b3", "b4", "b5", "b6", "b7", "b8", "b9", "b10", "b11", "b12", "b13",

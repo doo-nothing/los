@@ -332,6 +332,16 @@ externally instead — Rings as an fx is half the instrument. Synth
 mode `fx` ∈ formant, chorus, reverb, formant2, ensemble, reverb2.
 Notes strum; there is no gate — everything decays by `damping`.
 
+**tides** (the Mutable Instruments tidal modulator, 2018, full
+port): `mode` ∈ ad (one-shot envelope), loop (LFO/osc), ar (sustain);
+`output` ∈ gates (slope + raw + EOA/EOR), amplitude (level scan
+across four outs), phase (four phase-shifted copies), frequency
+(four ratio'd ramps — chords); `range` control | audio (audio
+tracks notes V/oct, freq becomes ±2 oct); `freq`, `shape`, `slope`,
+`smooth` (< 50% filters, > 50% wavefolds), `shift` — all with `*_src`
+twins. `sync = true` locks the loop to the transport beat. Sources:
+`tides/N/o1`–`o4`; o1/o2 are also the audio pair.
+
 **mixer**: per-track `level` (0–1), `pan` (−1–1), `drive` (0–1), 3-band
 EQ (±15 dB, `eq_freq` 0–1), `mute`/`solo`; a master strip with the
 same console plus `master_width` (0–2).
@@ -361,6 +371,7 @@ Sources:
 | `wasp/N/` | `env` (envelope follower) |
 | `dpo/N/` | `lfo` |
 | `elements/N/` | `exc` (exciter level follower) |
+| `tides/N/` | `o1`–`o4` (the four slopes) |
 | `template/N/` | `lfo` |
 
 Audio `input` fields are 2-segment: a producing module (`voice`,
