@@ -524,6 +524,10 @@ pub struct WaspParams {
     pub mix_src: Option<String>,
     #[serde(default)]
     pub dirt_src: Option<String>,
+    #[serde(default)]
+    pub bp_src: Option<String>,
+    #[serde(default)]
+    pub dry_src: Option<String>,
 }
 
 /// The DPO (modules/dpo) — Make Noise-style complex oscillator.

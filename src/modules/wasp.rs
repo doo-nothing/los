@@ -76,9 +76,9 @@ const ROWS: [Row; 7] = [
     Row::Input,
 ];
 
-/// Bindable rows, srcs[] order.
-const BINDABLE: [Row; 4] = [Row::Freq, Row::Res, Row::Mix, Row::Dirt];
-const N_SRC: usize = 4;
+/// Bindable rows, srcs[] order — every value row takes a cable.
+const BINDABLE: [Row; 6] = [Row::Freq, Row::Res, Row::Mix, Row::Dirt, Row::Bp, Row::Dry];
+const N_SRC: usize = BINDABLE.len();
 const INPUT_SLOT: usize = 6;
 
 struct WaspState {
@@ -110,7 +110,7 @@ impl WaspState {
             input_live: true,
             srcs: Default::default(),
             resolved: Default::default(),
-            eff: [0.55, 0.3, 0.0, 0.5],
+            eff: [0.55, 0.3, 0.0, 0.5, 0.0, 0.0],
             env_now: 0.0,
             selected: 0,
         }
@@ -193,6 +193,8 @@ fn snapshot_params(s: &WaspState) -> state::WaspParams {
         res_src: src(1),
         mix_src: src(2),
         dirt_src: src(3),
+        bp_src: src(4),
+        dry_src: src(5),
     }
 }
 
@@ -224,6 +226,8 @@ fn apply_params(s: &mut WaspState, p: &state::WaspParams) {
         parse(&p.res_src),
         parse(&p.mix_src),
         parse(&p.dirt_src),
+        parse(&p.bp_src),
+        parse(&p.dry_src),
     ];
     s.resolved = Default::default();
 }
@@ -343,6 +347,8 @@ fn audio_thread(shared: Arc<Mutex<WaspState>>, instance: usize) -> Result<()> {
                 eff(1, s.res, &s),
                 eff(2, s.mix, &s),
                 eff(3, s.dirt, &s),
+                eff(4, s.bp, &s),
+                eff(5, s.dry, &s),
             ];
             s.eff = vals;
             s.env_now = follower;
@@ -350,7 +356,7 @@ fn audio_thread(shared: Arc<Mutex<WaspState>>, instance: usize) -> Result<()> {
             fx.set_param(crate::faust::ParamIndex(P_RES), vals[1]);
             fx.set_param(crate::faust::ParamIndex(P_MIX), vals[2]);
             fx.set_param(crate::faust::ParamIndex(P_DIRT), vals[3]);
-            (s.bp, s.dry)
+            (vals[4], vals[5])
         };
 
         {

@@ -1216,6 +1216,8 @@ fn check_wasp(p: &WaspParams, loc: &str, declared: &BTreeSet<(String, usize)>, r
         ("res_src", &p.res_src),
         ("mix_src", &p.mix_src),
         ("dirt_src", &p.dirt_src),
+        ("bp_src", &p.bp_src),
+        ("dry_src", &p.dry_src),
     ] {
         check_src(src, field, loc, declared, r);
     }
