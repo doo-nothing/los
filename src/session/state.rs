@@ -627,6 +627,24 @@ pub struct ElementsParams {
     #[serde(default)]
     pub contour_src: Option<String>,
     #[serde(default)]
+    pub bow_src: Option<String>,
+    #[serde(default)]
+    pub bow_timbre_src: Option<String>,
+    #[serde(default)]
+    pub blow_src: Option<String>,
+    #[serde(default)]
+    pub blow_meta_src: Option<String>,
+    #[serde(default)]
+    pub blow_timbre_src: Option<String>,
+    #[serde(default)]
+    pub strike_src: Option<String>,
+    #[serde(default)]
+    pub strike_meta_src: Option<String>,
+    #[serde(default)]
+    pub strike_timbre_src: Option<String>,
+    #[serde(default)]
+    pub level_src: Option<String>,
+    #[serde(default)]
     pub amp_src: Option<String>,
     #[serde(default)]
     pub notes_src: Option<String>,

@@ -1324,12 +1324,21 @@ fn check_elements(
         range01(v, name, loc, r);
     }
     for (field, src) in [
+        ("contour_src", &p.contour_src),
+        ("bow_src", &p.bow_src),
+        ("bow_timbre_src", &p.bow_timbre_src),
+        ("blow_src", &p.blow_src),
+        ("blow_meta_src", &p.blow_meta_src),
+        ("blow_timbre_src", &p.blow_timbre_src),
+        ("strike_src", &p.strike_src),
+        ("strike_meta_src", &p.strike_meta_src),
+        ("strike_timbre_src", &p.strike_timbre_src),
         ("geometry_src", &p.geometry_src),
         ("brightness_src", &p.brightness_src),
         ("damping_src", &p.damping_src),
         ("position_src", &p.position_src),
         ("space_src", &p.space_src),
-        ("contour_src", &p.contour_src),
+        ("level_src", &p.level_src),
         ("amp_src", &p.amp_src),
     ] {
         check_src(src, field, loc, declared, r);
