@@ -24,6 +24,7 @@ pub mod dld;
 pub mod envelope;
 pub mod filterbank;
 pub mod mixer;
+pub mod sampler;
 pub mod scope;
 pub mod sequencer;
 pub mod tape;

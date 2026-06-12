@@ -1313,6 +1313,9 @@ pub fn consumer_id(module: &str, instance: usize) -> usize {
         // and a rig running eight voices plus swarms isn't real. The
         // collision is documented, deliberate, and tested.
         "swarm" => 7 - instance.min(1),
+        // sampler shares the next pair down (sampler 0 -> slot 5,
+        // 1 -> slot 4); collisions only with voice 4/5 in the same rig.
+        "sampler" => 5 - instance.min(1),
         "envelope" => 8 + instance.min(5),
         // `los tap` gets its own cursor so draining the backlog can't
         // starve whichever module shares the default slot

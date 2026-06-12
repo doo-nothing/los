@@ -285,6 +285,18 @@ clock and VCA anything in time with the loop. For audible discrete
 repeats, feed it transients (plucks, drums) — legato drones don't
 echo, they smear.
 
+**sampler** (reels + Morphagene-ish designer): eight slots loaded
+from `~/.config/los/samples/` (prefetch with `los samples pull
+"kick" --n 8`, or `--raw` for long found reels). Per slot: `sample`
+(the cache path), `mode` ∈ oneshot, loop, gated, hold; `start`/`len`
+(the splice), `pitch` ±24, `speed` ±2 (negative = reverse), `gene`
+(0 = tape, >0 = grain size), `slide` (grain position — bind a drunk
+track and the reel strolls), `atk`/`dec`, `level`. `kit = true` maps
+notes C→slot a … G→slot h: ONE track plays a whole drum kit — give
+steps note 60 for the kick, 61 for slot b, etc. The CV bank
+(`pitch_src speed_src gene_src slide_src level_src`) overlays every
+slot, Morphagene-style. Publishes `sampler/N/env`.
+
 **mixer**: per-track `level` (0–1), `pan` (−1–1), `drive` (0–1), 3-band
 EQ (±15 dB, `eq_freq` 0–1), `mute`/`solo`; a master strip with the
 same console plus `master_width` (0–2).

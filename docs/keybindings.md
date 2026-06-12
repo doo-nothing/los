@@ -291,6 +291,21 @@ strip leaves the console. Fx-into-fx chains work the same way. Master
 sends default to 0 — the master already contains the returns, so
 raising them is deliberate feedback.
 
+### Sampler
+Reels + a Morphagene-ish designer
+([the design doc](plans/sampler.md)). Vertical rows: `slot` (a–h, the
+edit/load target) · `sample` · `mode` (oneshot·loop·gated·hold) ·
+`start`/`len` (the splice) · `pitch` ±24 st · `speed` ±2× (negative =
+reverse) · `gene` (0 = tape, up = grains 1 s→10 ms) · `slide` (grain
+scrub) · `atk`/`dec` · `level` · `kit` (notes C→a…G→h = a drum kit on
+one track) · `notes` · `amp`. `/` opens the a-u.supply browser (type ·
+Enter searches · Tab drums↔raw reels · Enter downloads into the slot;
+no API key = local cache). `@` binds the CV bank (pitch speed gene
+slide level — one bank, Morphagene-style) · `x` unbinds / unloads on
+the sample row · `:set mode loop`, `:set gene 0.4`, `:set slot c` ·
+`los samples pull <q> [--raw]` prefetches. Publishes `sampler/N/env`.
+All ✅
+
 ### DLD
 The dual looping delay (after the 4ms DLD —
 [the design doc](plans/dld.md)). Vertical rows: channel A (`time` ·

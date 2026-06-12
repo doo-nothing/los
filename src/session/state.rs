@@ -457,6 +457,49 @@ pub struct DldParams {
     pub b: Option<DldChannelParams>,
 }
 
+/// One sampler slot (modules/sampler) — the loaded reel + designer.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SamplerSlotParams {
+    /// Cache path of the loaded sample.
+    pub sample: Option<String>,
+    /// Mode by name: "oneshot", "loop", "gated", "hold".
+    pub mode: Option<String>,
+    pub start: Option<f32>,
+    pub len: Option<f32>,
+    pub pitch: Option<f32>,
+    pub speed: Option<f32>,
+    pub gene: Option<f32>,
+    pub slide: Option<f32>,
+    pub atk: Option<f32>,
+    pub dec: Option<f32>,
+    pub level: Option<f32>,
+}
+
+/// The sampler (modules/sampler): eight reels, a kit, a CV bank.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SamplerParams {
+    #[serde(default)]
+    pub format: u32,
+    pub kit: Option<bool>,
+    pub edit: Option<usize>,
+    #[serde(default)]
+    pub notes_src: Option<String>,
+    #[serde(default)]
+    pub amp_src: Option<String>,
+    #[serde(default)]
+    pub pitch_src: Option<String>,
+    #[serde(default)]
+    pub speed_src: Option<String>,
+    #[serde(default)]
+    pub gene_src: Option<String>,
+    #[serde(default)]
+    pub slide_src: Option<String>,
+    #[serde(default)]
+    pub level_src: Option<String>,
+    #[serde(default)]
+    pub slots: Vec<SamplerSlotParams>,
+}
+
 /// The swarm voice (modules/swarm.rs) — the CS-80-flavored brass pad:
 /// chord by name ("min7"), the five knobs, glide, and the three kinds
 /// of binding (knob sources, amp, notes).
