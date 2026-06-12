@@ -285,13 +285,19 @@ impl Delay {
     }
 
     /// Interpolated read at `offset` samples back, LFO-modulated.
+    /// The offset is clamped inside the line: an LFO excursion that
+    /// lands exactly on the wrap boundary while the write head sits at
+    /// zero underflowed the index arithmetic and panicked the audio
+    /// thread — a probabilistic time bomb that killed whole takes at
+    /// random times (caught by the elements_N.crash black boxes).
     #[inline]
     fn read_mod(&self, offset: f32) -> f32 {
         let n = self.buf.len();
+        let offset = offset.clamp(1.0, (n - 2) as f32);
         let int = offset as usize;
         let frac = offset - int as f32;
-        let a = self.buf[(self.pos + n - 1 - int % n) % n];
-        let b = self.buf[(self.pos + n - 2 - int % n) % n];
+        let a = self.buf[(self.pos + n - 1 - int) % n];
+        let b = self.buf[(self.pos + n - 2 - int) % n];
         a + (b - a) * frac
     }
 
@@ -560,6 +566,35 @@ mod tests {
             wet_tail > dry_tail * 2.0,
             "space adds tail: {dry_tail} vs {wet_tail}"
         );
+    }
+
+    #[test]
+    fn reverb_mod_read_survives_the_wrap_boundary() {
+        // regression: drive the modulated read across every (pos,
+        // offset) combination around the wrap — the underflow needed
+        // pos == 0 with the offset at the boundary
+        let mut d = Delay::new(64);
+        for _ in 0..130 {
+            for off in [0.0, 1.0, 62.0, 62.9, 63.0, 64.0, 200.0] {
+                let v = d.read_mod(off);
+                assert!(v.is_finite());
+            }
+            d.write(0.1);
+        }
+    }
+
+    #[test]
+    fn full_part_survives_ten_minutes_of_space() {
+        // soak: the time bomb fired at ~90 s twice; run the reverb's
+        // LFO through many full cycles with the part struck repeatedly
+        let mut part = Part::new(48_000.0, 64, 99);
+        let patch = Patch { space: 1.0, exciter_strike_level: 0.9, ..Default::default() };
+        let mut l = vec![0.0; 64];
+        let mut r = vec![0.0; 64];
+        for blk in 0..450_000 / 64 {
+            part.process(&patch, 220.0, 0.8, blk % 64 < 8, &mut l, &mut r);
+        }
+        assert!(l.iter().all(|v| v.is_finite()));
     }
 
     #[test]
