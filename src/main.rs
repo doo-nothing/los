@@ -8,7 +8,8 @@
 
 use anyhow::Result;
 use los::{
-    badge, conductor, delay, dld, dpo, envelope, filterbank, lfo, mixer, sampler, scope,
+    badge, conductor, delay, dld, dpo, elements, envelope, filterbank, lfo, mixer, sampler,
+    scope,
     sequencer,
     shm,
     wasp,
@@ -102,6 +103,7 @@ fn usage() {
     eprintln!("  wasp               Dirty multimode VCF (Doepfer A-124 / EDP Wasp)");
     eprintln!("  dpo                Complex oscillator (Make Noise DPO): FM, sync, fold, strike");
     eprintln!("  lfo                Quad LFO bank (Batumi): free/quad/phase/div, 8 outputs");
+    eprintln!("  elements           Modal voice (Mutable Instruments port): bow/blow/strike");
     eprintln!("  badge              Los faceplate (beat-synced animation, session info)");
     eprintln!();
     eprintln!("Aliases:");
@@ -132,6 +134,7 @@ fn dispatch_module(name: &str, instance: usize) -> Result<()> {
         "wasp" => wasp::run(instance),
         "dpo" => dpo::run(instance),
         "lfo" => lfo::run(instance),
+        "elements" => elements::run(instance),
         "badge" => badge::run(instance),
         other => anyhow::bail!("unknown module: {other}"),
     }

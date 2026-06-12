@@ -22,6 +22,7 @@ pub mod conductor;
 pub mod delay;
 pub mod dld;
 pub mod dpo;
+pub mod elements;
 pub mod envelope;
 pub mod filterbank;
 pub mod lfo;

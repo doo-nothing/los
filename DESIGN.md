@@ -595,6 +595,7 @@ by a trait or framework. The sections below describe what each phase must do and
 | dld       | Create `/los_audio_dld_N`; consumes one claimed ring | — | Open (beat/rate) | Open (write 3 ch: clk,lpa,lpb) | Register + publish_input |
 | sampler   | Create `/los_audio_sampler_N` | Open consumer 5−N   | Open (read rate)   | Open (write 1 ch: env)| Register  |
 | lfo       | —                           | —                   | —                  | Open (write 8 ch: s1-4,a1-4) | Register  |
+| elements  | Create `/los_audio_elements_N` | Open consumer 1−N | Open (read rate)   | Open (write 1 ch: exc)| Register  |
 | (mixer) sends | Create `/los_send_a` + `/los_send_b` (post-fader buses) | — | — | — | 2 extra entries: send/0, send/1 |
 | conductor | —                           | —                   | —                  | —                     | Create+Open |
 
