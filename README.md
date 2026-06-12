@@ -150,5 +150,9 @@ the GIF/mp4 above ([vhs](https://github.com/charmbracelet/vhs) + ffmpeg);
 `los check song.toml` validates a state file offline — every problem at
 once (typo'd keys, bad mod-source addresses, out-of-range params,
 undefined macros in the lane), no session needed; `los load` runs the
-same gate before it touches tmux.
+same gate before it touches tmux. `los audit take.wav --song song.toml`
+analyzes a render offline — windowed RMS with a sparkline column, peak/
+crest/dynamic-arc summary, and per-section dynamics aligned to the macro
+lane — numbers an agent (or a human without speakers) can read instead
+of listening.
 
