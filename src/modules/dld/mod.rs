@@ -90,8 +90,8 @@ fn row_at(i: usize) -> Row {
 }
 
 /// Bindable mod inputs per channel, in srcs[] order: time, fdbk, feed,
-/// win, hold trigger, rev trigger.
-const N_SRC: usize = 6;
+/// win, hold trigger, rev trigger, mix.
+const N_SRC: usize = 7;
 
 // ── shared state ───────────────────────────────────────────────────────────
 
@@ -136,6 +136,8 @@ struct DldState {
     ch: [ChState; 2],
     /// 0.0 = Ping follows the transport beat; >0 = free Ping in ms.
     ping_ms: f32,
+    ping_src: Option<SourceAddr>,
+    ping_resolved: Option<usize>,
     mono: bool,
     /// Input selection ("module/instance"), the fx claim.
     input: Option<String>,
@@ -150,6 +152,8 @@ impl DldState {
         Self {
             ch: [ChState::default(), ChState::default()],
             ping_ms: 0.0,
+            ping_src: None,
+            ping_resolved: None,
             mono: false,
             input: None,
             input_live: true,
@@ -163,10 +167,14 @@ impl DldState {
 // Slots: 0..19 rows in order; 20+k channel A bindings; 30+k channel B.
 
 const SRC_SLOT_BASE: usize = 20;
+const PING_SRC_SLOT: usize = 45;
 
 impl crate::undo::ParamUndo for DldState {
     fn get_param(&self, slot: usize) -> Option<crate::undo::ParamValue> {
         use crate::undo::ParamValue as V;
+        if slot == PING_SRC_SLOT {
+            return Some(V::Src(self.ping_src.as_ref().map(|a| a.to_string())));
+        }
         if let Some(i) = slot.checked_sub(SRC_SLOT_BASE) {
             let (c, k) = (i / 10, i % 10);
             if c < 2 && k < N_SRC {
@@ -191,6 +199,13 @@ impl crate::undo::ParamUndo for DldState {
 
     fn set_param(&mut self, slot: usize, value: crate::undo::ParamValue) {
         use crate::undo::ParamValue as V;
+        if slot == PING_SRC_SLOT {
+            if let V::Src(v) = value {
+                self.ping_src = v.as_deref().and_then(SourceAddr::parse);
+                self.ping_resolved = None;
+            }
+            return;
+        }
         if let Some(i) = slot.checked_sub(SRC_SLOT_BASE) {
             let (c, k) = (i / 10, i % 10);
             if c < 2 && k < N_SRC {
@@ -239,10 +254,12 @@ fn snapshot_params(s: &DldState) -> state::DldParams {
         win_src: c.srcs[3].as_ref().map(|a| a.to_string()),
         hold_src: c.srcs[4].as_ref().map(|a| a.to_string()),
         rev_src: c.srcs[5].as_ref().map(|a| a.to_string()),
+        mix_src: c.srcs[6].as_ref().map(|a| a.to_string()),
     };
     state::DldParams {
         format: state::STATE_FORMAT,
         ping_ms: Some(s.ping_ms),
+        ping_src: s.ping_src.as_ref().map(|a| a.to_string()),
         mono: Some(s.mono),
         input: s.input.clone(),
         a: Some(ch(&s.ch[0])),
@@ -286,6 +303,7 @@ fn apply_params(s: &mut DldState, p: &state::DldParams) {
             parse(&q.win_src),
             parse(&q.hold_src),
             parse(&q.rev_src),
+            parse(&q.mix_src),
         ];
         c.resolved = Default::default();
     };
@@ -298,6 +316,8 @@ fn apply_params(s: &mut DldState, p: &state::DldParams) {
     if let Some(v) = p.ping_ms {
         s.ping_ms = v.clamp(0.0, 10_000.0);
     }
+    s.ping_src = p.ping_src.as_deref().and_then(SourceAddr::parse);
+    s.ping_resolved = None;
     if let Some(v) = p.mono {
         s.mono = v;
     }
@@ -374,6 +394,10 @@ fn audio_thread(shared: Arc<Mutex<DldState>>, instance: usize) -> Result<()> {
                             .and_then(|a| routing::resolve(&entries, a));
                     }
                 }
+                s.ping_resolved = s
+                    .ping_src
+                    .as_ref()
+                    .and_then(|a| routing::resolve(&entries, a));
                 let desired = s.input.as_deref().and_then(|sel| {
                     let (m, i) = sel.split_once('/')?;
                     let i: usize = i.parse().ok()?;
@@ -423,12 +447,21 @@ fn audio_thread(shared: Arc<Mutex<DldState>>, instance: usize) -> Result<()> {
         // trigger bindings edge-toggle hold/rev)
         let (pa, pb, mono, clears) = {
             let mut s = shared.lock().unwrap();
-            let beat_secs = if s.ping_ms > 0.0 {
-                s.ping_ms / 1000.0
+            let bus = modbus.as_ref();
+            // a cable on ping owns the free-mode base (0..1 -> 0..2 s,
+            // tape-warble territory); 0 still means transport-locked
+            #[allow(clippy::manual_clamp)] // NaN must die, clamp(NaN)=NaN
+            let ping_ms = match (s.ping_resolved, bus) {
+                (Some(ch), Some(b)) if s.ping_src.is_some() => {
+                    b.get(ch).max(0.0).min(1.0) * 2_000.0
+                }
+                _ => s.ping_ms,
+            };
+            let beat_secs = if ping_ms > 0.0 {
+                ping_ms / 1000.0
             } else {
                 60.0 / bpm_of(&transport)
             };
-            let bus = modbus.as_ref();
             let mk = |c: usize, s: &mut DldState| -> ChannelParams {
                 // trigger edges first (they mutate)
                 for (slot, t) in [(4usize, 0usize), (5, 1)] {
@@ -446,9 +479,12 @@ fn audio_thread(shared: Arc<Mutex<DldState>>, instance: usize) -> Result<()> {
                     }
                 }
                 let st = &s.ch[c];
+                // max/min, not clamp: clamp(NaN) is NaN and a stale
+                // channel must die here, not ride into the tape engine
+                #[allow(clippy::manual_clamp)]
                 let cv = |k: usize, manual: f32, lo: f32, hi: f32| -> f32 {
                     match (st.resolved[k], bus) {
-                        (Some(ch), Some(b)) => lo + b.get(ch).clamp(0.0, 1.0) * (hi - lo),
+                        (Some(ch), Some(b)) => lo + b.get(ch).max(0.0).min(1.0) * (hi - lo),
                         _ => manual,
                     }
                 };
@@ -458,7 +494,7 @@ fn audio_thread(shared: Arc<Mutex<DldState>>, instance: usize) -> Result<()> {
                         .min(MAX_SECS * sample_rate - 512.0),
                     feedback: cv(1, st.fdbk, 0.0, 1.1),
                     feed: cv(2, st.feed, 0.0, 1.0),
-                    mix: st.mix,
+                    mix: cv(6, st.mix, 0.0, 1.0),
                     hold: st.hold,
                     reverse: st.rev,
                     window: cv(3, st.win, 0.0, 1.0),
@@ -558,6 +594,7 @@ fn src_index(r: Row) -> Option<(usize, usize)> {
         Row::Win(c) => Some((c, 3)),
         Row::Hold(c) => Some((c, 4)),
         Row::Rev(c) => Some((c, 5)),
+        Row::Mix(c) => Some((c, 6)),
         _ => None,
     }
 }

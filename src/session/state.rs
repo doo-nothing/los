@@ -443,6 +443,8 @@ pub struct DldChannelParams {
     pub hold_src: Option<String>,
     #[serde(default)]
     pub rev_src: Option<String>,
+    #[serde(default)]
+    pub mix_src: Option<String>,
 }
 
 /// The DLD (modules/dld) — two channels around one Ping.
@@ -452,6 +454,8 @@ pub struct DldParams {
     pub format: u32,
     /// 0 = Ping follows the transport beat; >0 = free Ping in ms.
     pub ping_ms: Option<f32>,
+    #[serde(default)]
+    pub ping_src: Option<String>,
     pub mono: Option<bool>,
     #[serde(default)]
     pub input: Option<String>,

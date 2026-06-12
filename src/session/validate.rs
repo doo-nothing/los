@@ -1128,10 +1128,12 @@ fn check_dld(p: &DldParams, loc: &str, declared: &BTreeSet<(String, usize)>, r: 
             ("win_src", &ch.win_src),
             ("hold_src", &ch.hold_src),
             ("rev_src", &ch.rev_src),
+            ("mix_src", &ch.mix_src),
         ] {
             check_src(src, field, loc, declared, r);
         }
     }
+    check_src(&p.ping_src, "ping_src", loc, declared, r);
     if let Some(v) = p.ping_ms {
         if !(0.0..=10_000.0).contains(&v) {
             r.error(loc, format!("ping_ms: {v} out of range 0–10000"));
