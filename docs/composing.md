@@ -325,8 +325,17 @@ same console plus `master_width` (0–2).
 
 ## Modulation — the cables
 
-Any `*_src` field binds a parameter to a source address,
-`module/instance/output`:
+**Every parameter of every module is modulatable** — that's the core
+contract of the instrument. Each value field has a `*_src` twin that
+binds it to a source address (`module/instance/output`); a plugged
+cable replaces the knob. Highlights beyond the obvious: the
+sequencer's tempo (`bpm_src`, 0–1 → 20–300), the DLD's free-mode base
+(`ping_src`, 0–1 → 0–2 s — tape warble), the sampler's whole
+Morphagene bank (`start_src`/`len_src`/`gene_src`/… applied to
+whichever slot is playing), and the mixer's strips including the
+master console (`master_src`, `master_width_src`, `master_*_src`).
+
+Sources:
 
 | module | outputs |
 |---|---|
