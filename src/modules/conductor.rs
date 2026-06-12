@@ -1816,11 +1816,29 @@ pub fn render(song_path: &str, out_path: &str, secs: Option<f32>, tail: f32) -> 
     transport.set_playing(true);
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f32(secs + 30.0);
+    let mut silence_checked = false;
+    let started = std::time::Instant::now();
     while !std::path::Path::new(&done).exists() {
         anyhow::ensure!(
             std::time::Instant::now() < deadline,
             "render never finished — tape marker {done} missing"
         );
+        // Silent-capture guard: twice now a render started moments
+        // after an unclean session death has recorded pure zeros while
+        // the meters showed audio. Ten seconds in, peek the raw PCM;
+        // if every sample is zero, abort loudly instead of spending
+        // the whole song recording silence.
+        if !silence_checked && started.elapsed() > std::time::Duration::from_secs(10) {
+            silence_checked = true;
+            if let Ok(bytes) = std::fs::read(&abs) {
+                let data = &bytes[44.min(bytes.len())..];
+                if data.len() > 96_000 && data.iter().all(|b| *b == 0) {
+                    anyhow::bail!(
+                        "render is capturing pure silence 10 s in — the audio                          device likely didn't settle after the previous session;                          re-run the render"
+                    );
+                }
+            }
+        }
         std::thread::sleep(Duration::from_millis(500));
     }
     let _ = std::fs::remove_file(&done);
