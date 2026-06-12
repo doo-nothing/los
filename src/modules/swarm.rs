@@ -135,11 +135,12 @@ const ROWS: [Param; 9] = [
 /// Mod-bindable knobs, in `srcs[]` order. Amp and Notes bind too, but
 /// they're pure routing rows (no manual value to replace) and live in
 /// their own fields, voice-style.
-const BINDABLE: [Param; 5] = [
+const BINDABLE: [Param; 6] = [
     Param::Detune,
     Param::Cutoff,
     Param::Res,
     Param::Swell,
+    Param::Glide,
     Param::Level,
 ];
 
@@ -184,10 +185,13 @@ impl Param {
             // max/min instead of clamp: clamp(NaN) is NaN, and a NaN
             // from a stale modbus channel must die here, not ride into
             // the filter coefficients (NaN.max(0.0) is 0.0).
-            Param::Detune | Param::Cutoff | Param::Res | Param::Swell | Param::Level => {
-                v.max(0.0).min(1.0)
-            }
-            Param::Chord | Param::Glide | Param::Amp | Param::Notes => v,
+            Param::Detune
+            | Param::Cutoff
+            | Param::Res
+            | Param::Swell
+            | Param::Glide
+            | Param::Level => v.max(0.0).min(1.0),
+            Param::Chord | Param::Amp | Param::Notes => v,
         }
     }
 }
@@ -207,10 +211,10 @@ struct SwarmState {
     gate: bool,
     velocity: f32,
     /// Bindings for the BINDABLE knobs.
-    srcs: [Option<SourceAddr>; 5],
-    resolved: [Option<usize>; 5],
+    srcs: [Option<SourceAddr>; BINDABLE.len()],
+    resolved: [Option<usize>; BINDABLE.len()],
     /// Effective values the audio thread last used (the bound-row ghost).
-    eff: [f32; 5],
+    eff: [f32; BINDABLE.len()],
     /// Amplitude source. None = 1.0 (a drone by choice); bound but
     /// unresolvable = 0.0 (dead envelope = silence, never a wall).
     amp_src: Option<SourceAddr>,
@@ -238,13 +242,7 @@ impl SwarmState {
             velocity: 0.0,
             srcs: Default::default(),
             resolved: Default::default(),
-            eff: [
-                Param::Detune.default_value(),
-                Param::Cutoff.default_value(),
-                Param::Res.default_value(),
-                Param::Swell.default_value(),
-                Param::Level.default_value(),
-            ],
+            eff: BINDABLE.map(|p| p.default_value()),
             amp_src: None,
             notes_src: None,
             env_now: 0.0,
@@ -408,7 +406,8 @@ fn snapshot_params(s: &SwarmState) -> state::SwarmParams {
         cutoff_src: src(1),
         res_src: src(2),
         swell_src: src(3),
-        level_src: src(4),
+        glide_src: src(4),
+        level_src: src(5),
         amp_src: s.amp_src.as_ref().map(|a| a.to_string()),
         notes_src: s.notes_src.as_ref().map(|a| a.to_string()),
     }
@@ -451,6 +450,7 @@ fn apply_params(s: &mut SwarmState, p: &state::SwarmParams) {
         parse(&p.cutoff_src),
         parse(&p.res_src),
         parse(&p.swell_src),
+        parse(&p.glide_src),
         parse(&p.level_src),
     ];
     s.amp_src = parse(&p.amp_src);
@@ -588,7 +588,7 @@ fn audio_thread(state: Arc<Mutex<SwarmState>>, instance: usize) -> Result<()> {
                 s.effective(Param::Cutoff, bus),
                 s.effective(Param::Res, bus),
                 s.effective(Param::Swell, bus),
-                s.glide,
+                s.effective(Param::Glide, bus),
                 s.effective(Param::Level, bus),
                 s.freq,
                 s.gate,
@@ -601,7 +601,7 @@ fn audio_thread(state: Arc<Mutex<SwarmState>>, instance: usize) -> Result<()> {
                 },
                 s.amp_src.is_some(),
             );
-            s.eff = [eff.1, eff.2, eff.3, eff.4, eff.6];
+            s.eff = [eff.1, eff.2, eff.3, eff.4, eff.5, eff.6];
             eff
         };
 

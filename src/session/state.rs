@@ -681,6 +681,8 @@ pub struct SwarmParams {
     #[serde(default)]
     pub swell_src: Option<String>,
     #[serde(default)]
+    pub glide_src: Option<String>,
+    #[serde(default)]
     pub level_src: Option<String>,
     #[serde(default)]
     pub amp_src: Option<String>,

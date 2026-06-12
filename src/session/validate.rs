@@ -797,6 +797,7 @@ fn check_swarm(
         ("cutoff_src", &p.cutoff_src),
         ("res_src", &p.res_src),
         ("swell_src", &p.swell_src),
+        ("glide_src", &p.glide_src),
         ("level_src", &p.level_src),
         ("amp_src", &p.amp_src),
     ] {
