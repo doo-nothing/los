@@ -5,10 +5,17 @@ license = "AGPL-3.0-or-later"
 authors = ["doo-nothing / AU Supply"]
 edition = "2021"
 
+[features]
+default = ["au-api"]
+# the a-u.supply sample-browser network paths; without it the sampler
+# is local-cache-only (the API itself is private, key-gated)
+au-api = []
+
 [dependencies]
 hound = "3.5"
 serde = { version = "1", features = ["derive"] }
 serde_ignored = "0.1"
+serde_json = "1"
 toml = "0.8"
 anyhow = "1"
 cpal = "0.15"
