@@ -58,6 +58,7 @@ pub fn output_labels(module: &str) -> &'static [&'static str] {
         "tides" => &["o1", "o2", "o3", "o4"],
         "peaks" => &["ch1", "ch2"],
         "branches" => &["1a", "1b", "2a", "2b"],
+        "grids" => &["bd", "sd", "hh", "acc"],
         "delay" => &["in", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"],
         "filterbank" => &[
             "b1", "b2", "b3", "b4", "b5", "b6", "b7", "b8", "b9", "b10", "b11", "b12", "b13",
@@ -86,8 +87,14 @@ pub fn resolve(entries: &[ManifestEntry], addr: &SourceAddr) -> Option<usize> {
 /// For a `sequencer/N/tM` address, the track index its note events carry in
 /// their `source` field (notes routing). None for non-sequencer sources.
 pub fn note_source_track(addr: &SourceAddr) -> Option<u8> {
-    // branches re-emits notes on its four outputs, well above the
-    // sequencer band (see modules/branches.rs NOTE_SOURCE_BASE)
+    // grids emits drum notes at 160+, branches re-emits at 200+
+    // (see the NOTE_SOURCE_BASE consts in each module)
+    if addr.module == "grids" {
+        let off = ["bd", "sd", "hh"]
+            .iter()
+            .position(|l| *l == addr.output)?;
+        return Some((160 + addr.instance * 3 + off).min(255) as u8);
+    }
     if addr.module == "branches" {
         let off = output_labels("branches")
             .iter()

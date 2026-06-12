@@ -27,10 +27,9 @@ use std::path::Path;
 use crate::routing::{output_labels, SourceAddr};
 use crate::state::{
     DelayParams, DldParams, DpoParamsState, ElementsParams, EnvelopeParams, FilterbankParams,
-    LfoParams,
-    BranchesParams, MacroCmd, MixerParams, PeaksParams, RingsParams, SamplerParams,
-    ScopeParams, SequencerParams, SessionState, StepParam, TidesParams,
-    SwarmParams, TapeParams, TemplateParams, TrackMode, VoiceParams, WaspParams, STATE_FORMAT,
+    BranchesParams, GridsParams, LfoParams, MacroCmd, MixerParams, PeaksParams, RingsParams,
+    SamplerParams, ScopeParams, SequencerParams, SessionState, StepParam, SwarmParams,
+    TapeParams, TemplateParams, TidesParams, TrackMode, VoiceParams, WaspParams, STATE_FORMAT,
 };
 use crate::theory;
 
@@ -302,6 +301,11 @@ fn validate_session(st: &SessionState, r: &mut Report) {
             "branches" => {
                 if let Some(p) = decode::<BranchesParams>(value, &loc, r) {
                     check_branches(&p, &loc, &declared, r, &mut pending);
+                }
+            }
+            "grids" => {
+                if let Some(p) = decode::<GridsParams>(value, &loc, r) {
+                    check_grids(&p, &loc, &declared, r);
                 }
             }
             // No params structs: state is ephemeral or none.
@@ -1564,6 +1568,41 @@ fn check_branches(
     check_notes_src(&p.notes2_src, loc, declared, r, pending);
 }
 
+/// Grids (modules/grids): mode name, knob ranges, srcs.
+fn check_grids(p: &GridsParams, loc: &str, declared: &BTreeSet<(String, usize)>, r: &mut Report) {
+    if let Some(m) = p.mode.as_deref() {
+        if !["drums", "euclid"].contains(&m) {
+            r.error(loc, format!("mode {m:?} — drums or euclid"));
+        }
+    }
+    for (name, v) in [
+        ("x", p.x),
+        ("y", p.y),
+        ("chaos", p.chaos),
+        ("fill1", p.fill1),
+        ("fill2", p.fill2),
+        ("fill3", p.fill3),
+        ("len1", p.len1),
+        ("len2", p.len2),
+        ("len3", p.len3),
+    ] {
+        range01(v, name, loc, r);
+    }
+    for (field, src) in [
+        ("x_src", &p.x_src),
+        ("y_src", &p.y_src),
+        ("chaos_src", &p.chaos_src),
+        ("fill1_src", &p.fill1_src),
+        ("fill2_src", &p.fill2_src),
+        ("fill3_src", &p.fill3_src),
+        ("len1_src", &p.len1_src),
+        ("len2_src", &p.len2_src),
+        ("len3_src", &p.len3_src),
+    ] {
+        check_src(src, field, loc, declared, r);
+    }
+}
+
 /// Template (template.rs SHAPES): shape by name.
 fn check_template(
     p: &TemplateParams,
@@ -1615,8 +1654,8 @@ const AUDIO_MODULES: [&str; 14] =
     ["voice", "swarm", "tone", "template", "delay", "filterbank", "dld", "sampler", "wasp", "dpo", "elements", "rings", "tides", "peaks"];
 
 /// Canonical module names, for misspelled-pane suggestions.
-const MODULE_NAMES: [&str; 23] =
-    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements", "rings", "tides", "peaks", "branches"];
+const MODULE_NAMES: [&str; 24] =
+    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements", "rings", "tides", "peaks", "branches", "grids"];
 
 /// An optional `*_src` field: grammar, known output, declared instance.
 /// Returns the parsed address so callers can queue cross-module checks.
@@ -1704,6 +1743,13 @@ fn check_notes_src(
     let Some(addr) = check_src_str(s, "notes_src", loc, declared, r) else {
         return;
     };
+    // grids emits drum notes on bd/sd/hh
+    if addr.module == "grids" {
+        if !["bd", "sd", "hh"].contains(&addr.output.as_str()) {
+            r.error(loc, format!("notes_src \"{s}\": grids note outputs are bd, sd, hh"));
+        }
+        return;
+    }
     // branches re-emits note events on its four outputs
     if addr.module == "branches" {
         if !["1a", "1b", "2a", "2b"].contains(&addr.output.as_str()) {
@@ -1850,6 +1896,8 @@ const KNOWN_KEYS: &[&str] = &[
     "eq_mid", "euclidean_length", "euclidean_pulses", "euclidean_rotation", "fader", "fader_src",
     "fall", "fall_src", "fm", "fm_src", "format", "freeze", "freeze_src", "freq", "freq_src",
     "gain", "gate", "gate_mode", "gene", "gene_src", "glide", "glide_src", "groove", "hi_src",
+    "chaos", "chaos_src", "x_src", "y_src", "fill1", "fill2", "fill3", "fill1_src", "fill2_src",
+    "fill3_src", "len1", "len2", "len3", "len1_src", "len2_src", "len3_src",
     "humanize", "id",
     "input",
     "instance", "kind", "lane", "lane_len", "layout", "length", "level", "level_src", "lo_src",

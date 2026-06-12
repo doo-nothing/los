@@ -26,6 +26,7 @@ pub mod dpo;
 pub mod elements;
 pub mod envelope;
 pub mod filterbank;
+pub mod grids;
 pub mod lfo;
 pub mod mixer;
 pub mod peaks;

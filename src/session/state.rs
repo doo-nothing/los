@@ -834,6 +834,43 @@ pub struct BranchesParams {
     pub notes2_src: Option<String>,
 }
 
+/// Grids (modules/grids) — the MI topographic drum sequencer: emits
+/// kick/snare/hat notes on grids/N/{bd,sd,hh}, transport-clocked.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GridsParams {
+    #[serde(default)]
+    pub format: u32,
+    /// "drums" | "euclid"
+    pub mode: Option<String>,
+    pub x: Option<f32>,
+    pub y: Option<f32>,
+    pub chaos: Option<f32>,
+    pub fill1: Option<f32>,
+    pub fill2: Option<f32>,
+    pub fill3: Option<f32>,
+    pub len1: Option<f32>,
+    pub len2: Option<f32>,
+    pub len3: Option<f32>,
+    #[serde(default)]
+    pub x_src: Option<String>,
+    #[serde(default)]
+    pub y_src: Option<String>,
+    #[serde(default)]
+    pub chaos_src: Option<String>,
+    #[serde(default)]
+    pub fill1_src: Option<String>,
+    #[serde(default)]
+    pub fill2_src: Option<String>,
+    #[serde(default)]
+    pub fill3_src: Option<String>,
+    #[serde(default)]
+    pub len1_src: Option<String>,
+    #[serde(default)]
+    pub len2_src: Option<String>,
+    #[serde(default)]
+    pub len3_src: Option<String>,
+}
+
 /// The swarm voice (modules/swarm.rs) — the CS-80-flavored brass pad:
 /// chord by name ("min7"), the five knobs, glide, and the three kinds
 /// of binding (knob sources, amp, notes).
