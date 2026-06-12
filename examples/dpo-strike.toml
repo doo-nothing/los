@@ -1,0 +1,141 @@
+[meta]
+name = "dpo-strike"
+created = ""
+format = 2
+
+[[windows]]
+name = "modules"
+
+[[windows.panes]]
+module = "sequencer"
+instance = 0
+
+[windows.panes.patch_inline]
+bpm = 78.0
+playing = false
+lane = ["a"]
+lane_len = 8
+
+[[windows.panes.patch_inline.tracks]]
+length = 16
+scale = "minor"
+root = 48
+swing = 55
+humanize = 3.0
+steps = [
+  { active = true, note = 48, velocity = 92 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = true, note = 55, velocity = 70, delay = 30.0, delay_unit = "ms" },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = true, note = 51, velocity = 78 },
+  { active = false, note = 60, velocity = 80 },
+  { active = true, note = 48, velocity = 88 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = true, note = 58, velocity = 64, prob = 70 },
+  { active = true, note = 53, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = true, note = 50, velocity = 60, prob = 60 },
+  { active = false, note = 60, velocity = 80 },
+]
+
+[[windows.panes.patch_inline.tracks]]
+length = 16
+steps = [
+  { active = true, note = 60, velocity = 100 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = true, note = 60, velocity = 90, repeats = 2, repeat_prob = 70 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = true, note = 60, velocity = 100 },
+  { active = false, note = 60, velocity = 80 },
+  { active = true, note = 60, velocity = 70, prob = 60 },
+  { active = false, note = 60, velocity = 80 },
+  { active = true, note = 60, velocity = 95, repeats = 3, repeat_prob = 60 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+]
+
+[[windows.panes.patch_inline.macros]]
+id = "a"
+cmds = [
+  { set_bpm = { bpm = 78.0 } },
+]
+
+[[windows.panes]]
+module = "dpo"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+ratio = 2.01
+follow = 0.85
+index = 0.35
+fm_a = 0.4
+fm_b = 0.6
+mode = "lock"
+shape = 0.3
+angle = 0.2
+fold = 0.3
+mod_index = 0.15
+mix = 0.15
+level = 0.8
+strike_src = "sequencer/0/t2"
+amp_src = "envelope/0/ch1"
+notes_src = "sequencer/0/t1"
+
+[[windows.panes]]
+module = "envelope"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+[[windows.panes.patch_inline.channels]]
+rise = 0.18
+fall = 0.78
+shape = 0.5
+loop_mode = false
+gate_mode = false
+pluck = 0.3
+offset = 0.0
+attenuverter = 1.0
+trigger_src = "sequencer/0/t1"
+[[windows.panes.patch_inline.channels]]
+rise = 0.7
+fall = 0.7
+shape = 0.5
+loop_mode = true
+gate_mode = false
+pluck = 0.0
+offset = 0.2
+attenuverter = 0.25
+trigger_src = "off"
+
+[[windows.panes]]
+module = "wasp"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+input = "dpo/0"
+freq = 0.55
+res = 0.4
+mix = 0.0
+dirt = 0.45
+bp = 0.2
+dry = 0.35
+freq_src = "envelope/0/ch2"
+
+[[windows.panes]]
+module = "mixer"
+instance = 0
+
+[[windows.panes]]
+module = "scope"
+instance = 0

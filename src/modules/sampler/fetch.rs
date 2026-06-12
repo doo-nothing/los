@@ -146,7 +146,7 @@ mod api {
     /// Search one of the two pools. `raw = false` → the samples-bored
     /// one-shot index; `raw = true` → un-jobbed input items
     /// (`__inputs__`) with `media_type audio` — the long found reels.
-    pub fn search(query: &str, raw: bool, per_page: usize) -> Result<Vec<Hit>> {
+    pub fn search(query: &str, raw: bool, per_page: usize, page: usize) -> Result<Vec<Hit>> {
         let k = key().context("no AU_SUPPLY_KEY — local cache only")?;
         let filters = if raw {
             serde_json::json!({ "output_index": ["__inputs__"] })
@@ -158,6 +158,7 @@ mod api {
             "media_types": ["audio"],
             "filters": filters,
             "per_page": per_page,
+            "page": page.max(1),
         });
         let out = std::process::Command::new("curl")
             .args(["-s", "--max-time", "15", "-X", "POST"])
@@ -226,7 +227,7 @@ pub fn key() -> Option<String> {
 }
 
 #[cfg(not(feature = "au-api"))]
-pub fn search(_query: &str, _raw: bool, _per_page: usize) -> Result<Vec<Hit>> {
+pub fn search(_query: &str, _raw: bool, _per_page: usize, _page: usize) -> Result<Vec<Hit>> {
     anyhow::bail!("built without the au-api feature — local cache only")
 }
 

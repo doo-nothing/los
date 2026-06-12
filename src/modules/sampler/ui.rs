@@ -422,6 +422,7 @@ struct Browser {
     query: String,
     typing: bool,
     raw: bool,
+    page: usize,
     hits: Vec<Hit>,
     local: Vec<(std::path::PathBuf, String)>,
     sel: usize,
@@ -687,7 +688,7 @@ fn draw_ui(
                     if b.busy {
                         "  …"
                     } else {
-                        "  (Enter search · Tab drums/raw · Esc close)"
+                        "  (Enter search · h/l pages · Tab drums/raw · Esc close)"
                     },
                     theme::dim(),
                 ),
@@ -853,7 +854,11 @@ pub fn run(instance: usize) -> Result<()> {
                     browser.hits = hits;
                     browser.sel = 0;
                     browser.busy = false;
-                    browser.status = format!("{} hits", browser.hits.len());
+                    browser.status = format!(
+                        "page {} · {} hits (h/l pages)",
+                        browser.page,
+                        browser.hits.len()
+                    );
                 }
                 BrowseMsg::Fetched(slot, path, name) => {
                     browser.busy = false;
@@ -917,13 +922,15 @@ pub fn run(instance: usize) -> Result<()> {
                     }
                     KeyCode::Enter if browser.typing => {
                         browser.typing = false;
+                        browser.page = 1;
                         if browser.online() {
                             browser.busy = true;
                             let q = browser.query.clone();
                             let raw = browser.raw;
+                            let page = browser.page;
                             let txc = tx.clone();
                             thread::spawn(move || {
-                                let msg = match fetch::search(&q, raw, 24) {
+                                let msg = match fetch::search(&q, raw, 24, page) {
                                     Ok(hits) => BrowseMsg::Results(hits),
                                     Err(e) => BrowseMsg::Error(e.to_string()),
                                 };
@@ -937,6 +944,30 @@ pub fn run(instance: usize) -> Result<()> {
                     KeyCode::Char('/') => {
                         browser.typing = true;
                         browser.query.clear();
+                    }
+                    KeyCode::Char(c @ ('h' | 'l')) if !browser.typing && browser.online() => {
+                        // page through the index: l = next page, h = back
+                        let next = if c == 'l' {
+                            browser.page + 1
+                        } else if browser.page > 1 {
+                            browser.page - 1
+                        } else {
+                            1
+                        };
+                        if next != browser.page && !browser.busy {
+                            browser.page = next;
+                            browser.busy = true;
+                            let q = browser.query.clone();
+                            let raw = browser.raw;
+                            let txc = tx.clone();
+                            thread::spawn(move || {
+                                let msg = match fetch::search(&q, raw, 24, next) {
+                                    Ok(hits) => BrowseMsg::Results(hits),
+                                    Err(e) => BrowseMsg::Error(e.to_string()),
+                                };
+                                let _ = txc.send(msg);
+                            });
+                        }
                     }
                     KeyCode::Char('j') | KeyCode::Down => {
                         let n = browser.rows().len();
