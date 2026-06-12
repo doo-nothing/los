@@ -8,7 +8,7 @@
 
 use anyhow::Result;
 use los::{
-    badge, branches, conductor, delay, dld, dpo, elements, envelope, filterbank, grids, lfo, mixer, peaks, rings,
+    badge, branches, conductor, delay, dld, dpo, edges, elements, envelope, filterbank, grids, lfo, mixer, peaks, rings,
     sampler, tides,
     scope,
     sequencer,
@@ -110,6 +110,7 @@ fn usage() {
     eprintln!("  peaks              Dual function gen (Mutable Instruments Peaks): 808s, envs");
     eprintln!("  branches           Bernoulli note router (Mutable Instruments Branches)");
     eprintln!("  grids              Topographic drum sequencer (Mutable Instruments Grids)");
+    eprintln!("  edges              Quad chiptune voice (Mutable Instruments Edges): NES set");
     eprintln!("  badge              Los faceplate (beat-synced animation, session info)");
     eprintln!();
     eprintln!("Aliases:");
@@ -146,6 +147,7 @@ fn dispatch_module(name: &str, instance: usize) -> Result<()> {
         "peaks" => peaks::run(instance),
         "branches" => branches::run(instance),
         "grids" => grids::run(instance),
+        "edges" => edges::run(instance),
         "badge" => badge::run(instance),
         other => anyhow::bail!("unknown module: {other}"),
     }

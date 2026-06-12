@@ -871,6 +871,59 @@ pub struct GridsParams {
     pub len3_src: Option<String>,
 }
 
+/// Edges (modules/edges) — the MI quad chiptune generator: four
+/// channels, square/NES shapes, per-channel note tracks.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EdgesParams {
+    #[serde(default)]
+    pub format: u32,
+    #[serde(default)]
+    pub shapes: Vec<String>,
+    #[serde(default)]
+    pub pw: Vec<f32>,
+    #[serde(default)]
+    pub xpose: Vec<f32>,
+    #[serde(default)]
+    pub lvl: Vec<f32>,
+    pub level: Option<f32>,
+    #[serde(default)]
+    pub pw1_src: Option<String>,
+    #[serde(default)]
+    pub pw2_src: Option<String>,
+    #[serde(default)]
+    pub pw3_src: Option<String>,
+    #[serde(default)]
+    pub pw4_src: Option<String>,
+    #[serde(default)]
+    pub xpose1_src: Option<String>,
+    #[serde(default)]
+    pub xpose2_src: Option<String>,
+    #[serde(default)]
+    pub xpose3_src: Option<String>,
+    #[serde(default)]
+    pub xpose4_src: Option<String>,
+    #[serde(default)]
+    pub lvl1_src: Option<String>,
+    #[serde(default)]
+    pub lvl2_src: Option<String>,
+    #[serde(default)]
+    pub lvl3_src: Option<String>,
+    #[serde(default)]
+    pub lvl4_src: Option<String>,
+    #[serde(default)]
+    pub level_src: Option<String>,
+    #[serde(default)]
+    pub amp_src: Option<String>,
+    #[serde(default)]
+    pub notes1_src: Option<String>,
+    #[serde(default)]
+    pub notes2_src: Option<String>,
+    #[serde(default)]
+    pub notes3_src: Option<String>,
+    #[serde(default)]
+    pub notes4_src: Option<String>,
+}
+
 /// The swarm voice (modules/swarm.rs) — the CS-80-flavored brass pad:
 /// chord by name ("min7"), the five knobs, glide, and the three kinds
 /// of binding (knob sources, amp, notes).

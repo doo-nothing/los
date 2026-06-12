@@ -647,7 +647,7 @@ fn mixer_thread(
                 // should have to ask for.
                 let (sa, sb) = match entry.module_name.as_str() {
                     "voice" | "tone" | "template" | "swarm" | "elements" | "rings"
-                    | "dpo" | "sampler" | "peaks" => (0.4, 0.3),
+                    | "dpo" | "sampler" | "peaks" | "edges" => (0.4, 0.3),
                     "filterbank" => (0.3, 0.0),
                     _ => (0.0, 0.0),
                 };
