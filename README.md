@@ -147,4 +147,8 @@ Rust, [ratatui](https://ratatui.rs) + crossterm + cpal. macOS today
 the GIF/mp4 above ([vhs](https://github.com/charmbracelet/vhs) + ffmpeg);
 `just demo-state NAME` records from your own saved session instead.
 `los record 16 take.wav` bounces the master mix of any running session.
+`los check song.toml` validates a state file offline — every problem at
+once (typo'd keys, bad mod-source addresses, out-of-range params,
+undefined macros in the lane), no session needed; `los load` runs the
+same gate before it touches tmux.
 

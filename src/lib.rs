@@ -34,7 +34,7 @@ pub use modules::{
     badge, conductor, delay, envelope, filterbank, mixer, scope, sequencer, swarm, tape, template,
     tone, voice,
 };
-pub use session::{layout, state, tmux};
+pub use session::{layout, state, tmux, validate};
 pub use ui::{excmd, keys, picker, theme, undo};
 
 pub const NUM_TRACKS: usize = 8;
