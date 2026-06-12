@@ -406,6 +406,7 @@ impl CosineOscillator {
         self.y0 = 0.5;
     }
 
+    #[allow(clippy::should_implement_trait)] // stmlib's name; not an Iterator
     #[inline]
     pub fn next(&mut self) -> f32 {
         let temp = self.y0;
