@@ -61,6 +61,9 @@ fn usage() {
     eprintln!("  los load <state-file.toml>    Load a saved session state");
     eprintln!("  los <state-file.toml>         Same as 'load'");
     eprintln!("  los check <state-file.toml>   Validate a state file (no session needed)");
+    eprintln!(
+        "  los render <song> <out.wav>   One-shot: spawn the song detached, record, tear down"
+    );
     eprintln!("  los audit <wav> [--song <file>]   Analyze a render: RMS arc, peaks, per-section dynamics");
     eprintln!("  los ctl [play|stop|toggle|status]  Control the global transport");
     eprintln!("  los add <module> [instance]   Spawn a module in the running session");
@@ -153,6 +156,42 @@ fn main() -> Result<()> {
                     anyhow::bail!("Usage: los load <state-file.toml>");
                 }
                 conductor::load_session(&path)
+            }
+            // Headless one-shot render: spawn the song detached, record
+            // the master mix from bar 0, tear the session down.
+            "render" => {
+                let mut song: Option<String> = None;
+                let mut out: Option<String> = None;
+                let mut secs: Option<f32> = None;
+                let mut tail: f32 = 3.0;
+                let mut rest = args[2..].iter();
+                while let Some(arg) = rest.next() {
+                    match arg.as_str() {
+                        "--secs" => {
+                            let v = rest.next().ok_or_else(|| {
+                                anyhow::anyhow!("--secs needs a value (seconds)")
+                            })?;
+                            secs = Some(v.parse().map_err(|_| {
+                                anyhow::anyhow!("--secs {v} is not a number")
+                            })?);
+                        }
+                        "--tail" => {
+                            let v = rest.next().ok_or_else(|| {
+                                anyhow::anyhow!("--tail needs a value (seconds)")
+                            })?;
+                            tail = v.parse().map_err(|_| {
+                                anyhow::anyhow!("--tail {v} is not a number")
+                            })?;
+                        }
+                        other if song.is_none() => song = Some(other.to_string()),
+                        other if out.is_none() => out = Some(other.to_string()),
+                        other => anyhow::bail!("unexpected argument: {other}"),
+                    }
+                }
+                let usage = "Usage: los render <song.toml> <out.wav> [--secs N] [--tail S]";
+                let song = song.ok_or_else(|| anyhow::anyhow!(usage))?;
+                let out = out.ok_or_else(|| anyhow::anyhow!(usage))?;
+                conductor::render(&song, &out, secs, tail)
             }
             // Offline validation: every problem in the file at once, no
             // session needed. Exit 0 = loadable (warnings allowed).

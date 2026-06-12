@@ -83,3 +83,10 @@ demo-state state="demo": build && _demo-post
     LOS_DEMO_STATE={{state}} vhs docs/demo-state.tape
     -tmux kill-session -t los 2>/dev/null
     wait
+
+# headless render smoke test (~35 s, realtime + audible): renders the
+# annotated example song and audits the result. needs tmux + an audio
+# device — manual verification, not CI.
+render-smoke: build
+    target/release/los render examples/first-song.toml /tmp/los-render-smoke.wav
+    target/release/los audit /tmp/los-render-smoke.wav --song examples/first-song.toml
