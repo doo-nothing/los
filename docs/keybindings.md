@@ -291,6 +291,19 @@ strip leaves the console. Fx-into-fx chains work the same way. Master
 sends default to 0 — the master already contains the returns, so
 raising them is deliberate feedback.
 
+### DLD
+The dual looping delay (after the 4ms DLD —
+[the design doc](plans/dld.md)). Vertical rows: channel A (`time` ·
+`sw` /8·=·+16 · `fdbk` 0–110% · `feed` · `mix` · `hold` · `rev` ·
+`win`), channel B (same), then `ping` (0 = transport beat, else free
+ms) · `input` · `mono`. `j/k` rows · `h/l` adjust (`H/L` coarse) ·
+`X` clears a channel's tape (on a global row: both) · `@` binds —
+knobs take mod sources, `hold`/`rev` take *triggers* (a sequencer
+track, an envelope `eoc`), the input row picks the audio source ·
+`x` unbinds · `:set a.time 4`, `:set b.sw +16`, `:set ping 350`,
+`:set input voice/0`. Loop clocks publish as `dld/N/clk·lpa·lpb`.
+All ✅
+
 ### Tape
 The record window's deck ([the design doc](plans/tape-deck.md)): six
 tracks on a three-minute tape, recording **the mix** (the mixer's print

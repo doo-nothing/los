@@ -417,6 +417,46 @@ pub struct TemplateParams {
     pub level_src: Option<String>,
 }
 
+/// One DLD channel (modules/dld) — the 4ms-style looping delay.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DldChannelParams {
+    pub time: Option<f32>,
+    /// Time switch by name: "/8", "=", "+16".
+    pub switch: Option<String>,
+    pub fdbk: Option<f32>,
+    pub feed: Option<f32>,
+    pub mix: Option<f32>,
+    pub hold: Option<bool>,
+    pub rev: Option<bool>,
+    pub win: Option<f32>,
+    #[serde(default)]
+    pub time_src: Option<String>,
+    #[serde(default)]
+    pub fdbk_src: Option<String>,
+    #[serde(default)]
+    pub feed_src: Option<String>,
+    #[serde(default)]
+    pub win_src: Option<String>,
+    #[serde(default)]
+    pub hold_src: Option<String>,
+    #[serde(default)]
+    pub rev_src: Option<String>,
+}
+
+/// The DLD (modules/dld) — two channels around one Ping.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DldParams {
+    #[serde(default)]
+    pub format: u32,
+    /// 0 = Ping follows the transport beat; >0 = free Ping in ms.
+    pub ping_ms: Option<f32>,
+    pub mono: Option<bool>,
+    #[serde(default)]
+    pub input: Option<String>,
+    pub a: Option<DldChannelParams>,
+    pub b: Option<DldChannelParams>,
+}
+
 /// The swarm voice (modules/swarm.rs) — the CS-80-flavored brass pad:
 /// chord by name ("min7"), the five knobs, glide, and the three kinds
 /// of binding (knob sources, amp, notes).

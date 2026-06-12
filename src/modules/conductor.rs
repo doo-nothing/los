@@ -354,6 +354,7 @@ pub fn canonical_module(name: &str) -> Option<&'static str> {
         "filterbank" | "bank" | "296" | "296e" => "filterbank",
         "tape" | "recorder" | "4track" => "tape",
         "swarm" | "brass" | "cs80" => "swarm",
+        "dld" | "looper" | "dual" => "dld",
         "conductor" => "conductor",
         _ => return None,
     })
@@ -372,6 +373,7 @@ pub const ADDABLE_MODULES: &[&str] = &[
     "filterbank",
     "tape",
     "swarm",
+    "dld",
 ];
 
 /// Spawn a new module instance in a fresh pane of the modules window.
