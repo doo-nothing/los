@@ -128,6 +128,8 @@ struct ChannelParams {
     fall_src: Option<SourceAddr>,
     shape_src: Option<SourceAddr>,
     atten_src: Option<SourceAddr>,
+    offset_src: Option<SourceAddr>,
+    pluck_src: Option<SourceAddr>,
 }
 
 impl Default for ChannelParams {
@@ -147,6 +149,8 @@ impl Default for ChannelParams {
             fall_src: None,
             shape_src: None,
             atten_src: None,
+            offset_src: None,
+            pluck_src: None,
         }
     }
 }
@@ -365,13 +369,15 @@ impl crate::undo::ParamUndo for EnvelopeState {
             5 => Some(V::Bool(p.loop_mode)),
             6 => Some(V::F32(p.pluck)),
             7 => Some(V::Bool(p.gate_mode)),
-            r if (BIND_OFF..BIND_OFF + 6).contains(&r) => {
+            r if (BIND_OFF..BIND_OFF + 8).contains(&r) => {
                 let b = match r - BIND_OFF {
                     0 => p.rise_src.as_ref().map(|a| a.to_string()),
                     1 => p.fall_src.as_ref().map(|a| a.to_string()),
                     2 => p.shape_src.as_ref().map(|a| a.to_string()),
                     3 => p.atten_src.as_ref().map(|a| a.to_string()),
                     4 => p.signal_src.as_ref().map(|a| a.to_string()),
+                    6 => p.offset_src.as_ref().map(|a| a.to_string()),
+                    7 => p.pluck_src.as_ref().map(|a| a.to_string()),
                     _ => p.trigger.to_param(),
                 };
                 Some(V::Src(b))
@@ -395,7 +401,7 @@ impl crate::undo::ParamUndo for EnvelopeState {
             (5, V::Bool(v)) => p.loop_mode = v,
             (6, V::F32(v)) => p.pluck = v,
             (7, V::Bool(v)) => p.gate_mode = v,
-            (r, V::Src(a)) if (BIND_OFF..BIND_OFF + 6).contains(&r) => {
+            (r, V::Src(a)) if (BIND_OFF..BIND_OFF + 8).contains(&r) => {
                 if r - BIND_OFF == 5 {
                     p.trigger = Trigger::from_param(a.as_deref());
                 } else {
@@ -405,6 +411,8 @@ impl crate::undo::ParamUndo for EnvelopeState {
                         1 => p.fall_src = addr,
                         2 => p.shape_src = addr,
                         3 => p.atten_src = addr,
+                        6 => p.offset_src = addr,
+                        7 => p.pluck_src = addr,
                         _ => p.signal_src = addr,
                     }
                 }
@@ -463,6 +471,8 @@ fn snapshot_params(s: &EnvelopeState) -> state::EnvelopeParams {
                 fall_src: p.fall_src.as_ref().map(|a| a.to_string()),
                 shape_src: p.shape_src.as_ref().map(|a| a.to_string()),
                 atten_src: p.atten_src.as_ref().map(|a| a.to_string()),
+                offset_src: p.offset_src.as_ref().map(|a| a.to_string()),
+                pluck_src: p.pluck_src.as_ref().map(|a| a.to_string()),
             })
             .collect(),
         logic_outputs: state::LogicOutputConfig {
@@ -499,6 +509,8 @@ fn apply_params(s: &mut EnvelopeState, params: &state::EnvelopeParams) {
             s.params[i].fall_src = ch.fall_src.as_deref().and_then(SourceAddr::parse);
             s.params[i].shape_src = ch.shape_src.as_deref().and_then(SourceAddr::parse);
             s.params[i].atten_src = ch.atten_src.as_deref().and_then(SourceAddr::parse);
+            s.params[i].offset_src = ch.offset_src.as_deref().and_then(SourceAddr::parse);
+            s.params[i].pluck_src = ch.pluck_src.as_deref().and_then(SourceAddr::parse);
         }
     }
 }
@@ -519,7 +531,7 @@ enum RTrig {
 #[derive(Clone, Copy, Default)]
 struct ResolvedChannel {
     trig: Option<RTrig>, // None until first refresh
-    mods: [Option<usize>; 4],
+    mods: [Option<usize>; 6],
     signal: Option<usize>,
 }
 
@@ -699,6 +711,12 @@ fn env_thread(
                     p.atten_src
                         .as_ref()
                         .and_then(|a| routing::resolve(&entries, a)),
+                    p.offset_src
+                        .as_ref()
+                        .and_then(|a| routing::resolve(&entries, a)),
+                    p.pluck_src
+                        .as_ref()
+                        .and_then(|a| routing::resolve(&entries, a)),
                 ];
                 r.signal = p
                     .signal_src
@@ -811,13 +829,21 @@ fn env_thread(
             let att = chan_val(r.mods[3])
                 .map(|v| v.clamp(-1.0, 1.0))
                 .unwrap_or(params.attenuverter);
+            #[allow(clippy::manual_clamp)] // NaN must die, clamp(NaN)=NaN
+            let off = chan_val(r.mods[4])
+                .map(|v| v.max(-1.0).min(1.0))
+                .unwrap_or(params.offset);
+            #[allow(clippy::manual_clamp)]
+            let plk = chan_val(r.mods[5])
+                .map(|v| v.max(0.0).min(1.0))
+                .unwrap_or(params.pluck);
 
             if should_release && ch.stage != Stage::Off && ch.stage != Stage::Fall {
                 // fall FROM the current level too: the non-pluck fall
                 // curve is 1−vari(phase), so an early release mid-rise
                 // used to jump up to 1.0 before falling
                 ch.stage = Stage::Fall;
-                ch.phase = if params.pluck > 0.0 {
+                ch.phase = if plk > 0.0 {
                     0.0 // pluck init captures ch.output itself
                 } else {
                     vari_inverse(1.0 - ch.output, sp)
@@ -854,7 +880,7 @@ fn env_thread(
                 shape: sp,
                 loop_mode: params.loop_mode,
                 gate_mode: params.gate_mode,
-                pluck: params.pluck,
+                pluck: plk,
             };
             for frame in 0..BLOCK_SIZE {
                 if let Some(target) = signal_target {
@@ -875,7 +901,7 @@ fn env_thread(
                 audio_buf[frame * 2 + 1] += a;
             }
 
-            ch_final[i] = (ch.output * att + params.offset).clamp(-1.0, 1.0);
+            ch_final[i] = (ch.output * att + off).clamp(-1.0, 1.0);
         }
 
         // Buses + gates
@@ -962,7 +988,7 @@ fn draw_ui(
     show_help: bool,
     overlay: Option<&str>,
     picker: Option<(Vec<String>, usize)>,
-    ghosts: &[Option<f32>; 4],
+    ghosts: &[Option<f32>; 6],
     entries: &[crate::shm::ManifestEntry],
     picker_colors: &[Option<ratatui::style::Color>],
     instance: usize,
@@ -1125,16 +1151,16 @@ fn draw_ui(
                 "offs",
                 bi(p.offset),
                 format!("{:+.2}", p.offset),
-                None,
-                None,
+                ghosts[4].map(bi),
+                Some(&p.offset_src),
             ),
             (
                 ROW_PLUCK,
                 "plck",
                 p.pluck,
                 format!("{:.2}", p.pluck),
-                None,
-                None,
+                ghosts[5],
+                Some(&p.pluck_src),
             ),
         ];
         for (row, name, set, disp, ghost, src) in rows {
@@ -1359,6 +1385,8 @@ pub fn run(instance: usize) -> Result<()> {
             live(&cp.fall_src),
             live(&cp.shape_src),
             live(&cp.atten_src),
+            live(&cp.offset_src),
+            live(&cp.pluck_src),
         ];
         let (bpm, playing) = transport_ui
             .as_ref()
@@ -1477,10 +1505,11 @@ pub fn run(instance: usize) -> Result<()> {
                     if let Some(value) = chosen {
                         use crate::undo::{ParamUndo, ParamValue};
                         let mut s = state.lock().unwrap();
-                        let slot = if selected <= 3 {
-                            s.current_channel * CH_SLOT_STRIDE + BIND_OFF + selected
-                        } else {
-                            row_slot(s.current_channel, selected)
+                        let slot = match selected {
+                            0..=3 => s.current_channel * CH_SLOT_STRIDE + BIND_OFF + selected,
+                            4 => s.current_channel * CH_SLOT_STRIDE + BIND_OFF + 6,
+                            ROW_PLUCK => s.current_channel * CH_SLOT_STRIDE + BIND_OFF + 7,
+                            _ => row_slot(s.current_channel, selected),
                         };
                         let old = s.get_param(slot);
                         s.set_param(slot, ParamValue::Src(value));
@@ -1791,13 +1820,14 @@ pub fn run(instance: usize) -> Result<()> {
                                     special,
                                 );
                             }
-                            4 | ROW_PLUCK => {} // offset/pluck have no binding
                             _ => {
                                 let current = match selected {
                                     0 => s.params[ch].rise_src.clone(),
                                     1 => s.params[ch].fall_src.clone(),
                                     2 => s.params[ch].shape_src.clone(),
                                     3 => s.params[ch].atten_src.clone(),
+                                    4 => s.params[ch].offset_src.clone(),
+                                    ROW_PLUCK => s.params[ch].pluck_src.clone(),
                                     _ => s.params[ch].signal_src.clone(),
                                 };
                                 drop(s);

@@ -873,6 +873,10 @@ pub struct EnvelopeChannelParams {
     pub shape_src: Option<String>,
     #[serde(default)]
     pub atten_src: Option<String>,
+    #[serde(default)]
+    pub offset_src: Option<String>,
+    #[serde(default)]
+    pub pluck_src: Option<String>,
 }
 
 impl Default for EnvelopeChannelParams {
@@ -892,6 +896,8 @@ impl Default for EnvelopeChannelParams {
             fall_src: None,
             shape_src: None,
             atten_src: None,
+            offset_src: None,
+            pluck_src: None,
         }
     }
 }
