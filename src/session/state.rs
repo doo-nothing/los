@@ -493,6 +493,10 @@ pub struct SamplerParams {
     #[serde(default)]
     pub amp_src: Option<String>,
     #[serde(default)]
+    pub start_src: Option<String>,
+    #[serde(default)]
+    pub len_src: Option<String>,
+    #[serde(default)]
     pub pitch_src: Option<String>,
     #[serde(default)]
     pub speed_src: Option<String>,
@@ -500,6 +504,10 @@ pub struct SamplerParams {
     pub gene_src: Option<String>,
     #[serde(default)]
     pub slide_src: Option<String>,
+    #[serde(default)]
+    pub atk_src: Option<String>,
+    #[serde(default)]
+    pub dec_src: Option<String>,
     #[serde(default)]
     pub level_src: Option<String>,
     #[serde(default)]
