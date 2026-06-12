@@ -33,6 +33,7 @@ pub mod scope;
 pub mod wasp;
 pub mod sequencer;
 pub mod tape;
+pub mod tides;
 pub mod swarm;
 pub mod template;
 pub mod tone;
