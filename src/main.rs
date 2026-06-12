@@ -8,7 +8,8 @@
 
 use anyhow::Result;
 use los::{
-    badge, conductor, delay, dld, envelope, filterbank, mixer, scope, sequencer, shm, state,
+    badge, conductor, delay, dld, envelope, filterbank, mixer, sampler, scope, sequencer, shm,
+    state,
     swarm,
     tape, template, tone, voice,
 };
@@ -73,6 +74,9 @@ fn usage() {
         "  los relayout                  Re-apply the house layout sizes (runs on client resize)"
     );
     eprintln!(
+        "  los samples pull <q> [--raw]  Prefetch a-u.supply samples into the cache (ls lists)"
+    );
+    eprintln!(
         "  los record <secs> <out.wav>   Tape out: record the master mix of the running session"
     );
     eprintln!("  los --help                    Show this help");
@@ -91,6 +95,7 @@ fn usage() {
     eprintln!("  tape               6-track tape deck (record window; Tascam x OP-1)");
     eprintln!("  swarm              CS-80-ish brass voice: 7 detuned saws, ladder, chords");
     eprintln!("  dld                Dual looping delay (4ms DLD): clean, clock-locked, holds");
+    eprintln!("  sampler            Reels from a-u.supply + Morphagene-ish designer, kit mode");
     eprintln!("  badge              Los faceplate (beat-synced animation, session info)");
     eprintln!();
     eprintln!("Aliases:");
@@ -117,6 +122,7 @@ fn dispatch_module(name: &str, instance: usize) -> Result<()> {
         "tape" => tape::run(instance),
         "swarm" => swarm::run(instance),
         "dld" => dld::run(instance),
+        "sampler" => sampler::run(instance),
         "badge" => badge::run(instance),
         other => anyhow::bail!("unknown module: {other}"),
     }
@@ -269,6 +275,52 @@ fn main() -> Result<()> {
                 )
             }
             "ctl" => ctl(args.get(2).map(|s| s.as_str()).unwrap_or("toggle")),
+            // Sample cache tooling: `los samples pull <query> [--raw] [--n N]`
+            // prefetches from a-u.supply; `los samples ls` lists the cache.
+            "samples" => {
+                let sub = args.get(2).map(|s| s.as_str()).unwrap_or("ls");
+                match sub {
+                    "pull" => {
+                        let raw = args.iter().any(|a| a == "--raw");
+                        let n: usize = args
+                            .iter()
+                            .position(|a| a == "--n")
+                            .and_then(|i| args.get(i + 1))
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(8);
+                        let query = args
+                            .iter()
+                            .skip(3)
+                            .filter(|a| !a.starts_with("--"))
+                            .filter(|a| {
+                                args.iter()
+                                    .position(|x| x == *a)
+                                    .map(|i| args.get(i.wrapping_sub(1)).map(|p| p != "--n").unwrap_or(true))
+                                    .unwrap_or(true)
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        let hits = sampler::fetch::search(&query, raw, n)?;
+                        anyhow::ensure!(!hits.is_empty(), "no hits for {query:?}");
+                        for h in &hits {
+                            match sampler::fetch::fetch(h) {
+                                Ok(p) => println!("  ✓ {}  →  {}", h.filename, p.display()),
+                                Err(e) => println!("  ✗ {}: {}", h.filename, e),
+                            }
+                        }
+                        Ok(())
+                    }
+                    _ => {
+                        let items = sampler::fetch::list_cache();
+                        println!("{} cached in {}", items.len(), sampler::fetch::cache_dir().display());
+                        for (p, name) in items {
+                            println!("  {}  ({})", name, p.file_name().unwrap_or_default().to_string_lossy());
+                        }
+                        Ok(())
+                    }
+                }
+            }
             // Debug tap: watch live note events (with their source bytes)
             // and the sequencer's modbus channels for a few seconds —
             // `los tap [secs]`. Read-only; safe against a running session.

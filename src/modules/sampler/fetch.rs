@@ -73,7 +73,7 @@ pub fn list_cache() -> Vec<(PathBuf, String)> {
             }
         }
     }
-    out.sort_by(|a, b| b.2.cmp(&a.2));
+    out.sort_by_key(|e| std::cmp::Reverse(e.2));
     out.into_iter().map(|(p, n, _)| (p, n)).collect()
 }
 
@@ -95,8 +95,9 @@ pub fn load_reel(path: &Path, rate: f32, max_secs: f32) -> Result<super::engine:
     let status = std::process::Command::new("afconvert")
         .arg(path)
         .arg(&tmp)
-        .args(["-d", "LEI16", "-f", "WAVE", "-c", "1", "--sample-rate"])
-        .arg(format!("{}", rate as u32))
+        .args(["-f", "WAVE", "-c", "1"])
+        .arg("-d")
+        .arg(format!("LEI16@{}", rate as u32))
         .status()
         .context("running afconvert (macOS audio converter)")?;
     anyhow::ensure!(status.success(), "afconvert failed for {}", path.display());
@@ -203,7 +204,7 @@ mod api {
         let conv = std::process::Command::new("afconvert")
             .arg(&raw)
             .arg(&wav)
-            .args(["-d", "LEI16", "-f", "WAVE", "-c", "1", "--sample-rate", "48000"])
+            .args(["-f", "WAVE", "-c", "1", "-d", "LEI16@48000"])
             .status()
             .context("running afconvert")?;
         let _ = std::fs::remove_file(&raw);
