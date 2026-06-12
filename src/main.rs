@@ -148,6 +148,9 @@ fn main() -> Result<()> {
                     }
                 }
                 eprintln!("[los] fresh session (saved states untouched)");
+                // a SIGHUP'd previous session leaves stale control-plane
+                // SHM (manifest/modbus/events/transport) — start clean
+                shm::unlink_control_plane();
                 conductor::create_session()
             }
             "load" => {

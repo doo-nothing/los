@@ -1280,6 +1280,31 @@ pub const MODBUS_CHANNELS: usize = MODBUS_NUM_CHANNELS;
 /// One documented scheme instead of per-module arithmetic — a module that
 /// reconnects MUST use the same slot it started with or it steals another
 /// module's events.
+/// Unlink the four control-plane SHM objects (manifest, modbus, event
+/// ring, transport) so the next session boots from nothing.
+///
+/// A session killed by `tmux kill-session` dies by SIGHUP — Drop never
+/// runs, the objects persist, and the next session *opens* them
+/// instead of creating: it inherits a part-spent modbus bump allocator
+/// (which never reclaims), stale event cursors, and a foreign clock.
+/// One inherited allocator at 110/128 made every module of the next
+/// song fail registration — a fully silent render with a healthy-
+/// looking mixer. Call this only when no session is running; live
+/// processes keep their mappings (mmap survives unlink) and simply
+/// die with the old world.
+pub fn unlink_control_plane() {
+    for name in [
+        SHM_MANIFEST_NAME,
+        SHM_MODBUS_NAME,
+        SHM_EVENTS_NAME,
+        SHM_TRANSPORT_NAME,
+    ] {
+        if let Ok(cname) = CString::new(name) {
+            unsafe { libc::shm_unlink(cname.as_ptr()) };
+        }
+    }
+}
+
 pub fn consumer_id(module: &str, instance: usize) -> usize {
     match module {
         "voice" => instance.min(7),
