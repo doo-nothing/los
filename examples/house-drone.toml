@@ -1,0 +1,2156 @@
+# The house drone — the patch a fresh `los new` session seeds, as a
+# loadable song file. ~7.4 minutes: three sequencer tracks (melody with
+# five pattern slots, a drunk modulation walk, polymetric bass), eight
+# section macros (a–h) walked by a 128-bar macro lane with tempo moves,
+# voices into a tap delay (send A) and a 296-style filterbank (send B).
+#
+# GENERATED from house_patch_params() in src/modules/conductor.rs —
+# edit there, then: cargo test regen_house_example -- --ignored
+#
+# Play it:    los load examples/house-drone.toml
+# Check it:   los check examples/house-drone.toml
+
+[meta]
+created = ""
+format = 2
+name = "house-drone"
+
+[tmux]
+active_window = ""
+session_name = "los"
+window_size = "largest"
+
+[[windows]]
+active_pane = 0
+layout = ""
+name = "modules"
+
+[[windows.panes]]
+instance = 0
+module = "sequencer"
+
+[windows.panes.patch_inline]
+bpm = 74.0
+lane = [
+    "a",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "b",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "c",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "d",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "e",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "a",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "f",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "h",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "d",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "g",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+]
+lane_len = 128
+playing = true
+steps = []
+
+[[windows.panes.patch_inline.macros]]
+id = "a"
+quant = "bar"
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.switch_pattern]
+slot = 0
+track = 0
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.switch_pattern]
+slot = 0
+track = 2
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.set_mute]
+muted = false
+track = 0
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.set_mute]
+muted = false
+track = 2
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.set_cycle]
+mode = "pingpong"
+track = 2
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.set_bpm]
+bpm = 74.0
+
+[[windows.panes.patch_inline.macros]]
+id = "b"
+quant = "bar"
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.switch_pattern]
+slot = 1
+track = 0
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.set_mute]
+muted = false
+track = 0
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.set_bpm]
+bpm = 78.0
+
+[[windows.panes.patch_inline.macros]]
+id = "c"
+quant = "bar"
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.switch_pattern]
+slot = 2
+track = 0
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.set_mute]
+muted = false
+track = 0
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.set_cycle]
+mode = "reverse"
+track = 2
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.set_bpm]
+bpm = 74.0
+
+[[windows.panes.patch_inline.macros]]
+id = "d"
+quant = "bar"
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.switch_pattern]
+slot = 3
+track = 0
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.set_mute]
+muted = false
+track = 0
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.set_bpm]
+bpm = 70.0
+
+[[windows.panes.patch_inline.macros]]
+id = "e"
+quant = "bar"
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.switch_pattern]
+slot = 0
+track = 2
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.set_mute]
+muted = true
+track = 0
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.set_mute]
+muted = false
+track = 2
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.set_cycle]
+mode = "forward"
+track = 2
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.set_bpm]
+bpm = 64.0
+
+[[windows.panes.patch_inline.macros]]
+id = "f"
+quant = "bar"
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.switch_pattern]
+slot = 1
+track = 0
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.switch_pattern]
+slot = 1
+track = 2
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.set_mute]
+muted = false
+track = 0
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.set_cycle]
+mode = "drunk"
+track = 2
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.set_bpm]
+bpm = 90.0
+
+[[windows.panes.patch_inline.macros]]
+id = "g"
+quant = "bar"
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.switch_pattern]
+slot = 4
+track = 0
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.set_mute]
+muted = false
+track = 0
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.set_mute]
+muted = true
+track = 2
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.set_bpm]
+bpm = 58.0
+
+[[windows.panes.patch_inline.macros]]
+id = "h"
+quant = "bar"
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.switch_pattern]
+slot = 2
+track = 0
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.switch_pattern]
+slot = 0
+track = 2
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.set_mute]
+muted = false
+track = 0
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.set_mute]
+muted = false
+track = 2
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.set_cycle]
+mode = "pingpong"
+track = 2
+
+[[windows.panes.patch_inline.macros.cmds]]
+
+[windows.panes.patch_inline.macros.cmds.set_bpm]
+bpm = 70.0
+
+[[windows.panes.patch_inline.tracks]]
+active_slot = 0
+cycle = "forward"
+humanize = 2.5
+length = 16
+mode = "note"
+muted = false
+ratchet_decay = 35
+scale_cents = []
+swing = 50
+
+[[windows.panes.patch_inline.tracks.slots]]
+length = 16
+slot = 1
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 57
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 120
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 86
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 64
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 104
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 67
+prob = 75
+repeat_prob = 100
+repeats = 1
+velocity = 80
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 69
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 112
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 67
+prob = 60
+repeat_prob = 100
+repeats = 1
+velocity = 78
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 64
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 96
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = true
+delay = 60.0
+delay_prob = 85
+delay_unit = "pct"
+mod_value = 0.0
+note = 64
+prob = 70
+repeat_prob = 100
+repeats = 1
+velocity = 52
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 72
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots]]
+length = 16
+slot = 2
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 69
+prob = 90
+repeat_prob = 100
+repeats = 1
+velocity = 58
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 72
+prob = 65
+repeat_prob = 100
+repeats = 1
+velocity = 48
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 76
+prob = 75
+repeat_prob = 100
+repeats = 1
+velocity = 52
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = true
+delay = 60.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 71
+prob = 50
+repeat_prob = 100
+repeats = 1
+velocity = 40
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 64
+prob = 55
+repeat_prob = 100
+repeats = 1
+velocity = 45
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots]]
+length = 16
+slot = 3
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 45
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 44
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 52
+prob = 80
+repeat_prob = 100
+repeats = 1
+velocity = 30
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots]]
+length = 16
+slot = 4
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 45
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 34
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 57
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 92
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 85
+repeat_prob = 100
+repeats = 1
+velocity = 68
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 64
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 78
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 55
+prob = 70
+repeat_prob = 100
+repeats = 1
+velocity = 62
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 57
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 84
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = true
+delay = 45.0
+delay_prob = 80
+delay_unit = "ms"
+mod_value = 0.0
+note = 59
+prob = 45
+repeat_prob = 100
+repeats = 1
+velocity = 55
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks]]
+active_slot = 0
+cycle = "drunk"
+humanize = 0.0
+length = 8
+mode = "modulation"
+muted = false
+ratchet_decay = 0
+scale_cents = []
+slots = []
+swing = 50
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.18
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.62
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.35
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.8
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.5
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.28
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.7
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.42
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks]]
+active_slot = 0
+cycle = "pingpong"
+humanize = 1.5
+length = 12
+mode = "note"
+muted = false
+ratchet_decay = -25
+scale_cents = []
+swing = 54
+
+[[windows.panes.patch_inline.tracks.slots]]
+length = 12
+slot = 1
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 33
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 115
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 33
+prob = 70
+repeat_prob = 100
+repeats = 1
+velocity = 84
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 40
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 104
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 43
+prob = 80
+repeat_prob = 100
+repeats = 1
+velocity = 80
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 45
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 96
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 38
+prob = 85
+repeat_prob = 100
+repeats = 1
+velocity = 92
+
+[[windows.panes.patch_inline.tracks.slots.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 33
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 40
+prob = 85
+repeat_prob = 100
+repeats = 1
+velocity = 72
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = true
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 43
+prob = 60
+repeat_prob = 100
+repeats = 1
+velocity = 58
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = true
+delay = 55.0
+delay_prob = 100
+delay_unit = "pct"
+mod_value = 0.0
+note = 38
+prob = 45
+repeat_prob = 100
+repeats = 1
+velocity = 56
+
+[[windows.panes.patch_inline.tracks.steps]]
+active = false
+delay = 0.0
+delay_prob = 100
+delay_unit = "ms"
+mod_value = 0.0
+note = 60
+prob = 100
+repeat_prob = 100
+repeats = 1
+velocity = 100
+
+[[windows.panes]]
+instance = 0
+module = "voice"
+
+[windows.panes.patch_inline]
+amp_src = "envelope/0/ch1"
+format = 2
+lpg = 0.55
+notes_src = "sequencer/0/t1"
+shape = 0.35
+sub = 0.25
+
+[[windows.panes]]
+instance = 1
+module = "voice"
+
+[windows.panes.patch_inline]
+amp_src = "envelope/0/ch3"
+format = 2
+lpg = 0.35
+notes_src = "sequencer/0/t3"
+shape = 0.1
+sub = 0.85
+
+[[windows.panes]]
+instance = 0
+module = "envelope"
+
+[windows.panes.patch_inline]
+format = 2
+
+[[windows.panes.patch_inline.channels]]
+attenuverter = 1.0
+fall = 0.62
+gate_mode = false
+loop_mode = false
+offset = 0.0
+pluck = 0.0
+rise = 0.3
+shape = 0.5
+trigger_src = "sequencer/0/t1"
+
+[[windows.panes.patch_inline.channels]]
+attenuverter = 1.0
+fall = 0.5
+gate_mode = false
+loop_mode = false
+offset = 0.0
+pluck = 0.0
+rise = 0.5
+shape = 0.5
+trigger_src = "sequencer/0/t2"
+
+[[windows.panes.patch_inline.channels]]
+attenuverter = 1.0
+fall = 0.8
+gate_mode = false
+loop_mode = false
+offset = 0.0
+pluck = 0.0
+rise = 0.24
+shape = 0.5
+trigger_src = "sequencer/0/t3"
+
+[[windows.panes.patch_inline.channels]]
+attenuverter = 1.0
+fall = 0.5
+gate_mode = false
+loop_mode = false
+offset = 0.0
+pluck = 0.0
+rise = 0.5
+shape = 0.5
+trigger_src = "sequencer/0/t4"
+
+[windows.panes.patch_inline.logic_outputs]
+and_enabled = false
+or_enabled = false
+sum_enabled = false
+
+[[windows.panes]]
+instance = 0
+module = "mixer"
+
+[[windows.panes]]
+instance = 0
+module = "scope"
+
+[[windows.panes]]
+instance = 0
+module = "badge"
+
+[[windows]]
+active_pane = 0
+layout = ""
+name = "fx"
+
+[[windows.panes]]
+instance = 0
+module = "delay"
+
+[windows.panes.patch_inline]
+dry = 0.0
+format = 2
+input = "send/0"
+regen = 0.5
+shim = 0.0
+taps = 8
+time = 0.152
+wash = 0.12
+
+[[windows.panes.patch_inline.tap]]
+level = 0.85
+pan = -0.15
+phase = "+"
+
+[[windows.panes.patch_inline.tap]]
+level = 0.5
+pan = 0.18
+phase = "+"
+
+[[windows.panes.patch_inline.tap]]
+level = 0.65
+pan = -0.25
+phase = "+"
+
+[[windows.panes.patch_inline.tap]]
+level = 0.4
+pan = 0.3
+phase = "+"
+
+[[windows.panes.patch_inline.tap]]
+level = 0.55
+pan = -0.35
+phase = "+"
+
+[[windows.panes.patch_inline.tap]]
+level = 0.35
+pan = 0.4
+phase = "+"
+
+[[windows.panes.patch_inline.tap]]
+level = 0.45
+pan = -0.45
+phase = "+"
+
+[[windows.panes.patch_inline.tap]]
+level = 0.75
+pan = 0.5
+phase = "+"
+
+[[windows.panes]]
+instance = 0
+module = "filterbank"
+
+[windows.panes.patch_inline]
+band_srcs = []
+bank_a = []
+bank_b = []
+decay = 0.5
+dry = 0.0
+format = 2
+input = "send/1"
+morph = 0.0
+morph_src = "envelope/1/ch1"
+split = 0.6
+spread = 0.3
+wcent_src = "sequencer/0/t2"
+wwidth = 0.38
+
+[[windows.panes]]
+instance = 1
+module = "envelope"
+
+[windows.panes.patch_inline]
+format = 2
+
+[[windows.panes.patch_inline.channels]]
+attenuverter = 1.0
+fall = 0.72
+gate_mode = false
+loop_mode = true
+offset = 0.0
+pluck = 0.0
+rise = 0.72
+shape = 0.5
+
+[[windows.panes.patch_inline.channels]]
+attenuverter = 1.0
+fall = 0.5
+gate_mode = false
+loop_mode = false
+offset = 0.0
+pluck = 0.0
+rise = 0.5
+shape = 0.5
+
+[[windows.panes.patch_inline.channels]]
+attenuverter = 1.0
+fall = 0.5
+gate_mode = false
+loop_mode = false
+offset = 0.0
+pluck = 0.0
+rise = 0.5
+shape = 0.5
+
+[[windows.panes.patch_inline.channels]]
+attenuverter = 1.0
+fall = 0.5
+gate_mode = false
+loop_mode = false
+offset = 0.0
+pluck = 0.0
+rise = 0.5
+shape = 0.5
+
+[windows.panes.patch_inline.logic_outputs]
+and_enabled = false
+or_enabled = false
+sum_enabled = false
+
+[[windows.panes]]
+instance = 2
+module = "envelope"
+
+[[windows.panes]]
+instance = 1
+module = "sequencer"
+
+[[windows]]
+active_pane = 0
+layout = ""
+name = "tape"
+
+[[windows.panes]]
+instance = 0
+module = "tape"
+
+[windows.panes.patch_inline]
+format = 2
+loop_in = 0
+loop_on = false
+loop_out = 19926400
+speed = 1.0
+
+[[windows.panes.patch_inline.tracks]]
+armed = true
+auto = []
+fader = 0.8
+monitor = true
+muted = false
+pan = 0.0
+reversed = false
+
+[[windows.panes.patch_inline.tracks]]
+armed = false
+auto = []
+fader = 0.8
+monitor = true
+muted = false
+pan = 0.0
+reversed = false
+
+[[windows.panes.patch_inline.tracks]]
+armed = false
+auto = []
+fader = 0.8
+monitor = true
+muted = false
+pan = 0.0
+reversed = false
+
+[[windows.panes.patch_inline.tracks]]
+armed = false
+auto = []
+fader = 0.8
+monitor = true
+muted = false
+pan = 0.0
+reversed = false
+
+[[windows.panes.patch_inline.tracks]]
+armed = false
+auto = []
+fader = 0.8
+monitor = true
+muted = false
+pan = 0.0
+reversed = false
+
+[[windows.panes.patch_inline.tracks]]
+armed = false
+auto = []
+fader = 0.8
+monitor = true
+muted = false
+pan = 0.0
+reversed = false
+
+[[windows.panes]]
+instance = 3
+module = "envelope"
+
+[windows.panes.patch_inline]
+format = 2
+
+[[windows.panes.patch_inline.channels]]
+attenuverter = 0.35
+fall = 0.88
+gate_mode = false
+loop_mode = true
+offset = 0.0
+pluck = 0.0
+rise = 0.88
+shape = 0.5
+
+[[windows.panes.patch_inline.channels]]
+attenuverter = 1.0
+fall = 0.5
+gate_mode = false
+loop_mode = false
+offset = 0.0
+pluck = 0.0
+rise = 0.5
+shape = 0.5
+
+[[windows.panes.patch_inline.channels]]
+attenuverter = 1.0
+fall = 0.5
+gate_mode = false
+loop_mode = false
+offset = 0.0
+pluck = 0.0
+rise = 0.5
+shape = 0.5
+
+[[windows.panes.patch_inline.channels]]
+attenuverter = 1.0
+fall = 0.5
+gate_mode = false
+loop_mode = false
+offset = 0.0
+pluck = 0.0
+rise = 0.5
+shape = 0.5
+
+[windows.panes.patch_inline.logic_outputs]
+and_enabled = false
+or_enabled = false
+sum_enabled = false

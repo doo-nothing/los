@@ -1,0 +1,144 @@
+# first-song.toml — the smallest complete los song, annotated.
+#
+# One sequencer track plays one voice through one envelope; the mixer
+# owns the audio device and the clock; the scope is just eyes. Two
+# macros (a = theme, b = lift) walked by an 8-bar macro lane make the
+# form: theme for 4 bars, lift for 4, then the lane wraps.
+#
+# Play it:    los load examples/first-song.toml
+# Check it:   los check examples/first-song.toml   (run after every edit)
+#
+# The full schema lives in src/session/state.rs; every param's range and
+# musical meaning is documented in docs/composing.md. NOTE: comments in
+# this file are for you — they are lost if the session is re-saved.
+
+[meta]
+name = "first-song"
+created = ""
+format = 2          # state format v2 (source-address routing) — required
+
+# ── windows: each pane is a module process; tiled layout by default ──
+[[windows]]
+name = "modules"
+
+# ── the sequencer: patterns, macros, and the form ────────────────────
+[[windows.panes]]
+module = "sequencer"
+instance = 0
+
+[windows.panes.patch_inline]
+bpm = 100.0
+playing = false       # los render starts the transport itself
+# The macro lane: one slot per bar, "" = keep going, "a"-"z" = fire that
+# macro at the bar line. This IS the arrangement.
+lane = ["a", "", "", "", "b", "", "", ""]
+lane_len = 8          # the form is 8 bars long, then it wraps
+
+# Track 1 (sequencer/0/t1): the melody. A track is 16 steps by default;
+# each step needs active/note/velocity, the rest have defaults:
+#   prob = 100 (% chance to fire), repeats = 1 (ratchets, 1-8),
+#   delay = 0 (push, ms or % of step via delay_unit), velocity 1-127.
+[[windows.panes.patch_inline.tracks]]
+length = 16
+swing = 56            # 50 = straight, ~62 = MPC feel, 75 = maximal
+humanize = 2.0        # ± ms of timing jitter — tape wobble
+scale = "minor"       # snap notes to A minor (root below)
+root = 57             # A3
+steps = [
+  { active = true,  note = 57, velocity = 96 },                            # A3 — the anchor
+  { active = false, note = 57, velocity = 96 },
+  { active = false, note = 57, velocity = 96 },
+  { active = true,  note = 60, velocity = 72, prob = 85 },                 # C4, usually
+  { active = false, note = 57, velocity = 96 },
+  { active = false, note = 57, velocity = 96 },
+  { active = true,  note = 64, velocity = 80 },                            # E4
+  { active = false, note = 57, velocity = 96 },
+  { active = true,  note = 57, velocity = 88 },                            # A3 again
+  { active = false, note = 57, velocity = 96 },
+  { active = true,  note = 62, velocity = 66, prob = 70 },                 # D4, often
+  { active = false, note = 57, velocity = 96 },
+  { active = true,  note = 64, velocity = 76, repeats = 2, repeat_prob = 60 }, # E4, sometimes doubled
+  { active = false, note = 57, velocity = 96 },
+  { active = true,  note = 59, velocity = 52, prob = 55, delay = 40.0, delay_prob = 80 }, # late B3 ghost
+  { active = false, note = 57, velocity = 96 },
+]
+
+# Pattern slot b (slot = 1): a sparse high variation the lift switches
+# to. The active pattern lives inline above; only inactive slots go here.
+[[windows.panes.patch_inline.tracks.slots]]
+slot = 1
+length = 16
+steps = [
+  { active = true,  note = 69, velocity = 84 },                            # A4
+  { active = false, note = 57, velocity = 96 },
+  { active = false, note = 57, velocity = 96 },
+  { active = false, note = 57, velocity = 96 },
+  { active = false, note = 57, velocity = 96 },
+  { active = true,  note = 72, velocity = 60, prob = 70 },                 # C5
+  { active = false, note = 57, velocity = 96 },
+  { active = false, note = 57, velocity = 96 },
+  { active = true,  note = 76, velocity = 66, prob = 75 },                 # E5
+  { active = false, note = 57, velocity = 96 },
+  { active = false, note = 57, velocity = 96 },
+  { active = false, note = 57, velocity = 96 },
+  { active = true,  note = 71, velocity = 55, prob = 60 },                 # B4, sometimes
+  { active = false, note = 57, velocity = 96 },
+  { active = false, note = 57, velocity = 96 },
+  { active = false, note = 57, velocity = 96 },
+]
+
+# Macros: the form's verbs. Commands are absolute (not toggles) so a
+# macro always lands the same state. quant = "bar" (default) means it
+# takes effect on the bar line.
+[[windows.panes.patch_inline.macros]]
+id = "a"              # the theme
+cmds = [
+  { switch_pattern = { track = 0, slot = 0 } },
+  { set_bpm = { bpm = 100.0 } },
+]
+
+[[windows.panes.patch_inline.macros]]
+id = "b"              # the lift: high pattern, a touch slower
+cmds = [
+  { switch_pattern = { track = 0, slot = 1 } },
+  { set_bpm = { bpm = 92.0 } },
+]
+
+# ── the voice: an STO-style oscillator playing track 1 ───────────────
+[[windows.panes]]
+module = "voice"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+shape = 0.4           # 0 = sine-ish, 1 = folded — all knobs are 0-1
+sub = 0.5             # sub-oscillator blend
+lpg = 0.5             # low-pass gate: 0 = plain VCA, 1 = full vactrol pluck
+level = 0.75
+amp_src = "envelope/0/ch1"     # the envelope opens the amp
+notes_src = "sequencer/0/t1"   # which track this voice plays
+
+# ── the envelope (MATHs-style): one channel, plucked by track 1 ──────
+[[windows.panes]]
+module = "envelope"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+channels = [
+  # rise/fall are 0-1 knobs (logarithmic time); trigger_src names the
+  # track whose notes fire this channel ("off" = never, absent = any)
+  { rise = 0.25, fall = 0.625, shape = 0.5, loop_mode = false, attenuverter = 1.0, trigger_src = "sequencer/0/t1" },
+]
+
+# ── the mixer: owns the audio device and advances the clock ──────────
+# No params needed — it discovers the voice on its own. A song with no
+# mixer makes no sound and the transport never moves.
+[[windows.panes]]
+module = "mixer"
+instance = 0
+
+# ── the scope: eyes on the master mix (optional but nice) ────────────
+[[windows.panes]]
+module = "scope"
+instance = 0

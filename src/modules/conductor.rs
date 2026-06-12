@@ -729,6 +729,36 @@ fn build_house_layout(exe: &str) -> Result<()> {
 ///   voices → send B (25%) ─► BANK ─► console ─► send A (30%) ─► DELAY
 ///   MATHs 1 ch1 (looping) ─► bank morph · seq t2 (drunk) ─► bank wcent
 fn write_house_patch() {
+    let h = house_patch_params();
+    let _ = state::save_module_state("sequencer", 0, &h.sequencer0);
+    let _ = state::save_module_state("delay", 0, &h.delay0);
+    let _ = state::save_module_state("filterbank", 0, &h.filterbank0);
+    let _ = state::save_module_state("envelope", 1, &h.envelope1);
+    let _ = state::save_module_state("voice", 0, &h.voice0);
+    let _ = state::save_module_state("voice", 1, &h.voice1);
+    let _ = state::save_module_state("envelope", 0, &h.envelope0);
+    let _ = state::save_module_state("envelope", 3, &h.envelope3);
+    let _ = state::save_module_state("tape", 0, &h.tape0);
+}
+
+/// The house drone's module params, one field per state file the fresh
+/// session seeds. Pure data — [`write_house_patch`] saves it to tmp
+/// state, [`house_session_state`] wraps it into a loadable session
+/// (committed at examples/house-drone.toml).
+pub struct HousePatch {
+    pub sequencer0: state::SequencerParams,
+    pub delay0: state::DelayParams,
+    pub filterbank0: state::FilterbankParams,
+    pub envelope0: state::EnvelopeParams,
+    pub envelope1: state::EnvelopeParams,
+    pub envelope3: state::EnvelopeParams,
+    pub voice0: state::VoiceParams,
+    pub voice1: state::VoiceParams,
+    pub tape0: state::TapeParams,
+}
+
+/// Build the house drone (see [`write_house_patch`] for the tour).
+pub fn house_patch_params() -> HousePatch {
     use state::{DelayTapParam, EnvelopeChannelParams, MacroCmd, MacroParam, Quant, SlotParam,
         StepParam, TrackParam};
     use state::{CycleMode, DelayUnit, TrackMode};
@@ -986,7 +1016,6 @@ fn write_house_patch() {
         lane,
         lane_len: Some(128),
     };
-    let _ = state::save_module_state("sequencer", 0, &seq);
 
     // ── delay 0: a tasteful echo on send A — wet-only, real feedback,
     // tap levels decaying with a bloom on tap 8, pans widening with age
@@ -1012,7 +1041,6 @@ fn write_house_patch() {
             .collect(),
         ..Default::default()
     };
-    let _ = state::save_module_state("delay", 0, &delay);
 
     // ── filterbank 0: on send B, wet-only, twice alive — morph breathes
     // under MATHs 1's looping channel, and the 296-style window strolls
@@ -1034,7 +1062,6 @@ fn write_house_patch() {
         wcent_src: Some(String::from("sequencer/0/t2")),
         ..Default::default()
     };
-    let _ = state::save_module_state("filterbank", 0, &bank);
 
     // ── MATHs 1: channel 1 cycling slowly — the LFO behind the morph
     let ch1 = EnvelopeChannelParams {
@@ -1053,7 +1080,6 @@ fn write_house_patch() {
         ],
         logic_outputs: Default::default(),
     };
-    let _ = state::save_module_state("envelope", 1, &env1);
 
     // ── voices: melody soft-edged, bass heavy on the sub osc. Format-2
     // states replace bindings wholesale, so the stock cables (amp ←
@@ -1067,7 +1093,6 @@ fn write_house_patch() {
         notes_src: Some(String::from("sequencer/0/t1")),
         ..Default::default()
     };
-    let _ = state::save_module_state("voice", 0, &voice0);
     let voice1 = state::VoiceParams {
         format: state::STATE_FORMAT,
         shape: Some(0.1),
@@ -1077,7 +1102,6 @@ fn write_house_patch() {
         notes_src: Some(String::from("sequencer/0/t3")),
         ..Default::default()
     };
-    let _ = state::save_module_state("voice", 1, &voice1);
 
     // ── MATHs 0: the amp envelopes. The bass swell was so slow the sub
     // never opened inside a step — both channels now bloom fast and
@@ -1099,7 +1123,6 @@ fn write_house_patch() {
         ],
         logic_outputs: Default::default(),
     };
-    let _ = state::save_module_state("envelope", 0, &env0);
 
     // ── MATHs 3 (the record window's modulator): channel 1 loops
     // minutes-long with the attenuverter pulled down, ready to patch
@@ -1122,7 +1145,6 @@ fn write_house_patch() {
         ],
         logic_outputs: Default::default(),
     };
-    let _ = state::save_module_state("envelope", 3, &env3);
 
     // ── tape 0: ready to record. Track 1 armed to the mix, the loop
     // wrapped around the drone's 16-bar form — roll the transport, hit
@@ -1152,7 +1174,113 @@ fn write_house_patch() {
             })
             .collect(),
     };
-    let _ = state::save_module_state("tape", 0, &tape);
+
+    HousePatch {
+        sequencer0: seq,
+        delay0: delay,
+        filterbank0: bank,
+        envelope0: env0,
+        envelope1: env1,
+        envelope3: env3,
+        voice0,
+        voice1,
+        tape0: tape,
+    }
+}
+
+/// The house drone as a loadable session file — the worked example
+/// committed at examples/house-drone.toml. The pane roster mirrors
+/// [`create_session`]'s three windows (modules / fx / tape); layouts
+/// stay empty so `los load` falls back to tiled. Regenerate the file
+/// with: cargo test regen_house_example -- --ignored
+pub fn house_session_state() -> Result<state::SessionState> {
+    let h = house_patch_params();
+    let pane = |module: &str, instance: usize| state::PaneState {
+        module: module.into(),
+        instance,
+        patch: None,
+        patch_inline: None,
+    };
+    fn patched<T: serde::Serialize>(
+        module: &str,
+        instance: usize,
+        params: &T,
+    ) -> Result<state::PaneState> {
+        Ok(state::PaneState {
+            module: module.into(),
+            instance,
+            patch: None,
+            patch_inline: Some(
+                toml::Value::try_from(params).context("serializing house params")?,
+            ),
+        })
+    }
+    Ok(state::SessionState {
+        meta: state::Meta {
+            name: String::from("house-drone"),
+            created: String::new(),
+            format: state::STATE_FORMAT,
+        },
+        tmux: state::TmuxState::default(),
+        windows: vec![
+            state::WindowState {
+                name: String::from("modules"),
+                layout: String::new(),
+                active_pane: 0,
+                panes: vec![
+                    patched("sequencer", 0, &h.sequencer0)?,
+                    patched("voice", 0, &h.voice0)?,
+                    patched("voice", 1, &h.voice1)?,
+                    patched("envelope", 0, &h.envelope0)?,
+                    pane("mixer", 0),
+                    pane("scope", 0),
+                    pane("badge", 0),
+                ],
+            },
+            state::WindowState {
+                name: String::from("fx"),
+                layout: String::new(),
+                active_pane: 0,
+                panes: vec![
+                    patched("delay", 0, &h.delay0)?,
+                    patched("filterbank", 0, &h.filterbank0)?,
+                    patched("envelope", 1, &h.envelope1)?,
+                    pane("envelope", 2),
+                    pane("sequencer", 1),
+                ],
+            },
+            state::WindowState {
+                name: String::from("tape"),
+                layout: String::new(),
+                active_pane: 0,
+                panes: vec![
+                    patched("tape", 0, &h.tape0)?,
+                    patched("envelope", 3, &h.envelope3)?,
+                ],
+            },
+        ],
+    })
+}
+
+/// Rewrite every float in a TOML tree as its shortest f32-faithful
+/// decimal. Params are f32 at runtime; without this the example file
+/// reads like `0.15199999511241913` instead of `0.152`.
+pub fn round_floats_to_f32(v: &mut toml::Value) {
+    match v {
+        toml::Value::Float(f) => {
+            if let Ok(p) = format!("{}", *f as f32).parse::<f64>() {
+                *f = p;
+            }
+        }
+        toml::Value::Array(items) => items.iter_mut().for_each(round_floats_to_f32),
+        toml::Value::Table(table) => table
+            .iter_mut()
+            .for_each(|(_, v)| round_floats_to_f32(v)),
+        toml::Value::String(_)
+        | toml::Value::Integer(_)
+        | toml::Value::Boolean(_)
+        | toml::Value::Datetime(_) => {}
+    }
 }
 
 /// The fx rack window:
@@ -2480,5 +2608,78 @@ mod tests {
         let loaded: state::SessionState = toml::from_str(&toml).expect("deserialize");
 
         assert_eq!(loaded.windows[0].layout, raw_layout);
+    }
+}
+
+#[cfg(test)]
+mod house_example_tests {
+    use super::*;
+
+    fn example_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/house-drone.toml")
+    }
+
+    /// Floats through f32 and back, so a file holding the shortest
+    /// decimal ("0.152") compares equal to live params holding the
+    /// f64-widened f32 (0.15199999511…).
+    fn normalize(v: &mut toml::Value) {
+        match v {
+            toml::Value::Float(f) => *f = (*f as f32) as f64,
+            toml::Value::Array(items) => items.iter_mut().for_each(normalize),
+            toml::Value::Table(table) => table.iter_mut().for_each(|(_, v)| normalize(v)),
+            toml::Value::String(_)
+            | toml::Value::Integer(_)
+            | toml::Value::Boolean(_)
+            | toml::Value::Datetime(_) => {}
+        }
+    }
+
+    /// Regenerate examples/house-drone.toml from the code. Run with:
+    ///   cargo test regen_house_example -- --ignored
+    #[test]
+    #[ignore = "writes examples/house-drone.toml; run explicitly after changing the house patch"]
+    fn regen_house_example() {
+        let st = house_session_state().expect("house session");
+        let mut val = toml::Value::try_from(&st).expect("to value");
+        round_floats_to_f32(&mut val);
+        let body = toml::to_string_pretty(&val).expect("to toml");
+        let header = "\
+# The house drone — the patch a fresh `los new` session seeds, as a
+# loadable song file. ~7.4 minutes: three sequencer tracks (melody with
+# five pattern slots, a drunk modulation walk, polymetric bass), eight
+# section macros (a–h) walked by a 128-bar macro lane with tempo moves,
+# voices into a tap delay (send A) and a 296-style filterbank (send B).
+#
+# GENERATED from house_patch_params() in src/modules/conductor.rs —
+# edit there, then: cargo test regen_house_example -- --ignored
+#
+# Play it:    los load examples/house-drone.toml
+# Check it:   los check examples/house-drone.toml
+
+";
+        std::fs::write(example_path(), format!("{header}{body}")).expect("write example");
+    }
+
+    #[test]
+    fn house_example_matches_the_code() {
+        let text = std::fs::read_to_string(example_path())
+            .expect("examples/house-drone.toml missing — run: cargo test regen_house_example -- --ignored");
+        let on_disk: state::SessionState = toml::from_str(&text).expect("parse example");
+        let mut disk_val = toml::Value::try_from(&on_disk).expect("disk to value");
+        let live = house_session_state().expect("house session");
+        let mut live_val = toml::Value::try_from(&live).expect("live to value");
+        normalize(&mut disk_val);
+        normalize(&mut live_val);
+        assert_eq!(
+            disk_val, live_val,
+            "examples/house-drone.toml is stale — regen: cargo test regen_house_example -- --ignored"
+        );
+    }
+
+    #[test]
+    fn house_example_validates_clean() {
+        let text = std::fs::read_to_string(example_path()).expect("example file");
+        let report = crate::validate::validate_str(&text);
+        assert!(report.errors.is_empty(), "house example has errors: {:?}", report.errors);
     }
 }
