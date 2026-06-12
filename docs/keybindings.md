@@ -306,6 +306,17 @@ the sample row · `:set mode loop`, `:set gene 0.4`, `:set slot c` ·
 `los samples pull <q> [--raw]` prefetches. Publishes `sampler/N/env`.
 All ✅
 
+### LFO
+Four phase-disciplined channels (after the Batumi —
+[the design doc](plans/lfo.md)). Rows: `mode` (free · quad · phase ·
+div) · `rst` (trigger binding: re-zero the bank on a rising edge) ·
+per channel `freq` (209 s–50 Hz log; `@` takes rate CV) · `shape`
+(sine·tri·saw·sqr·s&h, the assign output) · `phase` (offset, or the
+/2…/16 pick in div). Locked modes derive channels 2–4 from channel
+1's phase — they cannot drift. Publishes `lfo/N/s1–s4` (sines) +
+`a1–a4` (assigns), all unipolar. `:set mode quad`, `:set 2.shape
+saw`, `:set rst sequencer/0/t1`. All ✅
+
 ### DLD
 The dual looping delay (after the 4ms DLD —
 [the design doc](plans/dld.md)). Vertical rows: channel A (`time` ·
