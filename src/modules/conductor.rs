@@ -1657,6 +1657,44 @@ pub fn spawn_session_from_state(state_path: &str, opts: &SpawnOpts) -> Result<()
 /// A render session is throwaway: kill it however we leave.
 struct RenderSession;
 
+/// Minimal transport control surface for [`hold_transport_rolling`],
+/// so the stomp-recovery loop is testable without the global SHM name.
+trait TransportCtl {
+    fn is_playing(&self) -> bool;
+    fn roll_from_zero(&mut self);
+}
+
+impl TransportCtl for ShmTransport {
+    fn is_playing(&self) -> bool {
+        self.playing()
+    }
+    fn roll_from_zero(&mut self) {
+        self.set_clock(0);
+        self.set_playing(true);
+    }
+}
+
+/// Start the transport and keep it started for `hold`: a module still
+/// booting may seed the play flag to stopped after we set it (the
+/// sequencer's `seed_play`, which render forces to stopped, races the
+/// mixer's much faster arm pickup). Every stomp is answered with a
+/// fresh roll from clock 0 — the sequencer rebases its phase on clock
+/// regression, so bar 0 fires cleanly however late the recovery lands.
+/// Returns the number of stomps recovered.
+fn hold_transport_rolling(t: &mut impl TransportCtl, hold: Duration) -> u32 {
+    t.roll_from_zero();
+    let until = std::time::Instant::now() + hold;
+    let mut stomps = 0;
+    while std::time::Instant::now() < until {
+        if !t.is_playing() {
+            stomps += 1;
+            t.roll_from_zero();
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    stomps
+}
+
 impl Drop for RenderSession {
     fn drop(&mut self) {
         let _ = tmux_cmd(&["kill-session", "-t", "los"]);
@@ -1810,10 +1848,30 @@ pub fn render(song_path: &str, out_path: &str, secs: Option<f32>, tail: f32) -> 
     }
 
     // Roll: rebase the clock to zero (the sequencer rebases its phase on
-    // clock regression and bar 0's lane slot fires) and start.
+    // clock regression and bar 0's lane slot fires) and start. The WAV
+    // existing only proves the MIXER booted — a slow sequencer can still
+    // be mid-boot, and its `seed_play` write (forced to stopped by
+    // force_stopped) lands AFTER our play flag and freezes the world:
+    // no notes, a full-length recording of zeros. Hold the transport
+    // rolling through the boot-settle window, re-rolling from bar 0 on
+    // any stomp (clock regression makes that clean), then prove the
+    // clock is actually advancing before trusting the render.
     let mut transport = ShmTransport::open().context("transport vanished before start")?;
-    transport.set_clock(0);
-    transport.set_playing(true);
+    let stomps = hold_transport_rolling(&mut transport, Duration::from_secs(5));
+    if stomps > 0 {
+        eprintln!(
+            "[render] transport was stopped {stomps}x during boot (late \
+             sequencer seed) — re-rolled from bar 0 each time"
+        );
+    }
+    let c0 = transport.clock();
+    std::thread::sleep(Duration::from_millis(300));
+    anyhow::ensure!(
+        transport.clock() > c0,
+        "transport clock is frozen after roll (playing={}, clock={c0}) — \
+         the mixer callback is not advancing it; check the audio device",
+        transport.playing(),
+    );
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f32(secs + 30.0);
     let mut silence_checked = false;
@@ -1834,7 +1892,12 @@ pub fn render(song_path: &str, out_path: &str, secs: Option<f32>, tail: f32) -> 
                 let data = &bytes[44.min(bytes.len())..];
                 if data.len() > 96_000 && data.iter().all(|b| *b == 0) {
                     anyhow::bail!(
-                        "render is capturing pure silence 10 s in — the audio                          device likely didn't settle after the previous session;                          re-run the render"
+                        "render is capturing pure silence 10 s in \
+                         (transport playing={}, clock={}) — check \
+                         ~/.config/los/tmp/mixer.log and *.crash for \
+                         which strips died, then re-run",
+                        transport.playing(),
+                        transport.clock(),
                     );
                 }
             }
@@ -2857,6 +2920,53 @@ mod tests {
 #[cfg(test)]
 mod render_tests {
     use super::*;
+
+    /// A transport whose play flag gets stomped to stopped on the
+    /// first few reads — the late-sequencer-seed race in miniature.
+    struct StompyTransport {
+        playing: bool,
+        stomps_left: u32,
+        rolls: u32,
+    }
+
+    impl TransportCtl for StompyTransport {
+        fn is_playing(&self) -> bool {
+            self.playing
+        }
+        fn roll_from_zero(&mut self) {
+            self.rolls += 1;
+            self.playing = true;
+        }
+    }
+
+    #[test]
+    fn hold_transport_rolling_recovers_from_late_seed_stomp() {
+        // regression: a slow-booting sequencer seeded playing=false
+        // AFTER render rolled, freezing the clock and recording a
+        // full-length WAV of zeros (gamelan take 3 abort)
+        let mut t = StompyTransport {
+            playing: false,
+            stomps_left: 2,
+            rolls: 0,
+        };
+        // emulate the seed landing between polls: each poll that still
+        // has a stomp pending sees stopped once
+        struct Wrapper<'a>(&'a mut StompyTransport);
+        impl TransportCtl for Wrapper<'_> {
+            fn is_playing(&self) -> bool {
+                self.0.stomps_left == 0 && self.0.playing
+            }
+            fn roll_from_zero(&mut self) {
+                self.0.stomps_left = self.0.stomps_left.saturating_sub(1);
+                self.0.roll_from_zero();
+            }
+        }
+        let stomps = hold_transport_rolling(&mut Wrapper(&mut t), Duration::from_millis(250));
+        assert!(stomps >= 1, "the stomp must be detected");
+        assert!(t.playing, "transport must end up rolling");
+        assert!(t.rolls >= 2, "initial roll plus at least one recovery");
+        assert_eq!(t.stomps_left, 0, "all stomps consumed");
+    }
 
     #[test]
     fn force_stopped_overrides_sequencer_playing() {
