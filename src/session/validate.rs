@@ -26,7 +26,8 @@ use std::path::Path;
 
 use crate::routing::{output_labels, SourceAddr};
 use crate::state::{
-    DelayParams, DldParams, DpoParamsState, EnvelopeParams, FilterbankParams, LfoParams,
+    DelayParams, DldParams, DpoParamsState, ElementsParams, EnvelopeParams, FilterbankParams,
+    LfoParams,
     MacroCmd, MixerParams, SamplerParams, ScopeParams, SequencerParams, SessionState, StepParam,
     SwarmParams, TapeParams, TemplateParams, TrackMode, VoiceParams, WaspParams, STATE_FORMAT,
 };
@@ -275,6 +276,11 @@ fn validate_session(st: &SessionState, r: &mut Report) {
             "lfo" => {
                 if let Some(p) = decode::<LfoParams>(value, &loc, r) {
                     check_lfo(&p, &loc, &declared, r);
+                }
+            }
+            "elements" => {
+                if let Some(p) = decode::<ElementsParams>(value, &loc, r) {
+                    check_elements(&p, &loc, &declared, r, &mut pending);
                 }
             }
             // No params structs: state is ephemeral or none.
@@ -1290,6 +1296,47 @@ fn check_lfo(p: &LfoParams, loc: &str, declared: &BTreeSet<(String, usize)>, r: 
     check_src(&p.rst_src, "rst_src", loc, declared, r);
 }
 
+/// Elements: all knobs 0-1, the CV bank + notes/amp addresses.
+fn check_elements(
+    p: &ElementsParams,
+    loc: &str,
+    declared: &BTreeSet<(String, usize)>,
+    r: &mut Report,
+    pending: &mut Vec<PendingTrackRef>,
+) {
+    for (name, v) in [
+        ("contour", p.contour),
+        ("bow", p.bow),
+        ("bow_timbre", p.bow_timbre),
+        ("blow", p.blow),
+        ("blow_meta", p.blow_meta),
+        ("blow_timbre", p.blow_timbre),
+        ("strike", p.strike),
+        ("strike_meta", p.strike_meta),
+        ("strike_timbre", p.strike_timbre),
+        ("geometry", p.geometry),
+        ("brightness", p.brightness),
+        ("damping", p.damping),
+        ("position", p.position),
+        ("space", p.space),
+        ("level", p.level),
+    ] {
+        range01(v, name, loc, r);
+    }
+    for (field, src) in [
+        ("geometry_src", &p.geometry_src),
+        ("brightness_src", &p.brightness_src),
+        ("damping_src", &p.damping_src),
+        ("position_src", &p.position_src),
+        ("space_src", &p.space_src),
+        ("contour_src", &p.contour_src),
+        ("amp_src", &p.amp_src),
+    ] {
+        check_src(src, field, loc, declared, r);
+    }
+    check_notes_src(&p.notes_src, loc, declared, r, pending);
+}
+
 /// Template (template.rs SHAPES): shape by name.
 fn check_template(
     p: &TemplateParams,
@@ -1337,11 +1384,12 @@ const SOURCE_MODULES: [&str; 6] = [
 ];
 
 /// Modules that publish audio rings an fx/tape input can claim.
-const AUDIO_MODULES: [&str; 10] =
-    ["voice", "swarm", "tone", "template", "delay", "filterbank", "dld", "sampler", "wasp", "dpo"];
+const AUDIO_MODULES: [&str; 11] =
+    ["voice", "swarm", "tone", "template", "delay", "filterbank", "dld", "sampler", "wasp", "dpo", "elements"];
 
 /// Canonical module names, for misspelled-pane suggestions.
-const MODULE_NAMES: [&str; 18] = ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo"];
+const MODULE_NAMES: [&str; 19] =
+    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements"];
 
 /// An optional `*_src` field: grammar, known output, declared instance.
 /// Returns the parsed address so callers can queue cross-module checks.

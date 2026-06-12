@@ -592,6 +592,46 @@ pub struct LfoParams {
     pub channels: Vec<LfoChannelParams>,
 }
 
+/// Elements (modules/elements) — the Mutable Instruments modal voice.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ElementsParams {
+    #[serde(default)]
+    pub format: u32,
+    pub contour: Option<f32>,
+    pub bow: Option<f32>,
+    pub bow_timbre: Option<f32>,
+    pub blow: Option<f32>,
+    pub blow_meta: Option<f32>,
+    pub blow_timbre: Option<f32>,
+    pub strike: Option<f32>,
+    pub strike_meta: Option<f32>,
+    pub strike_timbre: Option<f32>,
+    pub geometry: Option<f32>,
+    pub brightness: Option<f32>,
+    pub damping: Option<f32>,
+    pub position: Option<f32>,
+    pub space: Option<f32>,
+    pub level: Option<f32>,
+    pub freq: Option<f32>,
+    pub gate: Option<bool>,
+    #[serde(default)]
+    pub geometry_src: Option<String>,
+    #[serde(default)]
+    pub brightness_src: Option<String>,
+    #[serde(default)]
+    pub damping_src: Option<String>,
+    #[serde(default)]
+    pub position_src: Option<String>,
+    #[serde(default)]
+    pub space_src: Option<String>,
+    #[serde(default)]
+    pub contour_src: Option<String>,
+    #[serde(default)]
+    pub amp_src: Option<String>,
+    #[serde(default)]
+    pub notes_src: Option<String>,
+}
+
 /// The swarm voice (modules/swarm.rs) — the CS-80-flavored brass pad:
 /// chord by name ("min7"), the five knobs, glide, and the three kinds
 /// of binding (knob sources, amp, notes).

@@ -306,6 +306,18 @@ the sample row · `:set mode loop`, `:set gene 0.4`, `:set slot c` ·
 `los samples pull <q> [--raw]` prefetches. Publishes `sampler/N/env`.
 All ✅
 
+### Elements
+The Mutable Instruments modal voice
+([the design doc](plans/elements.md); MIT-licensed port, attribution
+in the source). Rows: `contour` (perc → adsr → swell) · the three
+exciters (`bow`/`bow_t`, `blow`/`blow_m`/`blow_t` through the tube,
+`strike`/`strike_m`/`strike_t` — meta walks samples → mallet →
+plectrum → particles) · the resonator (`geometry` `bright` `damping`
+`position`) · `space` (dry → wide → reverb) · `level` · `notes` ·
+`amp`. `@` CV: geometry bright damping position space contour.
+Velocity is the hardware's strength input. Publishes
+`elements/N/exc`. All ✅
+
 ### LFO
 Four phase-disciplined channels (after the Batumi —
 [the design doc](plans/lfo.md)). Rows: `mode` (free · quad · phase ·

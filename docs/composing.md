@@ -305,6 +305,17 @@ saw, sqr, s&h), `phase`; `rst_src` re-zeros the bank on a trigger
 `lfo/N/s1`–`s4` (sines) and `a1`–`a4` (the shaped assigns). Stop
 borrowing MATHs loop channels for vibrato — bind `lfo/0/s2` instead.
 
+**elements** (the Mutable Instruments modal voice, full port): a
+physical-modelling instrument — `contour` picks the envelope family
+(below 0.4 percussive, 0.4–0.6 adsr, above sustained swell); exciters
+`bow` (friction, sustains), `blow` (breath through a reed tube),
+`strike` (`strike_meta` walks samples → mallet → plectrum →
+particles); the modal resonator's `geometry` (plate → string → bar),
+`brightness`, `damping`, `position`; `space` is dry → wide → reverb
+wash. Monophonic; velocity = strike strength (the accent law is the
+hardware's). Gamelan/metallic territory: strike-only patches with
+geometry 0.55–0.75, damping 0.3–0.5, several instances tuned apart.
+
 **mixer**: per-track `level` (0–1), `pan` (−1–1), `drive` (0–1), 3-band
 EQ (±15 dB, `eq_freq` 0–1), `mute`/`solo`; a master strip with the
 same console plus `master_width` (0–2).
