@@ -60,6 +60,7 @@ fn usage() {
     eprintln!("  los <module> [instance]       Run a module directly (independent pane)");
     eprintln!("  los load <state-file.toml>    Load a saved session state");
     eprintln!("  los <state-file.toml>         Same as 'load'");
+    eprintln!("  los check <state-file.toml>   Validate a state file (no session needed)");
     eprintln!("  los ctl [play|stop|toggle|status]  Control the global transport");
     eprintln!("  los add <module> [instance]   Spawn a module in the running session");
     eprintln!("  los ps                        Inspect the live session (manifest, ring, clock)");
@@ -151,6 +152,32 @@ fn main() -> Result<()> {
                     anyhow::bail!("Usage: los load <state-file.toml>");
                 }
                 conductor::load_session(&path)
+            }
+            // Offline validation: every problem in the file at once, no
+            // session needed. Exit 0 = loadable (warnings allowed).
+            "check" => {
+                let path = args.get(2).cloned().unwrap_or_default();
+                if path.is_empty() {
+                    anyhow::bail!("Usage: los check <state-file.toml>");
+                }
+                let report = los::validate::validate_file(std::path::Path::new(&path));
+                for issue in &report.errors {
+                    println!("error: {issue}");
+                }
+                for issue in &report.warnings {
+                    println!("warning: {issue}");
+                }
+                println!(
+                    "{path}: {} error{}, {} warning{}",
+                    report.errors.len(),
+                    if report.errors.len() == 1 { "" } else { "s" },
+                    report.warnings.len(),
+                    if report.warnings.len() == 1 { "" } else { "s" },
+                );
+                if !report.is_clean() {
+                    std::process::exit(1);
+                }
+                Ok(())
             }
             "ctl" => ctl(args.get(2).map(|s| s.as_str()).unwrap_or("toggle")),
             // Debug tap: watch live note events (with their source bytes)

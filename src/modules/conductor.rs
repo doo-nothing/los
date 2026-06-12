@@ -1354,15 +1354,21 @@ pub fn create_session() -> Result<()> {
 pub fn load_session(state_path: &str) -> Result<()> {
     state::ensure_dirs()?;
 
+    // Validate before touching tmux: a bad file must never cost a
+    // running session. Same report `los check` prints (format-version
+    // refusal included).
+    let report = crate::validate::validate_file(std::path::Path::new(state_path));
+    for issue in &report.warnings {
+        eprintln!("[load] warning: {issue}");
+    }
+    anyhow::ensure!(
+        report.is_clean(),
+        "{state_path} failed validation:\n{}fix these (or run `los check {state_path}`)",
+        report.render_errors()
+    );
+
     // Read the state file
     let st = state::from_toml_file::<state::SessionState>(std::path::Path::new(state_path))?;
-    anyhow::ensure!(
-        st.meta.format >= state::STATE_FORMAT,
-        "{} is a v{} state file; v{} (routing source addresses) is a clean break — re-save your session",
-        state_path,
-        st.meta.format.max(1),
-        state::STATE_FORMAT
-    );
 
     // Kill existing session (ignore error if none exists)
     let _ = tmux_cmd(&["kill-session", "-t", "los"]);
@@ -1473,15 +1479,21 @@ pub fn load_session(state_path: &str) -> Result<()> {
 /// Reload module panes and layout from a saved state file without
 /// killing the conductor (which lives in the "conductor" window).
 fn reload_modules_from_state(state_path: &std::path::Path) -> Result<()> {
+    // Same gate as load_session: refuse a file `los check` would flag.
+    let report = crate::validate::validate_file(state_path);
+    for issue in &report.warnings {
+        eprintln!("[reload] warning: {issue}");
+    }
+    anyhow::ensure!(
+        report.is_clean(),
+        "{} failed validation:\n{}fix these (or run `los check {}`)",
+        state_path.display(),
+        report.render_errors(),
+        state_path.display()
+    );
+
     // Read the state file
     let st = state::from_toml_file::<state::SessionState>(state_path)?;
-    anyhow::ensure!(
-        st.meta.format >= state::STATE_FORMAT,
-        "{} is a v{} state file; v{} is a clean break — re-save your session",
-        state_path.display(),
-        st.meta.format.max(1),
-        state::STATE_FORMAT
-    );
 
     // Kill the existing modules window (all module panes), keeping conductor
     let _ = tmux_cmd(&["kill-window", "-t", "los:modules"]);

@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 hound = "3.5"
 serde = { version = "1", features = ["derive"] }
+serde_ignored = "0.1"
 toml = "0.8"
 anyhow = "1"
 cpal = "0.15"
