@@ -475,8 +475,7 @@ fn audio_thread(state: Arc<Mutex<SwarmState>>, instance: usize) -> Result<()> {
     // slot 7−N) — expanding the event ring's consumer table is an SHM
     // layout bump, and nobody runs eight voices and a swarm. Documented
     // in shm::consumer_id.
-    let consumer_id = crate::shm::consumer_id("swarm", instance);
-    let mut events = EventRingbuf::open(consumer_id).ok();
+    let mut events = EventRingbuf::open_dynamic().ok();
     let mut modbus = ModulationBus::open()
         .or_else(|_| ModulationBus::create())
         .ok();
@@ -525,7 +524,7 @@ fn audio_thread(state: Arc<Mutex<SwarmState>>, instance: usize) -> Result<()> {
                 transport = ShmTransport::open().ok();
             }
             if events.is_none() {
-                events = EventRingbuf::open(consumer_id).ok();
+                events = EventRingbuf::open_dynamic().ok();
             }
             let now_rate = rate_of(&transport);
             if (now_rate - sample_rate).abs() > 0.5 {

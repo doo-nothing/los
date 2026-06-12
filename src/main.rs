@@ -345,7 +345,7 @@ fn main() -> Result<()> {
                     .iter()
                     .find(|e| e.module_name == "sequencer")
                     .and_then(|e| e.mod_base);
-                let mut events = shm::EventRingbuf::open(shm::consumer_id("tap", 0))?;
+                let mut events = shm::EventRingbuf::open_dynamic()?;
                 let bus = shm::ModulationBus::open().ok();
                 // skip the backlog; we only want what happens from now on
                 while events.read_event().is_some() {}

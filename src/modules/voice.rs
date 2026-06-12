@@ -118,8 +118,7 @@ fn voice_thread(
     let mut manifest = Manifest::open().or_else(|_| Manifest::create())?;
     let _ = manifest.register("voice", instance, Some(&shm_name), 0);
 
-    let consumer_id = crate::shm::consumer_id("voice", instance);
-    let mut events = EventRingbuf::open(consumer_id).ok();
+    let mut events = EventRingbuf::open_dynamic().ok();
     let mut modbus = ModulationBus::open()
         .or_else(|_| ModulationBus::create())
         .ok();
@@ -155,7 +154,7 @@ fn voice_thread(
 
         // Reconnect to shared resources if disconnected
         if events.is_none() {
-            events = EventRingbuf::open(consumer_id).ok();
+            events = EventRingbuf::open_dynamic().ok();
         }
         if modbus.is_none() {
             modbus = ModulationBus::open()
