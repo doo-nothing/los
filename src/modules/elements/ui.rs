@@ -71,16 +71,26 @@ const ROWS: [Row; 17] = [
     Row::Amp,
 ];
 
-/// CV bank, srcs[] order (the hardware's main CV ins).
-const BINDABLE: [Row; 6] = [
+/// CV bank, srcs[] order — every value row is bindable (the hardware
+/// exposes six CV inputs; in los every parameter takes a cable).
+const BINDABLE: [Row; 15] = [
+    Row::Contour,
+    Row::Bow,
+    Row::BowT,
+    Row::Blow,
+    Row::BlowM,
+    Row::BlowT,
+    Row::Strike,
+    Row::StrikeM,
+    Row::StrikeT,
     Row::Geometry,
     Row::Brightness,
     Row::Damping,
     Row::Position,
     Row::Space,
-    Row::Contour,
+    Row::Level,
 ];
-const N_SRC: usize = 6;
+const N_SRC: usize = BINDABLE.len();
 
 struct ElementsState {
     patch: Patch,
@@ -100,7 +110,7 @@ struct ElementsState {
 
 impl ElementsState {
     fn new() -> Self {
-        ElementsState {
+        let mut s = ElementsState {
             patch: Patch::default(),
             level: 0.8,
             freq: 220.0,
@@ -108,13 +118,17 @@ impl ElementsState {
             velocity: 0.0,
             srcs: Default::default(),
             resolved: Default::default(),
-            eff: [0.2, 0.5, 0.25, 0.3, 0.5, 1.0],
+            eff: [0.0; N_SRC],
             amp_src: None,
             amp_resolved: None,
             notes_src: None,
             exc_now: 0.0,
             selected: 0,
+        };
+        for (k, r) in BINDABLE.iter().enumerate() {
+            s.eff[k] = s.get(*r);
         }
+        s
     }
 
     fn get(&self, r: Row) -> f32 {
@@ -163,7 +177,52 @@ impl ElementsState {
     }
 }
 
-const SRC_SLOT_BASE: usize = 30;
+/// Manual fallback value for a bindable row, read from the working
+/// copies the audio thread mutates (the patch and the output level).
+fn row_value(p: &Patch, level: f32, r: Row) -> f32 {
+    match r {
+        Row::Contour => p.exciter_envelope_shape,
+        Row::Bow => p.exciter_bow_level,
+        Row::BowT => p.exciter_bow_timbre,
+        Row::Blow => p.exciter_blow_level,
+        Row::BlowM => p.exciter_blow_meta,
+        Row::BlowT => p.exciter_blow_timbre,
+        Row::Strike => p.exciter_strike_level,
+        Row::StrikeM => p.exciter_strike_meta,
+        Row::StrikeT => p.exciter_strike_timbre,
+        Row::Geometry => p.resonator_geometry,
+        Row::Brightness => p.resonator_brightness,
+        Row::Damping => p.resonator_damping,
+        Row::Position => p.resonator_position,
+        Row::Space => p.space,
+        Row::Level => level,
+        Row::Notes | Row::Amp => 0.0,
+    }
+}
+
+/// Write a bank-effective value into the working copies.
+fn set_row_value(p: &mut Patch, level: &mut f32, r: Row, v: f32) {
+    match r {
+        Row::Contour => p.exciter_envelope_shape = v,
+        Row::Bow => p.exciter_bow_level = v,
+        Row::BowT => p.exciter_bow_timbre = v,
+        Row::Blow => p.exciter_blow_level = v,
+        Row::BlowM => p.exciter_blow_meta = v,
+        Row::BlowT => p.exciter_blow_timbre = v,
+        Row::Strike => p.exciter_strike_level = v,
+        Row::StrikeM => p.exciter_strike_meta = v,
+        Row::StrikeT => p.exciter_strike_timbre = v,
+        Row::Geometry => p.resonator_geometry = v,
+        Row::Brightness => p.resonator_brightness = v,
+        Row::Damping => p.resonator_damping = v,
+        Row::Position => p.resonator_position = v,
+        Row::Space => p.space = v,
+        Row::Level => *level = v,
+        Row::Notes | Row::Amp => {}
+    }
+}
+
+const SRC_SLOT_BASE: usize = 50;
 const AMP_SLOT: usize = 40;
 const NOTES_SLOT: usize = 41;
 
@@ -240,12 +299,21 @@ fn snapshot_params(s: &ElementsState) -> state::ElementsParams {
         level: Some(s.level),
         freq: Some(s.freq),
         gate: Some(s.gate),
-        geometry_src: src(0),
-        brightness_src: src(1),
-        damping_src: src(2),
-        position_src: src(3),
-        space_src: src(4),
-        contour_src: src(5),
+        contour_src: src(0),
+        bow_src: src(1),
+        bow_timbre_src: src(2),
+        blow_src: src(3),
+        blow_meta_src: src(4),
+        blow_timbre_src: src(5),
+        strike_src: src(6),
+        strike_meta_src: src(7),
+        strike_timbre_src: src(8),
+        geometry_src: src(9),
+        brightness_src: src(10),
+        damping_src: src(11),
+        position_src: src(12),
+        space_src: src(13),
+        level_src: src(14),
         amp_src: s.amp_src.as_ref().map(|a| a.to_string()),
         notes_src: s.notes_src.as_ref().map(|a| a.to_string()),
     }
@@ -282,12 +350,21 @@ fn apply_params(s: &mut ElementsState, p: &state::ElementsParams) {
     }
     let parse = |o: &Option<String>| o.as_deref().and_then(SourceAddr::parse);
     s.srcs = [
+        parse(&p.contour_src),
+        parse(&p.bow_src),
+        parse(&p.bow_timbre_src),
+        parse(&p.blow_src),
+        parse(&p.blow_meta_src),
+        parse(&p.blow_timbre_src),
+        parse(&p.strike_src),
+        parse(&p.strike_meta_src),
+        parse(&p.strike_timbre_src),
         parse(&p.geometry_src),
         parse(&p.brightness_src),
         parse(&p.damping_src),
         parse(&p.position_src),
         parse(&p.space_src),
-        parse(&p.contour_src),
+        parse(&p.level_src),
     ];
     s.amp_src = parse(&p.amp_src);
     s.notes_src = parse(&p.notes_src);
@@ -386,20 +463,13 @@ fn audio_thread(shared: Arc<Mutex<ElementsState>>, instance: usize) -> Result<()
                 }
             };
             let mut patch = s.patch;
-            patch.resonator_geometry = cv(0, patch.resonator_geometry, &s);
-            patch.resonator_brightness = cv(1, patch.resonator_brightness, &s);
-            patch.resonator_damping = cv(2, patch.resonator_damping, &s);
-            patch.resonator_position = cv(3, patch.resonator_position, &s);
-            patch.space = cv(4, patch.space, &s);
-            patch.exciter_envelope_shape = cv(5, patch.exciter_envelope_shape, &s);
-            s.eff = [
-                patch.resonator_geometry,
-                patch.resonator_brightness,
-                patch.resonator_damping,
-                patch.resonator_position,
-                patch.space,
-                patch.exciter_envelope_shape,
-            ];
+            let mut level_eff = s.level;
+            for (k, r) in BINDABLE.iter().enumerate() {
+                let manual = row_value(&patch, level_eff, *r);
+                let v = cv(k, manual, &s);
+                set_row_value(&mut patch, &mut level_eff, *r, v);
+                s.eff[k] = v;
+            }
             let amp = match (s.amp_src.is_some(), s.amp_resolved, bus) {
                 (false, _, _) => 1.0,
                 (true, Some(ch), Some(b)) => b.get(ch).clamp(0.0, 1.0),
@@ -411,7 +481,7 @@ fn audio_thread(shared: Arc<Mutex<ElementsState>>, instance: usize) -> Result<()
                 s.velocity
             };
             s.exc_now = part.voice.exciter_level().min(1.0);
-            (patch, s.freq, s.gate, strength, s.level, amp)
+            (patch, s.freq, s.gate, strength, level_eff, amp)
         };
 
         part.process(&patch, freq, strength, gate, &mut out_l, &mut out_r);
@@ -1111,7 +1181,30 @@ fn ex_set(
             }
             format!("{} = {}", key, row_text(s, r))
         }
-        Err(_) => format!("{key}: not a number: {value}"),
+        // not a number: treat as a cable — bind ("module/N/out") or
+        // unbind ("-") the row's CV-bank slot
+        Err(_) => {
+            let Some(bind_slot) = binding_slot(r) else {
+                return format!("{key}: not a number: {value}");
+            };
+            let v = if value == "-" {
+                V::Src(None)
+            } else {
+                if SourceAddr::parse(value).is_none() {
+                    return format!("{key}: not a number or source: {value}");
+                }
+                V::Src(Some(value.to_string()))
+            };
+            let old = s.get_param(bind_slot);
+            s.set_param(bind_slot, v.clone());
+            if let Some(old) = old {
+                history.record(bind_slot, "Set", old, v);
+            }
+            match &s.srcs[src_index(r).unwrap_or(0)] {
+                Some(a) => format!("{key} ← {a}"),
+                None => format!("{key} unbound"),
+            }
+        }
     }
 }
 
@@ -1170,5 +1263,37 @@ mod tests {
         assert!(ex_set(&mut s, &mut h, "strike_m", "0.9").contains("particles"));
         assert!(ex_set(&mut s, &mut h, "notes", "sequencer/0/t2").contains("t2"));
         assert!(ex_set(&mut s, &mut h, "wow", "1").contains("Unknown"));
+    }
+
+    #[test]
+    fn every_value_row_is_bindable() {
+        use crate::undo::ParamUndo;
+        use crate::undo::ParamValue as V;
+        // the whole point of a modular: no row without a jack
+        for r in ROWS {
+            if matches!(r, Row::Notes | Row::Amp) {
+                continue;
+            }
+            let i = src_index(r).unwrap_or_else(|| panic!("{:?} must be bindable", r));
+            let mut s = ElementsState::new();
+            s.set_param(SRC_SLOT_BASE + i, V::Src(Some("lfo/0/a1".into())));
+            assert_eq!(
+                s.srcs[i].as_ref().map(|a| a.to_string()),
+                Some("lfo/0/a1".into()),
+                "{r:?} binds"
+            );
+        }
+    }
+
+    #[test]
+    fn ex_set_binds_and_unbinds_value_rows() {
+        let mut s = ElementsState::new();
+        let mut h = crate::undo::ParamHistory::default();
+        assert!(ex_set(&mut s, &mut h, "strike_m", "lfo/0/s1").contains("lfo/0/s1"));
+        let i = src_index(Row::StrikeM).unwrap();
+        assert!(s.srcs[i].is_some());
+        assert!(ex_set(&mut s, &mut h, "strike_m", "-").contains("unbound"));
+        assert!(s.srcs[i].is_none());
+        assert!(ex_set(&mut s, &mut h, "level", "lfo/0/a4").contains("lfo/0/a4"));
     }
 }

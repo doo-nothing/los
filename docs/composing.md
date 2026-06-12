@@ -313,8 +313,11 @@ physical-modelling instrument — `contour` picks the envelope family
 particles); the modal resonator's `geometry` (plate → string → bar),
 `brightness`, `damping`, `position`; `space` is dry → wide → reverb
 wash. Monophonic; velocity = strike strength (the accent law is the
-hardware's). Gamelan/metallic territory: strike-only patches with
-geometry 0.55–0.75, damping 0.3–0.5, several instances tuned apart.
+hardware's). Every parameter has a `*_src` twin (`geometry_src`,
+`strike_meta_src`, `level_src`, …) — bind anything; `amp_src` is a
+VCA after the voice, `notes_src` picks the note track. Gamelan/metallic
+territory: strike-only patches with geometry 0.55–0.75, damping
+0.3–0.5, several instances tuned apart.
 
 **mixer**: per-track `level` (0–1), `pan` (−1–1), `drive` (0–1), 3-band
 EQ (±15 dB, `eq_freq` 0–1), `mute`/`solo`; a master strip with the
@@ -333,6 +336,9 @@ Any `*_src` field binds a parameter to a source address,
 | `filterbank/N/` | `b1`–`b16` (per-band followers) |
 | `swarm/N/` | `swl` (the ladder's swell — the bloom as a source) |
 | `lfo/N/` | `s1`–`s4` (sines), `a1`–`a4` (assigns) |
+| `wasp/N/` | `env` (envelope follower) |
+| `dpo/N/` | `lfo` |
+| `elements/N/` | `exc` (exciter level follower) |
 | `template/N/` | `lfo` |
 
 Audio `input` fields are 2-segment: a producing module (`voice`,
