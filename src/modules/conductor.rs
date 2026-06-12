@@ -363,6 +363,7 @@ pub fn canonical_module(name: &str) -> Option<&'static str> {
         "rings" | "resonator" => "rings",
         "tides" | "slopes" => "tides",
         "peaks" | "drums808" => "peaks",
+        "branches" | "bernoulli" => "branches",
         "conductor" => "conductor",
         _ => return None,
     })
@@ -390,6 +391,7 @@ pub const ADDABLE_MODULES: &[&str] = &[
     "rings",
     "tides",
     "peaks",
+    "branches",
 ];
 
 /// Spawn a new module instance in a fresh pane of the modules window.

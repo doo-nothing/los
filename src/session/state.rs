@@ -811,6 +811,29 @@ pub struct PeaksParams {
     pub notes2_src: Option<String>,
 }
 
+/// Branches (modules/branches) — the MI dual Bernoulli gate as a
+/// probabilistic note router: each channel consumes a track and
+/// re-emits every note on branches/N/{1a,1b,2a,2b}.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BranchesParams {
+    #[serde(default)]
+    pub format: u32,
+    pub p1: Option<f32>,
+    pub p2: Option<f32>,
+    pub toggle1: Option<bool>,
+    pub toggle2: Option<bool>,
+    pub latch1: Option<bool>,
+    pub latch2: Option<bool>,
+    #[serde(default)]
+    pub p1_src: Option<String>,
+    #[serde(default)]
+    pub p2_src: Option<String>,
+    #[serde(default)]
+    pub notes1_src: Option<String>,
+    #[serde(default)]
+    pub notes2_src: Option<String>,
+}
+
 /// The swarm voice (modules/swarm.rs) — the CS-80-flavored brass pad:
 /// chord by name ("min7"), the five knobs, glide, and the three kinds
 /// of binding (knob sources, amp, notes).

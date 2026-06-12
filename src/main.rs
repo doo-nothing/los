@@ -8,7 +8,7 @@
 
 use anyhow::Result;
 use los::{
-    badge, conductor, delay, dld, dpo, elements, envelope, filterbank, lfo, mixer, peaks, rings,
+    badge, branches, conductor, delay, dld, dpo, elements, envelope, filterbank, lfo, mixer, peaks, rings,
     sampler, tides,
     scope,
     sequencer,
@@ -108,6 +108,7 @@ fn usage() {
     eprintln!("  rings              Resonator (Mutable Instruments Rings): modal/strings/fm");
     eprintln!("  tides              Tidal modulator (Mutable Instruments Tides): slopes x4");
     eprintln!("  peaks              Dual function gen (Mutable Instruments Peaks): 808s, envs");
+    eprintln!("  branches           Bernoulli note router (Mutable Instruments Branches)");
     eprintln!("  badge              Los faceplate (beat-synced animation, session info)");
     eprintln!();
     eprintln!("Aliases:");
@@ -142,6 +143,7 @@ fn dispatch_module(name: &str, instance: usize) -> Result<()> {
         "rings" => rings::run(instance),
         "tides" => tides::run(instance),
         "peaks" => peaks::run(instance),
+        "branches" => branches::run(instance),
         "badge" => badge::run(instance),
         other => anyhow::bail!("unknown module: {other}"),
     }

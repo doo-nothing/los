@@ -355,6 +355,17 @@ a channel running an envelope or tap LFO is a patchable modulator.
 The 808s keep the firmware's integer arithmetic — that crunch is
 the instrument.
 
+**branches** (the Mutable Instruments Bernoulli gate, full port):
+two channels; each consumes a note track (`notes1_src`/`notes2_src`)
+and re-emits every note onto one of two outputs by a coin flip —
+`p1`/`p2` set the bias (0% = all out a, 100% = all out b, the
+firmware's dead zones at the ends), `toggle*` makes heads flip the
+previous outcome, `latch*` holds gates until the next flip. Bind a
+voice's notes to `branches/N/1a` (or 1b/2a/2b) to route
+probabilistically; the same four outputs sit on the bus as gate
+levels for trigger inputs (dld hold, lfo reset). Both p knobs take
+cables.
+
 **mixer**: per-track `level` (0–1), `pan` (−1–1), `drive` (0–1), 3-band
 EQ (±15 dB, `eq_freq` 0–1), `mute`/`solo`; a master strip with the
 same console plus `master_width` (0–2).
@@ -386,6 +397,7 @@ Sources:
 | `elements/N/` | `exc` (exciter level follower) |
 | `tides/N/` | `o1`–`o4` (the four slopes) |
 | `peaks/N/` | `ch1`, `ch2` (the two channel outputs) |
+| `branches/N/` | `1a`, `1b`, `2a`, `2b` (gate levels; also note re-emit sources) |
 | `template/N/` | `lfo` |
 
 Audio `input` fields are 2-segment: a producing module (`voice`,
