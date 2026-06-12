@@ -1319,8 +1319,13 @@ pub fn consumer_id(module: &str, instance: usize) -> usize {
         // dpo takes the pair below (dpo 0 -> slot 3, 1 -> slot 2);
         // collides only with voice 2/3 in the same rig.
         "dpo" => 3 - instance.min(1),
-        // elements takes the lowest pair (0/1); collides with voice 0/1.
-        "elements" => 1 - instance.min(1),
+        // elements uses the full voice range (it IS a voice): four
+        // instances get four DISTINCT cursors — sharing a slot between
+        // processes makes them steal each other's notes at random,
+        // which silenced three of four gamelan instances. Collides
+        // with voice N at the same instance number; offset instance
+        // numbers when mixing the two families.
+        "elements" => instance.min(7),
         "envelope" => 8 + instance.min(5),
         // `los tap` gets its own cursor so draining the backlog can't
         // starve whichever module shares the default slot
