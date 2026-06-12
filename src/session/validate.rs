@@ -28,9 +28,8 @@ use crate::routing::{output_labels, SourceAddr};
 use crate::state::{
     DelayParams, DldParams, DpoParamsState, ElementsParams, EnvelopeParams, FilterbankParams,
     LfoParams,
-    MacroCmd, MixerParams, PeaksParams, RingsParams, SamplerParams, ScopeParams,
-    SequencerParams, TidesParams,
-    SessionState, StepParam,
+    BranchesParams, MacroCmd, MixerParams, PeaksParams, RingsParams, SamplerParams,
+    ScopeParams, SequencerParams, SessionState, StepParam, TidesParams,
     SwarmParams, TapeParams, TemplateParams, TrackMode, VoiceParams, WaspParams, STATE_FORMAT,
 };
 use crate::theory;
@@ -298,6 +297,11 @@ fn validate_session(st: &SessionState, r: &mut Report) {
             "peaks" => {
                 if let Some(p) = decode::<PeaksParams>(value, &loc, r) {
                     check_peaks(&p, &loc, &declared, r, &mut pending);
+                }
+            }
+            "branches" => {
+                if let Some(p) = decode::<BranchesParams>(value, &loc, r) {
+                    check_branches(&p, &loc, &declared, r, &mut pending);
                 }
             }
             // No params structs: state is ephemeral or none.
@@ -1542,6 +1546,24 @@ fn check_peaks(
     check_notes_src(&p.notes2_src, loc, declared, r, pending);
 }
 
+/// Branches (modules/branches): probabilities 0-1, srcs, dual note
+/// tracks.
+fn check_branches(
+    p: &BranchesParams,
+    loc: &str,
+    declared: &BTreeSet<(String, usize)>,
+    r: &mut Report,
+    pending: &mut Vec<PendingTrackRef>,
+) {
+    range01(p.p1, "p1", loc, r);
+    range01(p.p2, "p2", loc, r);
+    for (field, src) in [("p1_src", &p.p1_src), ("p2_src", &p.p2_src)] {
+        check_src(src, field, loc, declared, r);
+    }
+    check_notes_src(&p.notes1_src, loc, declared, r, pending);
+    check_notes_src(&p.notes2_src, loc, declared, r, pending);
+}
+
 /// Template (template.rs SHAPES): shape by name.
 fn check_template(
     p: &TemplateParams,
@@ -1593,8 +1615,8 @@ const AUDIO_MODULES: [&str; 14] =
     ["voice", "swarm", "tone", "template", "delay", "filterbank", "dld", "sampler", "wasp", "dpo", "elements", "rings", "tides", "peaks"];
 
 /// Canonical module names, for misspelled-pane suggestions.
-const MODULE_NAMES: [&str; 22] =
-    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements", "rings", "tides", "peaks"];
+const MODULE_NAMES: [&str; 23] =
+    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements", "rings", "tides", "peaks", "branches"];
 
 /// An optional `*_src` field: grammar, known output, declared instance.
 /// Returns the parsed address so callers can queue cross-module checks.
@@ -1682,12 +1704,22 @@ fn check_notes_src(
     let Some(addr) = check_src_str(s, "notes_src", loc, declared, r) else {
         return;
     };
+    // branches re-emits note events on its four outputs
+    if addr.module == "branches" {
+        if !["1a", "1b", "2a", "2b"].contains(&addr.output.as_str()) {
+            r.error(
+                loc,
+                format!("notes_src \"{s}\": branches outputs are 1a, 1b, 2a, 2b"),
+            );
+        }
+        return;
+    }
     if addr.module != "sequencer" {
         r.error(
             loc,
             format!(
                 "notes_src \"{s}\" must name a sequencer track (sequencer/N/tM) — \
-                 only sequencer tracks emit note events"
+                 only sequencer tracks emit note events; branches outputs route too"
             ),
         );
         return;
@@ -1809,6 +1841,7 @@ const KNOWN_KEYS: &[&str] = &[
     "bank_a", "bank_b", "bind",
     "blow_meta_src", "blow_src", "blow_timbre_src", "bow_src", "bow_timbre_src", "bp", "bp_src",
     "bpm", "bpm_src", "by", "channel", "channels", "chord", "cmds", "created", "cutoff",
+    "toggle1", "toggle2", "latch1", "latch2", "p1_src", "p2_src",
     "cutoff_src",
     "chord_src", "cycle", "dec", "dec_src", "decay", "decay_src", "delay", "delay_prob",
     "delay_unit", "exciter",

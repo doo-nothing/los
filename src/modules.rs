@@ -18,6 +18,7 @@
 //! instrument module follows lives in docs/keybindings.md.
 
 pub mod badge;
+pub mod branches;
 pub mod conductor;
 pub mod delay;
 pub mod dld;
