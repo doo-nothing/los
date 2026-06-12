@@ -325,6 +325,25 @@ pub struct MixerParams {
     pub master_send_a: f32,
     #[serde(default)]
     pub master_send_b: f32,
+    // master strip bindings (every parameter takes a cable)
+    #[serde(default)]
+    pub master_src: Option<String>,
+    #[serde(default)]
+    pub master_width_src: Option<String>,
+    #[serde(default)]
+    pub master_drive_src: Option<String>,
+    #[serde(default)]
+    pub master_lo_src: Option<String>,
+    #[serde(default)]
+    pub master_mid_src: Option<String>,
+    #[serde(default)]
+    pub master_freq_src: Option<String>,
+    #[serde(default)]
+    pub master_hi_src: Option<String>,
+    #[serde(default)]
+    pub master_send_a_src: Option<String>,
+    #[serde(default)]
+    pub master_send_b_src: Option<String>,
 }
 
 fn default_mid_freq() -> f32 {

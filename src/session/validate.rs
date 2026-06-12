@@ -941,6 +941,19 @@ fn check_mixer(
             check_src(src, &format!("{tl}.{field}"), loc, declared, r);
         }
     }
+    for (field, src) in [
+        ("master_src", &p.master_src),
+        ("master_width_src", &p.master_width_src),
+        ("master_drive_src", &p.master_drive_src),
+        ("master_lo_src", &p.master_lo_src),
+        ("master_mid_src", &p.master_mid_src),
+        ("master_freq_src", &p.master_freq_src),
+        ("master_hi_src", &p.master_hi_src),
+        ("master_send_a_src", &p.master_send_a_src),
+        ("master_send_b_src", &p.master_send_b_src),
+    ] {
+        check_src(src, field, loc, declared, r);
+    }
 }
 
 /// Delay (delay.rs param clamps + dsp.rs TIME_MIN/TIME_MAX): time
@@ -1637,8 +1650,10 @@ const KNOWN_KEYS: &[&str] = &[
     "instance", "kind", "lane", "lane_len", "layout", "length", "level", "level_src", "lo_src",
     "logic_outputs", "loop_in", "loop_mode", "loop_on", "loop_out", "lpg", "lpg_src", "macros",
     "master",
-    "master_drive", "master_eq_freq", "master_eq_hi", "master_eq_lo", "master_eq_mid",
-    "master_send_a", "master_send_b", "master_width", "meta", "mid_src", "mod_value",
+    "master_drive", "master_drive_src", "master_eq_freq", "master_eq_hi", "master_eq_lo",
+    "master_eq_mid", "master_freq_src", "master_hi_src", "master_lo_src", "master_mid_src",
+    "master_send_a", "master_send_a_src", "master_send_b", "master_send_b_src", "master_src",
+    "master_width", "master_width_src", "meta", "mid_src", "mod_value",
     "mix", "mix_src", "modbus_channel", "mode", "module", "monitor", "morph", "morph_src",
     "muted", "mute", "name", "offset_src",
     "note", "notes_src", "offset", "or_enabled", "output", "pan", "pan_src", "panes", "patch",
