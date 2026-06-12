@@ -526,6 +526,48 @@ pub struct WaspParams {
     pub dirt_src: Option<String>,
 }
 
+/// The DPO (modules/dpo) — Make Noise-style complex oscillator.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DpoParamsState {
+    #[serde(default)]
+    pub format: u32,
+    pub ratio: Option<f32>,
+    pub follow: Option<f32>,
+    pub index: Option<f32>,
+    pub fm_a: Option<f32>,
+    pub fm_b: Option<f32>,
+    /// VCO A mode by name: "free", "lock", "sync", "lfo".
+    pub mode: Option<String>,
+    pub shape: Option<f32>,
+    pub angle: Option<f32>,
+    pub fold: Option<f32>,
+    pub mod_index: Option<f32>,
+    pub mix: Option<f32>,
+    pub level: Option<f32>,
+    pub freq: Option<f32>,
+    pub gate: Option<bool>,
+    #[serde(default)]
+    pub ratio_src: Option<String>,
+    #[serde(default)]
+    pub index_src: Option<String>,
+    #[serde(default)]
+    pub shape_src: Option<String>,
+    #[serde(default)]
+    pub angle_src: Option<String>,
+    #[serde(default)]
+    pub fold_src: Option<String>,
+    #[serde(default)]
+    pub mod_src: Option<String>,
+    #[serde(default)]
+    pub follow_src: Option<String>,
+    #[serde(default)]
+    pub strike_src: Option<String>,
+    #[serde(default)]
+    pub amp_src: Option<String>,
+    #[serde(default)]
+    pub notes_src: Option<String>,
+}
+
 /// The swarm voice (modules/swarm.rs) — the CS-80-flavored brass pad:
 /// chord by name ("min7"), the five knobs, glide, and the three kinds
 /// of binding (knob sources, amp, notes).

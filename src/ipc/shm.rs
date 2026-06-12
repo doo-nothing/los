@@ -1316,6 +1316,9 @@ pub fn consumer_id(module: &str, instance: usize) -> usize {
         // sampler shares the next pair down (sampler 0 -> slot 5,
         // 1 -> slot 4); collisions only with voice 4/5 in the same rig.
         "sampler" => 5 - instance.min(1),
+        // dpo takes the pair below (dpo 0 -> slot 3, 1 -> slot 2);
+        // collides only with voice 2/3 in the same rig.
+        "dpo" => 3 - instance.min(1),
         "envelope" => 8 + instance.min(5),
         // `los tap` gets its own cursor so draining the backlog can't
         // starve whichever module shares the default slot
