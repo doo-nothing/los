@@ -130,6 +130,26 @@ breathes via pattern slots and macros). Every knob is a serde field, so
 the compiler type-checks the composition. `examples/worldends.rs` is
 the worked example of composing for the rig from outside it.
 
+## Composing by prompt
+
+The rig built for hands turns out to be a remarkably promptable
+instrument: a complete song — patterns, sections, the bar-by-bar
+arrangement, every cable — is one TOML file, and the whole audition
+loop is three commands:
+
+```sh
+los check song.toml                   # every problem at once, with did-you-means
+los render song.toml take.wav        # headless one-shot: spawn, record, tear down
+los audit take.wav --song song.toml  # the take in numbers: RMS arc per section
+```
+
+An LLM agent (or you, in a different mood) writes the file, reads the
+audit table, changes one thing, renders again. Why this works, the full
+schema with musical meanings, form recipes, and prompting tips:
+[docs/composing.md](docs/composing.md). Agents start at
+[AGENTS.md](AGENTS.md); humans copying a starting point want
+[examples/first-song.toml](examples/first-song.toml).
+
 Adding a module touches `src/modules/` plus a few registration points —
 [docs/writing-a-module.md](docs/writing-a-module.md) is the guide and
 `src/modules/template.rs` the worked example ([CONTRIBUTING.md](CONTRIBUTING.md)
