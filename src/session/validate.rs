@@ -29,6 +29,7 @@ use crate::state::{
     DelayParams, DldParams, DpoParamsState, ElementsParams, EnvelopeParams, FilterbankParams,
     LfoParams,
     MacroCmd, MixerParams, RingsParams, SamplerParams, ScopeParams, SequencerParams,
+    TidesParams,
     SessionState, StepParam,
     SwarmParams, TapeParams, TemplateParams, TrackMode, VoiceParams, WaspParams, STATE_FORMAT,
 };
@@ -287,6 +288,11 @@ fn validate_session(st: &SessionState, r: &mut Report) {
             "rings" => {
                 if let Some(p) = decode::<RingsParams>(value, &loc, r) {
                     check_rings(&p, &loc, &declared, r, &mut pending);
+                }
+            }
+            "tides" => {
+                if let Some(p) = decode::<TidesParams>(value, &loc, r) {
+                    check_tides(&p, &loc, &declared, r, &mut pending);
                 }
             }
             // No params structs: state is ephemeral or none.
@@ -1434,6 +1440,54 @@ fn check_rings(
     check_notes_src(&p.notes_src, loc, declared, r, pending);
 }
 
+/// Tides (modules/tides): mode/output/range by name, knobs 0-1,
+/// every value param's src checked.
+fn check_tides(
+    p: &TidesParams,
+    loc: &str,
+    declared: &BTreeSet<(String, usize)>,
+    r: &mut Report,
+    pending: &mut Vec<PendingTrackRef>,
+) {
+    if let Some(m) = p.mode.as_deref() {
+        if !["ad", "loop", "ar"].contains(&m) {
+            r.error(loc, format!("mode {m:?} — ad, loop, or ar"));
+        }
+    }
+    if let Some(m) = p.output.as_deref() {
+        if !["gates", "amplitude", "phase", "frequency"].contains(&m) {
+            r.error(loc, format!("output {m:?} — gates/amplitude/phase/frequency"));
+        }
+    }
+    if let Some(m) = p.range.as_deref() {
+        if !["control", "audio"].contains(&m) {
+            r.error(loc, format!("range {m:?} — control or audio"));
+        }
+    }
+    for (name, v) in [
+        ("freq", p.freq),
+        ("shape", p.shape),
+        ("slope", p.slope),
+        ("smooth", p.smooth),
+        ("shift", p.shift),
+        ("level", p.level),
+    ] {
+        range01(v, name, loc, r);
+    }
+    for (field, src) in [
+        ("freq_src", &p.freq_src),
+        ("shape_src", &p.shape_src),
+        ("slope_src", &p.slope_src),
+        ("smooth_src", &p.smooth_src),
+        ("shift_src", &p.shift_src),
+        ("level_src", &p.level_src),
+        ("amp_src", &p.amp_src),
+    ] {
+        check_src(src, field, loc, declared, r);
+    }
+    check_notes_src(&p.notes_src, loc, declared, r, pending);
+}
+
 /// Template (template.rs SHAPES): shape by name.
 fn check_template(
     p: &TemplateParams,
@@ -1481,12 +1535,12 @@ const SOURCE_MODULES: [&str; 6] = [
 ];
 
 /// Modules that publish audio rings an fx/tape input can claim.
-const AUDIO_MODULES: [&str; 12] =
-    ["voice", "swarm", "tone", "template", "delay", "filterbank", "dld", "sampler", "wasp", "dpo", "elements", "rings"];
+const AUDIO_MODULES: [&str; 13] =
+    ["voice", "swarm", "tone", "template", "delay", "filterbank", "dld", "sampler", "wasp", "dpo", "elements", "rings", "tides"];
 
 /// Canonical module names, for misspelled-pane suggestions.
-const MODULE_NAMES: [&str; 20] =
-    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements", "rings"];
+const MODULE_NAMES: [&str; 21] =
+    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements", "rings", "tides"];
 
 /// An optional `*_src` field: grammar, known output, declared instance.
 /// Returns the parsed address so callers can queue cross-module checks.
@@ -1727,8 +1781,9 @@ const KNOWN_KEYS: &[&str] = &[
     "res_src", "reversed", "rise", "rise_src", "root", "rotation", "scale", "scale_cents",
     "scale_period", "send_a", "send_a_src", "send_b", "send_b_src", "session_name", "shape",
     "shape_src", "shim", "shim_src", "signal_src", "slot", "slots", "solo", "source", "speed",
-    "speed_src", "slide", "slide_src", "split", "split_src", "spread", "spread_src", "start",
-    "structure", "structure_src", "poly",
+    "speed_src", "slide", "slide_src", "smooth", "smooth_src", "split", "split_src", "spread",
+    "spread_src", "start", "structure", "structure_src", "poly", "shift_src", "slope_src",
+    "sync", "smoothness",
     "start_src", "len_src", "step", "steps",
     "strike_meta_src", "strike_src", "strike_timbre_src", "sub",
     "sub_src", "sum_enabled", "swell", "swell_src", "swing", "tap", "taps", "time", "time_src",

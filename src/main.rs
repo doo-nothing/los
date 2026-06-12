@@ -9,7 +9,7 @@
 use anyhow::Result;
 use los::{
     badge, conductor, delay, dld, dpo, elements, envelope, filterbank, lfo, mixer, rings,
-    sampler,
+    sampler, tides,
     scope,
     sequencer,
     shm,
@@ -106,6 +106,7 @@ fn usage() {
     eprintln!("  lfo                Quad LFO bank (Batumi): free/quad/phase/div, 8 outputs");
     eprintln!("  elements           Modal voice (Mutable Instruments port): bow/blow/strike");
     eprintln!("  rings              Resonator (Mutable Instruments Rings): modal/strings/fm");
+    eprintln!("  tides              Tidal modulator (Mutable Instruments Tides): slopes x4");
     eprintln!("  badge              Los faceplate (beat-synced animation, session info)");
     eprintln!();
     eprintln!("Aliases:");
@@ -138,6 +139,7 @@ fn dispatch_module(name: &str, instance: usize) -> Result<()> {
         "lfo" => lfo::run(instance),
         "elements" => elements::run(instance),
         "rings" => rings::run(instance),
+        "tides" => tides::run(instance),
         "badge" => badge::run(instance),
         other => anyhow::bail!("unknown module: {other}"),
     }

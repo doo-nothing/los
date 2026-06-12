@@ -8,3 +8,6 @@
 //! `ui.rs` the module shell.
 
 pub mod dsp;
+pub mod ui;
+
+pub use ui::run;
