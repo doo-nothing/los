@@ -48,6 +48,14 @@ First five minutes: [docs/tour.md](docs/tour.md) · every key:
 |--------|--------------|
 | **sequencer** | 8 tracks × up to 128 steps × 8 pattern slots, Euclidean rhythms, probability, cycle modes, scales (microtonal, `.scl` import), per-step mod cables, macros + a macro lane — [the full tour](docs/sequencer.md) |
 | **voice** (`sto`) | STO-style osc: waveshaping, sub, FM, vactrol-ish low-pass gate |
+| **swarm** | CS-80-flavored brass pad: 7 detuned saws, ladder filter, chords |
+| **elements** | Mutable Instruments Elements port: bow/blow/strike into a modal resonator |
+| **rings** | Mutable Instruments Rings port: modal/sympathetic/string/FM resonator + the string-synth easter egg |
+| **dpo** | Make Noise DPO-style complex oscillator: FM, sync, fold, strike |
+| **sampler** | Reels from a-u.supply + a Morphagene-style designer, kit mode |
+| **dld** | 4ms Dual Looping Delay: clock-locked, holds, reverse |
+| **wasp** | Doepfer A-124 multimode filter with the EDP Wasp dirt |
+| **lfo** | Batumi-style quad LFO: free/quad/phase/div, 8 outputs |
 | **envelope** (`maths`) | 6 function generators: trig/gate/cycle, slew, pluck, SUM/OR/INV, EOR/EOC, audio-rate out |
 | **mixer** | Auto-discovers sources, per-track meters, clip warning, tape out (`los record`) |
 | **scope** | Braille/half-block/bars/dots renderers, level trigger, taps any signal |

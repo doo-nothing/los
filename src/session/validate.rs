@@ -28,7 +28,8 @@ use crate::routing::{output_labels, SourceAddr};
 use crate::state::{
     DelayParams, DldParams, DpoParamsState, ElementsParams, EnvelopeParams, FilterbankParams,
     LfoParams,
-    MacroCmd, MixerParams, SamplerParams, ScopeParams, SequencerParams, SessionState, StepParam,
+    MacroCmd, MixerParams, RingsParams, SamplerParams, ScopeParams, SequencerParams,
+    SessionState, StepParam,
     SwarmParams, TapeParams, TemplateParams, TrackMode, VoiceParams, WaspParams, STATE_FORMAT,
 };
 use crate::theory;
@@ -281,6 +282,11 @@ fn validate_session(st: &SessionState, r: &mut Report) {
             "elements" => {
                 if let Some(p) = decode::<ElementsParams>(value, &loc, r) {
                     check_elements(&p, &loc, &declared, r, &mut pending);
+                }
+            }
+            "rings" => {
+                if let Some(p) = decode::<RingsParams>(value, &loc, r) {
+                    check_rings(&p, &loc, &declared, r, &mut pending);
                 }
             }
             // No params structs: state is ephemeral or none.
@@ -1373,6 +1379,61 @@ fn check_elements(
     check_notes_src(&p.notes_src, loc, declared, r, pending);
 }
 
+/// Rings (modules/rings): modes/models/fx by name, poly 1-4, the
+/// macro knobs 0-1, every value param's src checked.
+fn check_rings(
+    p: &RingsParams,
+    loc: &str,
+    declared: &BTreeSet<(String, usize)>,
+    r: &mut Report,
+    pending: &mut Vec<PendingTrackRef>,
+) {
+    if let Some(m) = p.mode.as_deref() {
+        if !["resonator", "synth"].contains(&m) {
+            r.error(loc, format!("mode {m:?} — \"resonator\" or \"synth\""));
+        }
+    }
+    const MODELS: [&str; 6] = ["modal", "sympathetic", "string", "fm", "chords", "string+verb"];
+    if let Some(m) = p.model.as_deref() {
+        if !MODELS.contains(&m) {
+            r.error(loc, format!("model {m:?} — one of {}", MODELS.join(" ")));
+        }
+    }
+    const FXS: [&str; 6] = ["formant", "chorus", "reverb", "formant2", "ensemble", "reverb2"];
+    if let Some(m) = p.fx.as_deref() {
+        if !FXS.contains(&m) {
+            r.error(loc, format!("fx {m:?} — one of {}", FXS.join(" ")));
+        }
+    }
+    if let Some(v) = p.poly {
+        if !(1..=4).contains(&v) {
+            r.error(loc, format!("poly {v} is out of range 1-4"));
+        }
+    }
+    for (name, v) in [
+        ("structure", p.structure),
+        ("brightness", p.brightness),
+        ("damping", p.damping),
+        ("position", p.position),
+        ("chord", p.chord),
+        ("level", p.level),
+    ] {
+        range01(v, name, loc, r);
+    }
+    for (field, src) in [
+        ("structure_src", &p.structure_src),
+        ("brightness_src", &p.brightness_src),
+        ("damping_src", &p.damping_src),
+        ("position_src", &p.position_src),
+        ("chord_src", &p.chord_src),
+        ("level_src", &p.level_src),
+        ("amp_src", &p.amp_src),
+    ] {
+        check_src(src, field, loc, declared, r);
+    }
+    check_notes_src(&p.notes_src, loc, declared, r, pending);
+}
+
 /// Template (template.rs SHAPES): shape by name.
 fn check_template(
     p: &TemplateParams,
@@ -1420,12 +1481,12 @@ const SOURCE_MODULES: [&str; 6] = [
 ];
 
 /// Modules that publish audio rings an fx/tape input can claim.
-const AUDIO_MODULES: [&str; 11] =
-    ["voice", "swarm", "tone", "template", "delay", "filterbank", "dld", "sampler", "wasp", "dpo", "elements"];
+const AUDIO_MODULES: [&str; 12] =
+    ["voice", "swarm", "tone", "template", "delay", "filterbank", "dld", "sampler", "wasp", "dpo", "elements", "rings"];
 
 /// Canonical module names, for misspelled-pane suggestions.
-const MODULE_NAMES: [&str; 19] =
-    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements"];
+const MODULE_NAMES: [&str; 20] =
+    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements", "rings"];
 
 /// An optional `*_src` field: grammar, known output, declared instance.
 /// Returns the parsed address so callers can queue cross-module checks.
@@ -1641,7 +1702,8 @@ const KNOWN_KEYS: &[&str] = &[
     "blow_meta_src", "blow_src", "blow_timbre_src", "bow_src", "bow_timbre_src", "bp", "bp_src",
     "bpm", "bpm_src", "by", "channel", "channels", "chord", "cmds", "created", "cutoff",
     "cutoff_src",
-    "cycle", "dec", "dec_src", "decay", "decay_src", "delay", "delay_prob", "delay_unit",
+    "chord_src", "cycle", "dec", "dec_src", "decay", "decay_src", "delay", "delay_prob",
+    "delay_unit", "exciter",
     "depth", "depth_src",
     "detune", "detune_src", "drive", "drive_src", "dry", "dry_src", "eq_freq", "eq_hi", "eq_lo",
     "eq_mid", "euclidean_length", "euclidean_pulses", "euclidean_rotation", "fader", "fader_src",
@@ -1666,6 +1728,7 @@ const KNOWN_KEYS: &[&str] = &[
     "scale_period", "send_a", "send_a_src", "send_b", "send_b_src", "session_name", "shape",
     "shape_src", "shim", "shim_src", "signal_src", "slot", "slots", "solo", "source", "speed",
     "speed_src", "slide", "slide_src", "split", "split_src", "spread", "spread_src", "start",
+    "structure", "structure_src", "poly",
     "start_src", "len_src", "step", "steps",
     "strike_meta_src", "strike_src", "strike_timbre_src", "sub",
     "sub_src", "sum_enabled", "swell", "swell_src", "swing", "tap", "taps", "time", "time_src",

@@ -319,6 +319,19 @@ VCA after the voice, `notes_src` picks the note track. Gamelan/metallic
 territory: strike-only patches with geometry 0.55–0.75, damping
 0.3–0.5, several instances tuned apart.
 
+**rings** (the Mutable Instruments resonator, full port): `mode`
+resonator | synth (the "Disastrous Peace" string synth);
+resonator `model` ∈ modal, sympathetic, string, fm, chords,
+string+verb; `poly` 1–4 (odd counts ping-pong the voices);
+`structure` (inharmonicity / string tuning / fm ratio), `brightness`,
+`damping`, `position`, `chord` (the 11-chord table, used by the
+quantized modes and the synth) — every value param has a `*_src`
+twin. `exciter` = internal pluck/pulse on each note-on; patch
+`input` (any audio source, `module/N`) to excite the resonator
+externally instead — Rings as an fx is half the instrument. Synth
+mode `fx` ∈ formant, chorus, reverb, formant2, ensemble, reverb2.
+Notes strum; there is no gate — everything decays by `damping`.
+
 **mixer**: per-track `level` (0–1), `pan` (−1–1), `drive` (0–1), 3-band
 EQ (±15 dB, `eq_freq` 0–1), `mute`/`solo`; a master strip with the
 same console plus `master_width` (0–2).

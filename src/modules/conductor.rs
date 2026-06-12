@@ -360,6 +360,7 @@ pub fn canonical_module(name: &str) -> Option<&'static str> {
         "dpo" | "259" | "complex" => "dpo",
         "lfo" | "batumi" | "quad" => "lfo",
         "elements" | "modal" | "mi" => "elements",
+        "rings" | "resonator" => "rings",
         "conductor" => "conductor",
         _ => return None,
     })
@@ -384,6 +385,7 @@ pub const ADDABLE_MODULES: &[&str] = &[
     "dpo",
     "lfo",
     "elements",
+    "rings",
 ];
 
 /// Spawn a new module instance in a fresh pane of the modules window.

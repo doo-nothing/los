@@ -646,8 +646,8 @@ fn mixer_thread(
                 // stays dry: a return feeding its own send is a loop you
                 // should have to ask for.
                 let (sa, sb) = match entry.module_name.as_str() {
-                    "voice" | "tone" | "template" | "swarm" | "elements" | "dpo"
-                    | "sampler" => (0.4, 0.3),
+                    "voice" | "tone" | "template" | "swarm" | "elements" | "rings"
+                    | "dpo" | "sampler" => (0.4, 0.3),
                     "filterbank" => (0.3, 0.0),
                     _ => (0.0, 0.0),
                 };
