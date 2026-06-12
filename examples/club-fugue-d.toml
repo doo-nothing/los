@@ -1,0 +1,1603 @@
+# club-fugue-d.toml — Dancing in the Club, second movement: ALIVE.
+# Round-one feedback: more crescendo, faster, higher, fx that build.
+# Tempo arc 44→62→32 over 120 bars (~10 min); the subject lifts an
+# octave on its hot slot; velocities tier 38→127; the peak adds
+# double-time counter-eighths, octave bass kicks, ratchets; and the
+# delay's wash + shim RIDE sequencer/0/t8, whose pattern slots ramp
+# floor→mid→peak with the form — the club air itself crescendos.
+#
+#   bars   0-7    a  the hum               44
+#   bars   8-21   b  subject, mid          44
+#   bars  22-35   c  answer + fx to mid    48
+#   bars  36-49   d  the dance begins      50
+#   bars  50-63   e  THE LIFT: subject+answer up an octave   54
+#   bars  64-83   f  THE PEAK: descant, double-time, fx wide 62
+#   bars  84-93   g  receding              50
+#   bars  94-105  h  thinning, back down   40
+#   bars 106-119  i  the hum, last person  32
+#
+# Six raspy voices, no swarm.
+
+[meta]
+name = "club-fugue-d"
+created = ""
+format = 2
+
+[[windows]]
+name = "modules"
+
+[[windows.panes]]
+module = "sequencer"
+instance = 0
+
+[windows.panes.patch_inline]
+bpm = 44.0
+playing = false
+lane = ["a", "", "", "", "", "", "", "", "b", "", "", "", "", "", "", "", "", "", "", "", "", "", "c", "", "", "", "", "", "", "", "", "", "", "", "", "", "d", "", "", "", "", "", "", "", "", "", "", "", "", "", "e", "", "", "", "", "", "", "", "", "", "", "", "", "", "f", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "g", "", "", "", "", "", "", "", "", "", "h", "", "", "", "", "", "", "", "", "", "", "", "i", "", "", "", "", "", "", "", "", "", "", "", "", ""]
+lane_len = 120
+
+[[windows.panes.patch_inline.tracks]]
+length = 16
+mode = "note"
+cycle = "forward"
+scale = "major"
+root = 53
+swing = 50
+humanize = 3.0
+active_slot = 0
+steps = [
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+]
+
+[[windows.panes.patch_inline.tracks.slots]]
+slot = 1
+length = 64
+steps = [
+  { active = true, note = 62, velocity = 58 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 58, velocity = 48 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 60, velocity = 55 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 57, velocity = 46 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 57, velocity = 52 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 53, velocity = 44 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 55, velocity = 50 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 52, velocity = 38, prob = 85, delay = 45.0, delay_unit = "ms", delay_prob = 100 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+]
+
+[[windows.panes.patch_inline.tracks.slots]]
+slot = 2
+length = 64
+steps = [
+  { active = true, note = 74, velocity = 112 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 77, velocity = 86, prob = 75 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 70, velocity = 102 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 72, velocity = 90, prob = 80, delay = 30.0, delay_unit = "ms", delay_prob = 100 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 72, velocity = 109 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 70, velocity = 87, prob = 70 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 69, velocity = 100 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 67, velocity = 88, prob = 70, delay = 35.0, delay_unit = "ms", delay_prob = 100 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 69, velocity = 106 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 69, velocity = 90, prob = 75 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 65, velocity = 98 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 64, velocity = 86, prob = 65 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 67, velocity = 104 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 65, velocity = 92, prob = 80, repeats = 2, repeat_prob = 55 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 64, velocity = 92, prob = 85, delay = 45.0, delay_unit = "ms", delay_prob = 100 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 62, velocity = 84, prob = 60, delay = 40.0, delay_unit = "ms", delay_prob = 100 },
+  { active = false, note = 53, velocity = 60 },
+]
+
+[[windows.panes.patch_inline.tracks.slots]]
+slot = 3
+length = 64
+steps = [
+  { active = true, note = 62, velocity = 42, prob = 80 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 60, velocity = 34, prob = 70 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+]
+[[windows.panes.patch_inline.tracks]]
+length = 16
+mode = "note"
+cycle = "forward"
+scale = "major"
+root = 53
+swing = 56
+humanize = 3.5
+active_slot = 0
+steps = [
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+]
+
+[[windows.panes.patch_inline.tracks.slots]]
+slot = 1
+length = 64
+steps = [
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 57, velocity = 52 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 58, velocity = 46, delay = 40.0, delay_unit = "ms", delay_prob = 100 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 60, velocity = 54 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 60, velocity = 50 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 62, velocity = 44, prob = 70 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 57, velocity = 48 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 53, velocity = 50 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 55, velocity = 42, delay = 45.0, delay_unit = "ms", delay_prob = 100 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 57, velocity = 46 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 52, velocity = 48 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 55, velocity = 44, prob = 65 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 53, velocity = 42 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+]
+
+[[windows.panes.patch_inline.tracks.slots]]
+slot = 2
+length = 64
+steps = [
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 65, velocity = 68, prob = 65, repeats = 2, repeat_prob = 45 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 57, velocity = 98 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 58, velocity = 92, delay = 40.0, delay_unit = "ms", delay_prob = 100 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 65, velocity = 68, prob = 65, repeats = 2, repeat_prob = 45 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 60, velocity = 100 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 65, velocity = 68, prob = 65, repeats = 2, repeat_prob = 45 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 60, velocity = 96 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 62, velocity = 90, prob = 70 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 65, velocity = 68, prob = 65, repeats = 2, repeat_prob = 45 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 57, velocity = 94 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 65, velocity = 68, prob = 65, repeats = 2, repeat_prob = 45 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 53, velocity = 96 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 55, velocity = 88, delay = 45.0, delay_unit = "ms", delay_prob = 100 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 65, velocity = 68, prob = 65, repeats = 2, repeat_prob = 45 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 57, velocity = 92 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 65, velocity = 68, prob = 65, repeats = 2, repeat_prob = 45 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 52, velocity = 94 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 55, velocity = 90, prob = 65 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 65, velocity = 68, prob = 65, repeats = 2, repeat_prob = 45 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 53, velocity = 88 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+]
+[[windows.panes.patch_inline.tracks]]
+length = 16
+mode = "note"
+cycle = "forward"
+scale = "major"
+root = 53
+swing = 50
+humanize = 3.0
+active_slot = 0
+steps = [
+  { active = true, note = 29, velocity = 30 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+]
+
+[[windows.panes.patch_inline.tracks.slots]]
+slot = 1
+length = 64
+steps = [
+  { active = true, note = 34, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 41, velocity = 38, prob = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 29, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 36, velocity = 38, prob = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 38, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 45, velocity = 38, prob = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 36, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 43, velocity = 38, prob = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+]
+
+[[windows.panes.patch_inline.tracks.slots]]
+slot = 2
+length = 64
+steps = [
+  { active = true, note = 34, velocity = 96 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 41, velocity = 74, prob = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 46, velocity = 84, prob = 75, repeats = 2, repeat_prob = 50 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 29, velocity = 96 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 36, velocity = 74, prob = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 41, velocity = 84, prob = 75, repeats = 2, repeat_prob = 50 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 38, velocity = 96 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 45, velocity = 74, prob = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 50, velocity = 84, prob = 75, repeats = 2, repeat_prob = 50 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 36, velocity = 96 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 43, velocity = 74, prob = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 48, velocity = 84, prob = 75, repeats = 2, repeat_prob = 50 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+]
+
+[[windows.panes.patch_inline.tracks.slots]]
+slot = 3
+length = 32
+steps = [
+  { active = true, note = 29, velocity = 24 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 29, velocity = 18, prob = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+]
+[[windows.panes.patch_inline.tracks]]
+length = 16
+mode = "modulation"
+cycle = "drunk"
+scale = "major"
+root = 53
+swing = 50
+humanize = 3.0
+active_slot = 0
+steps = [
+  { active = true, note = 60, velocity = 100, mod_value = 0.28 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.36 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.30 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.44 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.34 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.50 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.38 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.46 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.32 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.52 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.40 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.35 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.48 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.31 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.42 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.37 },
+]
+[[windows.panes.patch_inline.tracks]]
+length = 16
+mode = "note"
+cycle = "forward"
+scale = "major"
+root = 53
+swing = 50
+humanize = 3.0
+active_slot = 0
+steps = [
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+]
+
+[[windows.panes.patch_inline.tracks.slots]]
+slot = 1
+length = 64
+steps = [
+  { active = true, note = 57, velocity = 54 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 53, velocity = 44 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 55, velocity = 51 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 52, velocity = 42 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 52, velocity = 48 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 48, velocity = 40 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 50, velocity = 46 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 47, velocity = 34 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+]
+
+[[windows.panes.patch_inline.tracks.slots]]
+slot = 2
+length = 64
+steps = [
+  { active = true, note = 69, velocity = 104 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 65, velocity = 94 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 67, velocity = 101 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 64, velocity = 92 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 64, velocity = 98 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 60, velocity = 90 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 62, velocity = 96 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 59, velocity = 84 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+]
+[[windows.panes.patch_inline.tracks]]
+length = 16
+mode = "note"
+cycle = "forward"
+scale = "major"
+root = 53
+swing = 50
+humanize = 3.0
+active_slot = 0
+steps = [
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+]
+
+[[windows.panes.patch_inline.tracks.slots]]
+slot = 1
+length = 64
+steps = [
+  { active = true, note = 74, velocity = 86, prob = 85 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 77, velocity = 76, prob = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 72, velocity = 82, prob = 75 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 76, velocity = 74, prob = 55, delay = 30.0, delay_unit = "ms", delay_prob = 100 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 69, velocity = 78, prob = 75 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 74, velocity = 74, prob = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 67, velocity = 80, prob = 80 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 76, velocity = 72, prob = 50, repeats = 2, repeat_prob = 50 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+]
+[[windows.panes.patch_inline.tracks]]
+length = 16
+mode = "note"
+cycle = "forward"
+scale = "major"
+root = 53
+swing = 50
+humanize = 3.0
+active_slot = 0
+steps = [
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+]
+
+[[windows.panes.patch_inline.tracks.slots]]
+slot = 1
+length = 128
+steps = [
+  { active = true, note = 50, velocity = 56 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 46, velocity = 48 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 48, velocity = 53 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 45, velocity = 46 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 45, velocity = 51 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 41, velocity = 44 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 43, velocity = 49 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 40, velocity = 40 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+]
+
+[[windows.panes.patch_inline.tracks.slots]]
+slot = 2
+length = 128
+steps = [
+  { active = true, note = 50, velocity = 84 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 46, velocity = 76 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 48, velocity = 81 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 45, velocity = 74 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 45, velocity = 79 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 41, velocity = 72 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 43, velocity = 77 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = true, note = 40, velocity = 68 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+  { active = false, note = 53, velocity = 60 },
+]
+[[windows.panes.patch_inline.tracks]]
+length = 8
+mode = "modulation"
+cycle = "pingpong"
+scale = "major"
+root = 53
+swing = 50
+humanize = 3.0
+active_slot = 0
+steps = [
+  { active = true, note = 60, velocity = 100, mod_value = 0.08 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.12 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.10 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.14 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.09 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.13 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.11 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.15 },
+]
+
+[[windows.panes.patch_inline.tracks.slots]]
+slot = 1
+length = 8
+steps = [
+  { active = true, note = 60, velocity = 100, mod_value = 0.20 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.26 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.22 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.30 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.24 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.28 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.21 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.32 },
+]
+
+[[windows.panes.patch_inline.tracks.slots]]
+slot = 2
+length = 8
+steps = [
+  { active = true, note = 60, velocity = 100, mod_value = 0.42 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.55 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.46 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.60 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.50 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.58 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.44 },
+  { active = true, note = 60, velocity = 100, mod_value = 0.62 },
+]
+
+[[windows.panes.patch_inline.macros]]
+id = "a"
+cmds = [
+  { switch_pattern = { track = 0, slot = 0 } },
+  { switch_pattern = { track = 1, slot = 0 } },
+  { switch_pattern = { track = 4, slot = 0 } },
+  { switch_pattern = { track = 5, slot = 0 } },
+  { switch_pattern = { track = 6, slot = 0 } },
+  { switch_pattern = { track = 2, slot = 0 } },
+  { switch_pattern = { track = 7, slot = 0 } },
+  { set_bpm = { bpm = 44.0 } },
+]
+[[windows.panes.patch_inline.macros]]
+id = "b"
+cmds = [
+  { switch_pattern = { track = 0, slot = 1 } },
+  { set_bpm = { bpm = 44.0 } },
+]
+[[windows.panes.patch_inline.macros]]
+id = "c"
+cmds = [
+  { switch_pattern = { track = 4, slot = 1 } },
+  { switch_pattern = { track = 7, slot = 1 } },
+  { set_bpm = { bpm = 48.0 } },
+]
+[[windows.panes.patch_inline.macros]]
+id = "d"
+cmds = [
+  { switch_pattern = { track = 1, slot = 1 } },
+  { switch_pattern = { track = 2, slot = 1 } },
+  { set_bpm = { bpm = 50.0 } },
+]
+[[windows.panes.patch_inline.macros]]
+id = "e"
+cmds = [
+  { switch_pattern = { track = 6, slot = 1 } },
+  { switch_pattern = { track = 0, slot = 2 } },
+  { switch_pattern = { track = 4, slot = 2 } },
+  { set_bpm = { bpm = 54.0 } },
+]
+[[windows.panes.patch_inline.macros]]
+id = "f"
+cmds = [
+  { switch_pattern = { track = 0, slot = 2 } },
+  { switch_pattern = { track = 4, slot = 2 } },
+  { switch_pattern = { track = 6, slot = 1 } },
+  { switch_pattern = { track = 1, slot = 2 } },
+  { switch_pattern = { track = 2, slot = 2 } },
+  { switch_pattern = { track = 5, slot = 1 } },
+  { switch_pattern = { track = 7, slot = 2 } },
+  { set_bpm = { bpm = 62.0 } },
+]
+[[windows.panes.patch_inline.macros]]
+id = "g"
+cmds = [
+  { switch_pattern = { track = 5, slot = 0 } },
+  { switch_pattern = { track = 1, slot = 1 } },
+  { switch_pattern = { track = 6, slot = 0 } },
+  { switch_pattern = { track = 7, slot = 1 } },
+  { set_bpm = { bpm = 50.0 } },
+]
+[[windows.panes.patch_inline.macros]]
+id = "h"
+cmds = [
+  { switch_pattern = { track = 0, slot = 1 } },
+  { switch_pattern = { track = 4, slot = 1 } },
+  { switch_pattern = { track = 1, slot = 0 } },
+  { switch_pattern = { track = 2, slot = 1 } },
+  { set_bpm = { bpm = 40.0 } },
+]
+[[windows.panes.patch_inline.macros]]
+id = "i"
+cmds = [
+  { switch_pattern = { track = 0, slot = 3 } },
+  { switch_pattern = { track = 4, slot = 0 } },
+  { switch_pattern = { track = 2, slot = 3 } },
+  { switch_pattern = { track = 7, slot = 0 } },
+  { set_bpm = { bpm = 32.0 } },
+]
+
+
+[[windows.panes]]
+module = "voice"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+shape = 0.52
+sub = 0.15
+lpg = 0.65
+level = 0.8
+amp_src = "envelope/0/ch1"
+notes_src = "sequencer/0/t1"
+
+[[windows.panes]]
+module = "voice"
+instance = 1
+
+[windows.panes.patch_inline]
+format = 2
+shape = 0.08
+sub = 0.9
+lpg = 0.35
+level = 0.85
+amp_src = "envelope/0/ch3"
+notes_src = "sequencer/0/t3"
+
+[[windows.panes]]
+module = "voice"
+instance = 2
+
+[windows.panes.patch_inline]
+format = 2
+shape = 0.45
+sub = 0.3
+lpg = 0.6
+level = 0.8
+amp_src = "envelope/0/ch4"
+notes_src = "sequencer/0/t5"
+
+[[windows.panes]]
+module = "voice"
+instance = 3
+
+[windows.panes.patch_inline]
+format = 2
+shape = 0.58
+sub = 0.2
+lpg = 0.55
+level = 0.8
+amp_src = "envelope/0/ch2"
+notes_src = "sequencer/0/t2"
+
+[[windows.panes]]
+module = "voice"
+instance = 4
+
+[windows.panes.patch_inline]
+format = 2
+shape = 0.62
+sub = 0.0
+lpg = 0.7
+level = 0.7
+amp_src = "envelope/0/ch5"
+notes_src = "sequencer/0/t6"
+
+[[windows.panes]]
+module = "voice"
+instance = 5
+
+[windows.panes.patch_inline]
+format = 2
+shape = 0.3
+sub = 0.45
+lpg = 0.45
+level = 0.85
+amp_src = "envelope/0/ch6"
+notes_src = "sequencer/0/t7"
+
+[[windows.panes]]
+module = "envelope"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+
+[[windows.panes.patch_inline.channels]]
+rise = 0.3
+fall = 0.68
+shape = 0.5
+loop_mode = false
+gate_mode = false
+pluck = 0.0
+offset = 0.0
+attenuverter = 1.0
+trigger_src = "sequencer/0/t1"
+
+[[windows.panes.patch_inline.channels]]
+rise = 0.28
+fall = 0.6
+shape = 0.5
+loop_mode = false
+gate_mode = false
+pluck = 0.0
+offset = 0.0
+attenuverter = 1.0
+trigger_src = "sequencer/0/t2"
+
+[[windows.panes.patch_inline.channels]]
+rise = 0.45
+fall = 0.8
+shape = 0.5
+loop_mode = false
+gate_mode = false
+pluck = 0.0
+offset = 0.0
+attenuverter = 1.0
+trigger_src = "sequencer/0/t3"
+
+[[windows.panes.patch_inline.channels]]
+rise = 0.3
+fall = 0.68
+shape = 0.5
+loop_mode = false
+gate_mode = false
+pluck = 0.0
+offset = 0.0
+attenuverter = 1.0
+trigger_src = "sequencer/0/t5"
+
+[[windows.panes.patch_inline.channels]]
+rise = 0.25
+fall = 0.6
+shape = 0.5
+loop_mode = false
+gate_mode = false
+pluck = 0.0
+offset = 0.0
+attenuverter = 1.0
+trigger_src = "sequencer/0/t6"
+
+[[windows.panes.patch_inline.channels]]
+rise = 0.5
+fall = 0.82
+shape = 0.5
+loop_mode = false
+gate_mode = false
+pluck = 0.0
+offset = 0.0
+attenuverter = 1.0
+trigger_src = "sequencer/0/t7"
+
+[[windows.panes]]
+module = "envelope"
+instance = 1
+
+[windows.panes.patch_inline]
+format = 2
+
+[[windows.panes.patch_inline.channels]]
+rise = 0.66
+fall = 0.66
+shape = 0.5
+loop_mode = true
+gate_mode = false
+pluck = 0.0
+offset = 0.0
+attenuverter = 1.0
+trigger_src = "off"
+
+[[windows.panes]]
+module = "delay"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+input = "send/0"
+dry = 0.0
+time = 0.17
+regen = 0.5
+shim = 0.1
+wash = 0.15
+wash_src = "sequencer/0/t8"
+shim_src = "sequencer/0/t8"
+taps = 6
+
+[[windows.panes.patch_inline.tap]]
+level = 0.8
+pan = -0.2
+phase = "+"
+
+[[windows.panes.patch_inline.tap]]
+level = 0.5
+pan = 0.25
+phase = "+"
+
+[[windows.panes.patch_inline.tap]]
+level = 0.65
+pan = -0.35
+phase = "+"
+
+[[windows.panes.patch_inline.tap]]
+level = 0.4
+pan = 0.4
+phase = "+"
+
+[[windows.panes.patch_inline.tap]]
+level = 0.55
+pan = -0.5
+phase = "+"
+
+[[windows.panes.patch_inline.tap]]
+level = 0.7
+pan = 0.55
+phase = "+"
+
+[[windows.panes]]
+module = "filterbank"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+input = "send/1"
+dry = 0.0
+morph = 0.0
+morph_src = "envelope/1/ch1"
+wcent_src = "sequencer/0/t4"
+wwidth = 0.45
+split = 0.55
+spread = 0.3
+decay = 0.6
+band_srcs = []
+bank_a = []
+bank_b = []
+
+[[windows.panes]]
+module = "mixer"
+instance = 0
+
+[[windows.panes]]
+module = "scope"
+instance = 0
