@@ -8,8 +8,8 @@
 
 use anyhow::Result;
 use los::{
-    badge, conductor, delay, envelope, filterbank, mixer, scope, sequencer, shm, state, tape,
-    swarm, template, tone, voice,
+    badge, conductor, delay, envelope, filterbank, mixer, scope, sequencer, shm, state, swarm,
+    tape, template, tone, voice,
 };
 
 /// `los ctl <action>` — control the global transport from any shell
@@ -61,6 +61,7 @@ fn usage() {
     eprintln!("  los load <state-file.toml>    Load a saved session state");
     eprintln!("  los <state-file.toml>         Same as 'load'");
     eprintln!("  los check <state-file.toml>   Validate a state file (no session needed)");
+    eprintln!("  los audit <wav> [--song <file>]   Analyze a render: RMS arc, peaks, per-section dynamics");
     eprintln!("  los ctl [play|stop|toggle|status]  Control the global transport");
     eprintln!("  los add <module> [instance]   Spawn a module in the running session");
     eprintln!("  los ps                        Inspect the live session (manifest, ring, clock)");
@@ -178,6 +179,49 @@ fn main() -> Result<()> {
                     std::process::exit(1);
                 }
                 Ok(())
+            }
+            // Offline render analysis: windowed RMS + summary, and the
+            // per-section dynamics table when the song file is given.
+            // No session needed — it reads the WAV (and TOML) from disk.
+            "audit" => {
+                const USAGE: &str = "Usage: los audit <wav> [--song <file.toml>] [--window <secs>]";
+                let mut wav: Option<String> = None;
+                let mut song: Option<String> = None;
+                let mut window: f64 = 1.0;
+                let mut i = 2;
+                while i < args.len() {
+                    match args[i].as_str() {
+                        "--song" => {
+                            song =
+                                Some(args.get(i + 1).cloned().ok_or_else(|| {
+                                    anyhow::anyhow!("--song needs a file\n{USAGE}")
+                                })?);
+                            i += 2;
+                        }
+                        "--window" => {
+                            window =
+                                args.get(i + 1)
+                                    .and_then(|s| s.parse().ok())
+                                    .ok_or_else(|| {
+                                        anyhow::anyhow!("--window needs seconds\n{USAGE}")
+                                    })?;
+                            i += 2;
+                        }
+                        arg if wav.is_none() && !arg.starts_with("--") => {
+                            wav = Some(arg.to_string());
+                            i += 1;
+                        }
+                        arg => anyhow::bail!("unexpected argument '{arg}'\n{USAGE}"),
+                    }
+                }
+                let Some(wav) = wav else {
+                    anyhow::bail!("{USAGE}");
+                };
+                los::audit::run(
+                    std::path::Path::new(&wav),
+                    song.as_deref().map(std::path::Path::new),
+                    window,
+                )
             }
             "ctl" => ctl(args.get(2).map(|s| s.as_str()).unwrap_or("toggle")),
             // Debug tap: watch live note events (with their source bytes)
