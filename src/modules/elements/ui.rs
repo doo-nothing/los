@@ -679,9 +679,25 @@ pub fn run(instance: usize) -> Result<()> {
         .name(String::from("elements-audio"))
         .stack_size(8 * 1024 * 1024);
     let _ = audio_builder.spawn(move || {
-        if let Err(e) = audio_thread(audio_state, instance) {
-            eprintln!("[elements {}] audio thread error: {}", instance, e);
-        }
+        // A dead audio thread silences this strip with no visible trace
+        // in a detached render — catch panics and write a black box.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            audio_thread(audio_state, instance)
+        }));
+        let msg = match result {
+            Ok(Ok(())) => return,
+            Ok(Err(e)) => format!("error: {e}"),
+            Err(p) => format!(
+                "PANIC: {}",
+                p.downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| p.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "<non-string payload>".into())
+            ),
+        };
+        eprintln!("[elements {instance}] audio thread died: {msg}");
+        let path = crate::state::tmp_dir().join(format!("elements_{instance}.crash"));
+        let _ = std::fs::write(path, &msg);
     });
 
     for attempt in 0..20 {
