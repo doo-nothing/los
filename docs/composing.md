@@ -271,6 +271,20 @@ strip is the return. The house wiring: voices → send A → delay; voices
 → send B → filterbank, whose morph breathes on a looping envelope
 channel and whose window walks on a drunk CV track.
 
+**dld** (4ms Dual Looping Delay homage): the *clean* delay — repeats
+come back exactly as played, locked to the beat. Two channels (B eats
+the same input as A); per channel `time` (beats 1–16) × `switch`
+(`"/8"`, `"="`, `"+16"`) against the transport BPM (`ping_ms = 0`) or
+a free ping in ms; `fdbk` to 1.1 (blooming dub echoes), `feed`
+(record level), `mix`, `hold` (freeze into a loop), `win` (scroll the
+held loop), `rev` (crossfaded). `hold_src`/`rev_src` take *trigger*
+sources — bind a sequencer track and the loop toggles on the grid
+(the hardware's Quantized Change Mode for free). Loop clocks publish
+as `dld/N/clk·lpa·lpb`: bind an envelope's `trigger_src` to a loop
+clock and VCA anything in time with the loop. For audible discrete
+repeats, feed it transients (plucks, drums) — legato drones don't
+echo, they smear.
+
 **mixer**: per-track `level` (0–1), `pan` (−1–1), `drive` (0–1), 3-band
 EQ (±15 dB, `eq_freq` 0–1), `mute`/`solo`; a master strip with the
 same console plus `master_width` (0–2).

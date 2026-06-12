@@ -8,7 +8,8 @@
 
 use anyhow::Result;
 use los::{
-    badge, conductor, delay, envelope, filterbank, mixer, scope, sequencer, shm, state, swarm,
+    badge, conductor, delay, dld, envelope, filterbank, mixer, scope, sequencer, shm, state,
+    swarm,
     tape, template, tone, voice,
 };
 
@@ -89,6 +90,7 @@ fn usage() {
     eprintln!("  filterbank         16-band spectral processor (fx, 296e-style)");
     eprintln!("  tape               6-track tape deck (record window; Tascam x OP-1)");
     eprintln!("  swarm              CS-80-ish brass voice: 7 detuned saws, ladder, chords");
+    eprintln!("  dld                Dual looping delay (4ms DLD): clean, clock-locked, holds");
     eprintln!("  badge              Los faceplate (beat-synced animation, session info)");
     eprintln!();
     eprintln!("Aliases:");
@@ -114,6 +116,7 @@ fn dispatch_module(name: &str, instance: usize) -> Result<()> {
         "filterbank" => filterbank::run(instance),
         "tape" => tape::run(instance),
         "swarm" => swarm::run(instance),
+        "dld" => dld::run(instance),
         "badge" => badge::run(instance),
         other => anyhow::bail!("unknown module: {other}"),
     }
