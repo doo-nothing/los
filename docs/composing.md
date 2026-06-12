@@ -375,6 +375,16 @@ the euclid lengths — every knob has a `*_src` twin (an LFO on `x`
 is the classic move). Emits notes on `grids/N/bd·sd·hh` (bind a
 peaks channel or any voice); triggers + accent publish on the bus.
 
+**edges** (the Mutable Instruments quad chiptune generator, full
+port): four channels, each with `shapes` ∈ square, triangle,
+nes_tri, noise, nes_noise, nes_short, sine; `pw` (square: the
+50/66/75/87/95% detents in the lower half, free sweep above; sine:
+bitcrush hold), `xpose` (±24 st), `lvl` — all with per-channel
+`*_src` twins (`pw1_src` … `lvl4_src`). One note track per channel
+(`notes1_src`–`notes4_src`) = four-voice chip polyphony; channels
+1+3 left, 2+4 right. The NES LFSRs and 8-bit quantization are the
+firmware's, bit for bit.
+
 **mixer**: per-track `level` (0–1), `pan` (−1–1), `drive` (0–1), 3-band
 EQ (±15 dB, `eq_freq` 0–1), `mute`/`solo`; a master strip with the
 same console plus `master_width` (0–2).

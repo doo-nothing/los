@@ -27,8 +27,9 @@ use std::path::Path;
 use crate::routing::{output_labels, SourceAddr};
 use crate::state::{
     DelayParams, DldParams, DpoParamsState, ElementsParams, EnvelopeParams, FilterbankParams,
-    BranchesParams, GridsParams, LfoParams, MacroCmd, MixerParams, PeaksParams, RingsParams,
-    SamplerParams, ScopeParams, SequencerParams, SessionState, StepParam, SwarmParams,
+    BranchesParams, EdgesParams, GridsParams, LfoParams, MacroCmd, MixerParams, PeaksParams,
+    RingsParams, SamplerParams, ScopeParams, SequencerParams, SessionState, StepParam,
+    SwarmParams,
     TapeParams, TemplateParams, TidesParams, TrackMode, VoiceParams, WaspParams, STATE_FORMAT,
 };
 use crate::theory;
@@ -306,6 +307,11 @@ fn validate_session(st: &SessionState, r: &mut Report) {
             "grids" => {
                 if let Some(p) = decode::<GridsParams>(value, &loc, r) {
                     check_grids(&p, &loc, &declared, r);
+                }
+            }
+            "edges" => {
+                if let Some(p) = decode::<EdgesParams>(value, &loc, r) {
+                    check_edges(&p, &loc, &declared, r, &mut pending);
                 }
             }
             // No params structs: state is ephemeral or none.
@@ -1603,6 +1609,54 @@ fn check_grids(p: &GridsParams, loc: &str, declared: &BTreeSet<(String, usize)>,
     }
 }
 
+/// Edges (modules/edges): shape names, knob ranges, srcs, four note
+/// tracks.
+fn check_edges(
+    p: &EdgesParams,
+    loc: &str,
+    declared: &BTreeSet<(String, usize)>,
+    r: &mut Report,
+    pending: &mut Vec<PendingTrackRef>,
+) {
+    const SHAPES: [&str; 7] = [
+        "square", "triangle", "nes_tri", "noise", "nes_noise", "nes_short", "sine",
+    ];
+    for (i, sh) in p.shapes.iter().enumerate() {
+        if !SHAPES.contains(&sh.as_str()) {
+            r.error(loc, format!("shapes[{i}] {sh:?} — one of {}", SHAPES.join(" ")));
+        }
+    }
+    for (name, knobs) in [("pw", &p.pw), ("xpose", &p.xpose), ("lvl", &p.lvl)] {
+        for (i, v) in knobs.iter().enumerate() {
+            if !(0.0..=1.0).contains(v) {
+                r.error(loc, format!("{name}[{i}] {v} is out of range 0–1"));
+            }
+        }
+    }
+    range01(p.level, "level", loc, r);
+    for (field, src) in [
+        ("pw1_src", &p.pw1_src),
+        ("pw2_src", &p.pw2_src),
+        ("pw3_src", &p.pw3_src),
+        ("pw4_src", &p.pw4_src),
+        ("xpose1_src", &p.xpose1_src),
+        ("xpose2_src", &p.xpose2_src),
+        ("xpose3_src", &p.xpose3_src),
+        ("xpose4_src", &p.xpose4_src),
+        ("lvl1_src", &p.lvl1_src),
+        ("lvl2_src", &p.lvl2_src),
+        ("lvl3_src", &p.lvl3_src),
+        ("lvl4_src", &p.lvl4_src),
+        ("level_src", &p.level_src),
+        ("amp_src", &p.amp_src),
+    ] {
+        check_src(src, field, loc, declared, r);
+    }
+    for src in [&p.notes1_src, &p.notes2_src, &p.notes3_src, &p.notes4_src] {
+        check_notes_src(src, loc, declared, r, pending);
+    }
+}
+
 /// Template (template.rs SHAPES): shape by name.
 fn check_template(
     p: &TemplateParams,
@@ -1650,12 +1704,12 @@ const SOURCE_MODULES: [&str; 6] = [
 ];
 
 /// Modules that publish audio rings an fx/tape input can claim.
-const AUDIO_MODULES: [&str; 14] =
-    ["voice", "swarm", "tone", "template", "delay", "filterbank", "dld", "sampler", "wasp", "dpo", "elements", "rings", "tides", "peaks"];
+const AUDIO_MODULES: [&str; 15] =
+    ["voice", "swarm", "tone", "template", "delay", "filterbank", "dld", "sampler", "wasp", "dpo", "elements", "rings", "tides", "peaks", "edges"];
 
 /// Canonical module names, for misspelled-pane suggestions.
-const MODULE_NAMES: [&str; 24] =
-    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements", "rings", "tides", "peaks", "branches", "grids"];
+const MODULE_NAMES: [&str; 25] =
+    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements", "rings", "tides", "peaks", "branches", "grids", "edges"];
 
 /// An optional `*_src` field: grammar, known output, declared instance.
 /// Returns the parsed address so callers can queue cross-module checks.
@@ -1918,7 +1972,8 @@ const KNOWN_KEYS: &[&str] = &[
     "res_src", "reversed", "rise", "rise_src", "root", "rotation", "scale", "scale_cents",
     "scale_period", "send_a", "send_a_src", "send_b", "send_b_src", "session_name", "shape",
     "shape_src", "shim", "shim_src", "signal_src", "slot", "slots", "solo", "source", "speed",
-    "speed_src", "slide", "slide_src", "smooth", "smooth_src", "split", "split_src", "spread",
+    "shapes", "speed_src", "slide", "slide_src", "smooth", "smooth_src", "split", "split_src",
+    "spread", "xpose", "lvl",
     "spread_src", "start", "structure", "structure_src", "poly", "shift_src", "slope_src",
     "sync", "smoothness",
     "start_src", "len_src", "step", "steps",
