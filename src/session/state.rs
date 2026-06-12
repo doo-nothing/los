@@ -201,6 +201,8 @@ pub struct VoiceParams {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SequencerParams {
     pub bpm: Option<f64>,
+    #[serde(default)]
+    pub bpm_src: Option<String>,
     pub playing: Option<bool>,
     pub euclidean_pulses: Option<usize>,
     pub euclidean_length: Option<usize>,

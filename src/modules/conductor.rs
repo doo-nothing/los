@@ -1017,6 +1017,7 @@ pub fn house_patch_params() -> HousePatch {
     }
 
     let seq = state::SequencerParams {
+        bpm_src: None,
         bpm: Some(74.0),
         playing: Some(true), // the house opens already breathing
         euclidean_pulses: None,

@@ -358,6 +358,7 @@ fn check_sequencer(
             r.error(loc, format!("bpm {bpm} is out of range 20–300"));
         }
     }
+    check_src(&p.bpm_src, "bpm_src", loc, declared, r);
     if p.tracks.len() > crate::NUM_TRACKS {
         r.error(
             loc,
@@ -1638,7 +1639,8 @@ const KNOWN_KEYS: &[&str] = &[
     "arg", "armed", "atk", "atk_src", "atten_src", "attenuverter", "auto", "band_srcs",
     "bank_a", "bank_b", "bind",
     "blow_meta_src", "blow_src", "blow_timbre_src", "bow_src", "bow_timbre_src", "bp", "bp_src",
-    "bpm", "by", "channel", "channels", "chord", "cmds", "created", "cutoff", "cutoff_src",
+    "bpm", "bpm_src", "by", "channel", "channels", "chord", "cmds", "created", "cutoff",
+    "cutoff_src",
     "cycle", "dec", "dec_src", "decay", "decay_src", "delay", "delay_prob", "delay_unit",
     "depth", "depth_src",
     "detune", "detune_src", "drive", "drive_src", "dry", "dry_src", "eq_freq", "eq_hi", "eq_lo",

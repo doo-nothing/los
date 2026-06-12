@@ -251,6 +251,9 @@ struct SequencerState {
     tracks: Vec<Track>,
     current_track: usize,
     bpm: f64,
+    /// Tempo cable: a bound source owns the bpm (0–1 → 20–300), the
+    /// knob and macros become the fallback. Resolved via bind_cache.
+    bpm_src: Option<String>,
     playing: bool,
     /// Set when a loaded save carried an explicit play flag — only then
     /// may this instance seed the global transport (a second sequencer
@@ -318,6 +321,7 @@ impl Default for SequencerState {
             tracks: default_tracks(track_count),
             current_track: 0,
             bpm: 120.0,
+            bpm_src: None,
             // a fresh session waits for Space — never opens with sound
             playing: false,
             seed_play: None,
@@ -3081,7 +3085,26 @@ fn sequencer_thread(
         let bpm = {
             let mut s = state.lock().unwrap();
             s.playing = playing;
-            s.bpm
+            // tempo cable: a bound, resolvable source owns the bpm
+            // (0–1 → 20–300, the validator's range); max/min kills NaN
+            #[allow(clippy::manual_clamp)]
+            match s.bpm_src.clone() {
+                Some(src) => {
+                    let ch = *bind_cache.entry(src.clone()).or_insert_with(|| {
+                        manifest.as_ref().and_then(|m| {
+                            crate::routing::SourceAddr::parse(&src)
+                                .and_then(|a| crate::routing::resolve(&m.entries(), &a))
+                        })
+                    });
+                    match (ch, modbus.as_ref()) {
+                        (Some(ch), Some(bus)) => {
+                            f64::from(bus.get(ch).max(0.0).min(1.0)) * 280.0 + 20.0
+                        }
+                        _ => s.bpm,
+                    }
+                }
+                None => s.bpm,
+            }
         };
         transport.set_bpm(bpm as f32);
 
@@ -4725,6 +4748,7 @@ fn trimmed_steps(steps: &[Step]) -> Vec<state::StepParam> {
 fn snapshot_params(s: &SequencerState) -> state::SequencerParams {
     state::SequencerParams {
         bpm: Some(s.bpm),
+        bpm_src: s.bpm_src.clone(),
         playing: Some(s.playing),
         euclidean_pulses: None,
         euclidean_length: None,
@@ -5510,6 +5534,18 @@ pub fn run(instance: usize) -> Result<()> {
                                                 });
                                             }
                                             undo_msg = Some(format!("bpm = {}", s.bpm));
+                                        }
+                                        // not a number: a cable
+                                        // (":set bpm lfo/0/s1", "-" unbinds)
+                                        Err(_) if v == "-" => {
+                                            s.bpm_src = None;
+                                            undo_msg = Some("bpm unbound".into());
+                                        }
+                                        Err(_)
+                                            if crate::routing::SourceAddr::parse(&v).is_some() =>
+                                        {
+                                            s.bpm_src = Some(v.clone());
+                                            undo_msg = Some(format!("bpm ← {v}"));
                                         }
                                         Err(_) => undo_msg = Some(format!("Invalid bpm: {}", v)),
                                     },

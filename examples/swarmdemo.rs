@@ -93,6 +93,7 @@ fn main() -> anyhow::Result<()> {
     );
 
     let seq = state::SequencerParams {
+        bpm_src: None,
         bpm: Some(34.0),
         playing: Some(true),
         euclidean_pulses: None,
