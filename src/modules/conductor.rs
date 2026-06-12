@@ -1743,6 +1743,11 @@ pub fn render(song_path: &str, out_path: &str, secs: Option<f32>, tail: f32) -> 
     // registration (= a silent render).
     reap_manifest_modules();
     crate::shm::unlink_control_plane();
+    // Let CoreAudio finish releasing the previous world's output stream
+    // before our mixer claims the device: a render fired the instant a
+    // session died recorded 100 s of silence from a half-acquired
+    // stream (observed twice; the pop-song take-1 silence was this).
+    std::thread::sleep(Duration::from_millis(1500));
 
     // Duration: explicit --secs, or the macro lane walked into seconds
     // plus a tail for the delay/filterbank to ring out.
