@@ -89,5 +89,8 @@ shortest version.) The shape of it:
 
 - [DESIGN.md](DESIGN.md) — architecture, the SHM protocol, module contract
 - [docs/keybindings.md](docs/keybindings.md) — the keybinding doctrine
+- [docs/composing.md](docs/composing.md) — the song-file format and the
+  check/render/audit loop (agents start at [AGENTS.md](AGENTS.md));
+  `just render-smoke` exercises the loop end to end
 - [docs/plans/](docs/plans/) — design docs, including the
   [roadmap](docs/plans/roadmap.md) of ideas looking for an author
