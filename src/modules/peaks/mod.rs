@@ -10,3 +10,6 @@
 
 pub mod dsp;
 pub mod mods;
+pub mod ui;
+
+pub use ui::run;

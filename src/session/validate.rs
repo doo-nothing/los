@@ -28,8 +28,8 @@ use crate::routing::{output_labels, SourceAddr};
 use crate::state::{
     DelayParams, DldParams, DpoParamsState, ElementsParams, EnvelopeParams, FilterbankParams,
     LfoParams,
-    MacroCmd, MixerParams, RingsParams, SamplerParams, ScopeParams, SequencerParams,
-    TidesParams,
+    MacroCmd, MixerParams, PeaksParams, RingsParams, SamplerParams, ScopeParams,
+    SequencerParams, TidesParams,
     SessionState, StepParam,
     SwarmParams, TapeParams, TemplateParams, TrackMode, VoiceParams, WaspParams, STATE_FORMAT,
 };
@@ -293,6 +293,11 @@ fn validate_session(st: &SessionState, r: &mut Report) {
             "tides" => {
                 if let Some(p) = decode::<TidesParams>(value, &loc, r) {
                     check_tides(&p, &loc, &declared, r, &mut pending);
+                }
+            }
+            "peaks" => {
+                if let Some(p) = decode::<PeaksParams>(value, &loc, r) {
+                    check_peaks(&p, &loc, &declared, r, &mut pending);
                 }
             }
             // No params structs: state is ephemeral or none.
@@ -1488,6 +1493,55 @@ fn check_tides(
     check_notes_src(&p.notes_src, loc, declared, r, pending);
 }
 
+/// Peaks (modules/peaks): function names, knob ranges, srcs, dual
+/// note tracks.
+fn check_peaks(
+    p: &PeaksParams,
+    loc: &str,
+    declared: &BTreeSet<(String, usize)>,
+    r: &mut Report,
+    pending: &mut Vec<PendingTrackRef>,
+) {
+    const FNS: [&str; 12] = [
+        "envelope", "lfo", "tap_lfo", "bass_drum", "snare_drum", "high_hat", "fm_drum",
+        "pulse_shaper", "pulse_random", "bouncing_ball", "mini_seq", "number_station",
+    ];
+    for (name, f) in [("fn1", &p.fn1), ("fn2", &p.fn2)] {
+        if let Some(f) = f.as_deref() {
+            if !FNS.contains(&f) {
+                r.error(loc, format!("{name} {f:?} — one of {}", FNS.join(" ")));
+            }
+        }
+    }
+    for (name, knobs) in [("p1", &p.p1), ("p2", &p.p2)] {
+        if knobs.len() > 4 {
+            r.error(loc, format!("{name}: {} knobs — channels have 4", knobs.len()));
+        }
+        for (i, v) in knobs.iter().enumerate() {
+            if !(0.0..=1.0).contains(v) {
+                r.error(loc, format!("{name}[{i}] {v} is out of range 0–1"));
+            }
+        }
+    }
+    range01(p.level, "level", loc, r);
+    for (field, src) in [
+        ("p1a_src", &p.p1a_src),
+        ("p1b_src", &p.p1b_src),
+        ("p1c_src", &p.p1c_src),
+        ("p1d_src", &p.p1d_src),
+        ("p2a_src", &p.p2a_src),
+        ("p2b_src", &p.p2b_src),
+        ("p2c_src", &p.p2c_src),
+        ("p2d_src", &p.p2d_src),
+        ("level_src", &p.level_src),
+        ("amp_src", &p.amp_src),
+    ] {
+        check_src(src, field, loc, declared, r);
+    }
+    check_notes_src(&p.notes1_src, loc, declared, r, pending);
+    check_notes_src(&p.notes2_src, loc, declared, r, pending);
+}
+
 /// Template (template.rs SHAPES): shape by name.
 fn check_template(
     p: &TemplateParams,
@@ -1535,12 +1589,12 @@ const SOURCE_MODULES: [&str; 6] = [
 ];
 
 /// Modules that publish audio rings an fx/tape input can claim.
-const AUDIO_MODULES: [&str; 13] =
-    ["voice", "swarm", "tone", "template", "delay", "filterbank", "dld", "sampler", "wasp", "dpo", "elements", "rings", "tides"];
+const AUDIO_MODULES: [&str; 14] =
+    ["voice", "swarm", "tone", "template", "delay", "filterbank", "dld", "sampler", "wasp", "dpo", "elements", "rings", "tides", "peaks"];
 
 /// Canonical module names, for misspelled-pane suggestions.
-const MODULE_NAMES: [&str; 21] =
-    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements", "rings", "tides"];
+const MODULE_NAMES: [&str; 22] =
+    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements", "rings", "tides", "peaks"];
 
 /// An optional `*_src` field: grammar, known output, declared instance.
 /// Returns the parsed address so callers can queue cross-module checks.
@@ -1774,7 +1828,9 @@ const KNOWN_KEYS: &[&str] = &[
     "master_width", "master_width_src", "meta", "mid_src", "mod_value",
     "mix", "mix_src", "modbus_channel", "mode", "module", "monitor", "morph", "morph_src",
     "muted", "mute", "name", "offset_src",
-    "note", "notes_src", "offset", "or_enabled", "output", "pan", "pan_src", "panes", "patch",
+    "note", "notes_src", "notes1_src", "notes2_src", "offset", "or_enabled", "output", "pan",
+    "pan_src", "panes", "patch", "fn1", "fn2", "p1", "p2", "p1a_src", "p1b_src", "p1c_src",
+    "p1d_src", "p2a_src", "p2b_src", "p2c_src", "p2d_src",
     "patch_inline", "phase", "phase_src", "ping_ms", "ping_src", "pitch", "pitch_src", "playing",
     "pluck", "pluck_src", "prob", "pulses", "quant",
     "rate", "rate_src", "ratchet_decay", "regen", "regen_src", "repeat_prob", "repeats", "res",

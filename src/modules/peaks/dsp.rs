@@ -600,11 +600,14 @@ impl SnareDrum {
             let noise_sample = self.rng.sample() as i32;
             let noise = self.noise.process(SvfMode::Bp, noise_sample);
             let noise_envelope = self.excitation_noise.process();
-            let mut sd = 0;
-            sd += body_1 * self.gain_1 >> 15;
-            sd += body_2 * self.gain_2 >> 15;
-            sd += noise_envelope * noise >> 15;
-            *o = clip16(sd) as i16;
+            // retriggers ACCUMULATE excitation state (the 808
+            // machine-gun behavior); widen the products — upstream
+            // leans on silent i32 wrap here
+            let mut sd: i64 = 0;
+            sd += body_1 as i64 * self.gain_1 as i64 >> 15;
+            sd += body_2 as i64 * self.gain_2 as i64 >> 15;
+            sd += noise_envelope as i64 * noise as i64 >> 15;
+            *o = clip16(sd.clamp(i32::MIN as i64, i32::MAX as i64) as i32) as i16;
         }
     }
 }
@@ -659,7 +662,8 @@ impl HighHat {
             // the 808 VCA only amplifies the positive section
             let filtered_noise = filtered_noise.clamp(0, 32767);
             let envelope = self.vca_envelope.process() >> 4;
-            let vca_noise = clip16(envelope * filtered_noise >> 14);
+            let vca_noise = clip16((envelope as i64 * filtered_noise as i64 >> 14)
+                .clamp(i32::MIN as i64, i32::MAX as i64) as i32);
             let mut hh = 0;
             hh += self.vca_coloration.process(SvfMode::Hp, vca_noise);
             hh += self.vca_coloration.process(SvfMode::Hp, vca_noise);

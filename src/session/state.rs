@@ -771,6 +771,46 @@ pub struct TidesParams {
     pub notes_src: Option<String>,
 }
 
+/// Peaks (modules/peaks) — the MI dual function generator: two
+/// channels x twelve processor functions, four knobs each (relabelled
+/// per function), separate note sources per channel.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PeaksParams {
+    #[serde(default)]
+    pub format: u32,
+    pub fn1: Option<String>,
+    pub fn2: Option<String>,
+    #[serde(default)]
+    pub p1: Vec<f32>,
+    #[serde(default)]
+    pub p2: Vec<f32>,
+    pub level: Option<f32>,
+    #[serde(default)]
+    pub p1a_src: Option<String>,
+    #[serde(default)]
+    pub p1b_src: Option<String>,
+    #[serde(default)]
+    pub p1c_src: Option<String>,
+    #[serde(default)]
+    pub p1d_src: Option<String>,
+    #[serde(default)]
+    pub p2a_src: Option<String>,
+    #[serde(default)]
+    pub p2b_src: Option<String>,
+    #[serde(default)]
+    pub p2c_src: Option<String>,
+    #[serde(default)]
+    pub p2d_src: Option<String>,
+    #[serde(default)]
+    pub level_src: Option<String>,
+    #[serde(default)]
+    pub amp_src: Option<String>,
+    #[serde(default)]
+    pub notes1_src: Option<String>,
+    #[serde(default)]
+    pub notes2_src: Option<String>,
+}
+
 /// The swarm voice (modules/swarm.rs) — the CS-80-flavored brass pad:
 /// chord by name ("min7"), the five knobs, glide, and the three kinds
 /// of binding (knob sources, amp, notes).

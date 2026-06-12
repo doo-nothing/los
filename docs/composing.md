@@ -342,6 +342,19 @@ tracks notes V/oct, freq becomes ±2 oct); `freq`, `shape`, `slope`,
 twins. `sync = true` locks the loop to the transport beat. Sources:
 `tides/N/o1`–`o4`; o1/o2 are also the audio pair.
 
+**peaks** (the Mutable Instruments dual function generator, full
+fixed-point port): two channels, `fn1`/`fn2` ∈ envelope, lfo,
+tap_lfo, bass_drum, snare_drum, high_hat, fm_drum, pulse_shaper,
+pulse_random, bouncing_ball, mini_seq, number_station; four knobs
+per channel (`p1 = [a, b, c, d]`, relabelled per function — kick:
+freq/punch/tone/decay; envelope: ADSR) with `p1a_src`…`p2d_src`
+twins. Separate note tracks per channel (`notes1_src` = kick on t1,
+`notes2_src` = snare on t2). Channel 1 is the left audio out,
+channel 2 the right; both publish `peaks/N/ch1`/`ch2` on the bus, so
+a channel running an envelope or tap LFO is a patchable modulator.
+The 808s keep the firmware's integer arithmetic — that crunch is
+the instrument.
+
 **mixer**: per-track `level` (0–1), `pan` (−1–1), `drive` (0–1), 3-band
 EQ (±15 dB, `eq_freq` 0–1), `mute`/`solo`; a master strip with the
 same console plus `master_width` (0–2).
@@ -372,6 +385,7 @@ Sources:
 | `dpo/N/` | `lfo` |
 | `elements/N/` | `exc` (exciter level follower) |
 | `tides/N/` | `o1`–`o4` (the four slopes) |
+| `peaks/N/` | `ch1`, `ch2` (the two channel outputs) |
 | `template/N/` | `lfo` |
 
 Audio `input` fields are 2-segment: a producing module (`voice`,
