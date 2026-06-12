@@ -187,6 +187,8 @@ pub struct VoiceParams {
     #[serde(default)]
     pub fm_src: Option<String>,
     #[serde(default)]
+    pub lpg_src: Option<String>,
+    #[serde(default)]
     pub level_src: Option<String>,
     #[serde(default)]
     pub amp_src: Option<String>,
@@ -199,6 +201,8 @@ pub struct VoiceParams {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SequencerParams {
     pub bpm: Option<f64>,
+    #[serde(default)]
+    pub bpm_src: Option<String>,
     pub playing: Option<bool>,
     pub euclidean_pulses: Option<usize>,
     pub euclidean_length: Option<usize>,
@@ -323,6 +327,25 @@ pub struct MixerParams {
     pub master_send_a: f32,
     #[serde(default)]
     pub master_send_b: f32,
+    // master strip bindings (every parameter takes a cable)
+    #[serde(default)]
+    pub master_src: Option<String>,
+    #[serde(default)]
+    pub master_width_src: Option<String>,
+    #[serde(default)]
+    pub master_drive_src: Option<String>,
+    #[serde(default)]
+    pub master_lo_src: Option<String>,
+    #[serde(default)]
+    pub master_mid_src: Option<String>,
+    #[serde(default)]
+    pub master_freq_src: Option<String>,
+    #[serde(default)]
+    pub master_hi_src: Option<String>,
+    #[serde(default)]
+    pub master_send_a_src: Option<String>,
+    #[serde(default)]
+    pub master_send_b_src: Option<String>,
 }
 
 fn default_mid_freq() -> f32 {
@@ -441,6 +464,8 @@ pub struct DldChannelParams {
     pub hold_src: Option<String>,
     #[serde(default)]
     pub rev_src: Option<String>,
+    #[serde(default)]
+    pub mix_src: Option<String>,
 }
 
 /// The DLD (modules/dld) — two channels around one Ping.
@@ -450,6 +475,8 @@ pub struct DldParams {
     pub format: u32,
     /// 0 = Ping follows the transport beat; >0 = free Ping in ms.
     pub ping_ms: Option<f32>,
+    #[serde(default)]
+    pub ping_src: Option<String>,
     pub mono: Option<bool>,
     #[serde(default)]
     pub input: Option<String>,
@@ -487,6 +514,10 @@ pub struct SamplerParams {
     #[serde(default)]
     pub amp_src: Option<String>,
     #[serde(default)]
+    pub start_src: Option<String>,
+    #[serde(default)]
+    pub len_src: Option<String>,
+    #[serde(default)]
     pub pitch_src: Option<String>,
     #[serde(default)]
     pub speed_src: Option<String>,
@@ -494,6 +525,10 @@ pub struct SamplerParams {
     pub gene_src: Option<String>,
     #[serde(default)]
     pub slide_src: Option<String>,
+    #[serde(default)]
+    pub atk_src: Option<String>,
+    #[serde(default)]
+    pub dec_src: Option<String>,
     #[serde(default)]
     pub level_src: Option<String>,
     #[serde(default)]
@@ -524,6 +559,10 @@ pub struct WaspParams {
     pub mix_src: Option<String>,
     #[serde(default)]
     pub dirt_src: Option<String>,
+    #[serde(default)]
+    pub bp_src: Option<String>,
+    #[serde(default)]
+    pub dry_src: Option<String>,
 }
 
 /// The DPO (modules/dpo) — Make Noise-style complex oscillator.
@@ -577,6 +616,8 @@ pub struct LfoChannelParams {
     pub phase: Option<f32>,
     #[serde(default)]
     pub freq_src: Option<String>,
+    #[serde(default)]
+    pub phase_src: Option<String>,
 }
 
 /// The quad LFO (modules/lfo.rs) — Batumi-style bank.
@@ -676,6 +717,8 @@ pub struct SwarmParams {
     pub res_src: Option<String>,
     #[serde(default)]
     pub swell_src: Option<String>,
+    #[serde(default)]
+    pub glide_src: Option<String>,
     #[serde(default)]
     pub level_src: Option<String>,
     #[serde(default)]
@@ -859,6 +902,10 @@ pub struct EnvelopeChannelParams {
     pub shape_src: Option<String>,
     #[serde(default)]
     pub atten_src: Option<String>,
+    #[serde(default)]
+    pub offset_src: Option<String>,
+    #[serde(default)]
+    pub pluck_src: Option<String>,
 }
 
 impl Default for EnvelopeChannelParams {
@@ -878,6 +925,8 @@ impl Default for EnvelopeChannelParams {
             fall_src: None,
             shape_src: None,
             atten_src: None,
+            offset_src: None,
+            pluck_src: None,
         }
     }
 }

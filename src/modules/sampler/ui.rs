@@ -77,8 +77,18 @@ const ROWS: [Row; 15] = [
 
 /// Global mod-input bindings, srcs[] order (one set, Morphagene-style
 /// single CV bank applied to whichever slot a voice plays).
-const BINDABLE: [Row; 5] = [Row::Pitch, Row::Speed, Row::Gene, Row::Slide, Row::Level];
-const N_SRC: usize = 5;
+const BINDABLE: [Row; 9] = [
+    Row::Start,
+    Row::Len,
+    Row::Pitch,
+    Row::Speed,
+    Row::Gene,
+    Row::Slide,
+    Row::Atk,
+    Row::Dec,
+    Row::Level,
+];
+const N_SRC: usize = BINDABLE.len();
 
 // ── shared state ───────────────────────────────────────────────────────────
 
@@ -136,11 +146,15 @@ fn snapshot_params(s: &SamplerState) -> state::SamplerParams {
         edit: Some(s.edit),
         notes_src: s.notes_src.as_ref().map(|a| a.to_string()),
         amp_src: s.amp_src.as_ref().map(|a| a.to_string()),
-        pitch_src: s.srcs[0].as_ref().map(|a| a.to_string()),
-        speed_src: s.srcs[1].as_ref().map(|a| a.to_string()),
-        gene_src: s.srcs[2].as_ref().map(|a| a.to_string()),
-        slide_src: s.srcs[3].as_ref().map(|a| a.to_string()),
-        level_src: s.srcs[4].as_ref().map(|a| a.to_string()),
+        start_src: s.srcs[0].as_ref().map(|a| a.to_string()),
+        len_src: s.srcs[1].as_ref().map(|a| a.to_string()),
+        pitch_src: s.srcs[2].as_ref().map(|a| a.to_string()),
+        speed_src: s.srcs[3].as_ref().map(|a| a.to_string()),
+        gene_src: s.srcs[4].as_ref().map(|a| a.to_string()),
+        slide_src: s.srcs[5].as_ref().map(|a| a.to_string()),
+        atk_src: s.srcs[6].as_ref().map(|a| a.to_string()),
+        dec_src: s.srcs[7].as_ref().map(|a| a.to_string()),
+        level_src: s.srcs[8].as_ref().map(|a| a.to_string()),
         slots: s
             .slots
             .iter()
@@ -172,10 +186,14 @@ fn apply_params(s: &mut SamplerState, p: &state::SamplerParams) {
     s.notes_src = parse(&p.notes_src);
     s.amp_src = parse(&p.amp_src);
     s.srcs = [
+        parse(&p.start_src),
+        parse(&p.len_src),
         parse(&p.pitch_src),
         parse(&p.speed_src),
         parse(&p.gene_src),
         parse(&p.slide_src),
+        parse(&p.atk_src),
+        parse(&p.dec_src),
         parse(&p.level_src),
     ];
     s.resolved = Default::default();
@@ -344,32 +362,41 @@ fn audio_thread(shared: Arc<Mutex<SamplerState>>, instance: usize) -> Result<()>
                     _ => None,
                 }
             };
+            // max/min, not clamp: clamp(NaN) is NaN and a stale
+            // channel must not ride into the play heads
+            #[allow(clippy::manual_clamp)]
+            let unit = |v: f32| v.max(0.0).min(1.0);
             let overlay = [
-                get(0, &s).map(|v| v.clamp(0.0, 1.0) * 48.0 - 24.0),
-                get(1, &s).map(|v| v.clamp(0.0, 1.0) * 4.0 - 2.0),
-                get(2, &s).map(|v| v.clamp(0.0, 1.0)),
-                get(3, &s).map(|v| v.clamp(0.0, 1.0)),
-                get(4, &s).map(|v| v.clamp(0.0, 1.0)),
+                get(0, &s).map(unit),                          // start
+                get(1, &s).map(unit),                          // len
+                get(2, &s).map(|v| unit(v) * 48.0 - 24.0),     // pitch
+                get(3, &s).map(|v| unit(v) * 4.0 - 2.0),       // speed
+                get(4, &s).map(unit),                          // gene
+                get(5, &s).map(unit),                          // slide
+                get(6, &s).map(unit),                          // atk
+                get(7, &s).map(unit),                          // dec
+                get(8, &s).map(unit),                          // level
             ];
             let params: Vec<SlotParams> = s
                 .slots
                 .iter()
                 .map(|sl| {
                     let mut p = sl.params;
-                    if let Some(v) = overlay[0] {
-                        p.pitch = v;
-                    }
-                    if let Some(v) = overlay[1] {
-                        p.speed = v;
-                    }
-                    if let Some(v) = overlay[2] {
-                        p.gene = v;
-                    }
-                    if let Some(v) = overlay[3] {
-                        p.slide = v;
-                    }
-                    if let Some(v) = overlay[4] {
-                        p.level = v;
+                    let dst = [
+                        &mut p.start,
+                        &mut p.len,
+                        &mut p.pitch,
+                        &mut p.speed,
+                        &mut p.gene,
+                        &mut p.slide,
+                        &mut p.atk,
+                        &mut p.dec,
+                        &mut p.level,
+                    ];
+                    for (d, ov) in dst.into_iter().zip(overlay.iter()) {
+                        if let Some(v) = ov {
+                            *d = *v;
+                        }
                     }
                     p
                 })

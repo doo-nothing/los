@@ -743,6 +743,15 @@ fn snapshot_params(s: &MixerInner) -> state::MixerParams {
         master_width: s.master.pan,
         master_send_a: s.master.send_a,
         master_send_b: s.master.send_b,
+        master_src: src(&s.master.srcs[0]),
+        master_width_src: src(&s.master.srcs[1]),
+        master_drive_src: src(&s.master.srcs[2]),
+        master_lo_src: src(&s.master.srcs[3]),
+        master_mid_src: src(&s.master.srcs[4]),
+        master_freq_src: src(&s.master.srcs[5]),
+        master_hi_src: src(&s.master.srcs[6]),
+        master_send_a_src: src(&s.master.srcs[7]),
+        master_send_b_src: src(&s.master.srcs[8]),
         tracks: s
             .tracks
             .iter()
@@ -783,6 +792,18 @@ fn apply_params(s: &mut MixerInner, params: &state::MixerParams) {
     s.master.eq_hi = params.master_eq_hi;
     s.master.pan = params.master_width;
     let parse = |o: &Option<String>| o.as_deref().and_then(SourceAddr::parse);
+    s.master.srcs = [
+        parse(&params.master_src),
+        parse(&params.master_width_src),
+        parse(&params.master_drive_src),
+        parse(&params.master_lo_src),
+        parse(&params.master_mid_src),
+        parse(&params.master_freq_src),
+        parse(&params.master_hi_src),
+        parse(&params.master_send_a_src),
+        parse(&params.master_send_b_src),
+    ];
+    s.master.resolved = Default::default();
     for (i, tp) in params.tracks.iter().enumerate().take(s.tracks.len()) {
         let t = &mut s.tracks[i];
         t.strip.level = tp.level;

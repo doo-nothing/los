@@ -358,6 +358,7 @@ fn check_sequencer(
             r.error(loc, format!("bpm {bpm} is out of range 20–300"));
         }
     }
+    check_src(&p.bpm_src, "bpm_src", loc, declared, r);
     if p.tracks.len() > crate::NUM_TRACKS {
         r.error(
             loc,
@@ -758,6 +759,7 @@ fn check_voice(
         ("shape_src", &p.shape_src),
         ("sub_src", &p.sub_src),
         ("fm_src", &p.fm_src),
+        ("lpg_src", &p.lpg_src),
         ("level_src", &p.level_src),
         ("amp_src", &p.amp_src),
     ] {
@@ -797,6 +799,7 @@ fn check_swarm(
         ("cutoff_src", &p.cutoff_src),
         ("res_src", &p.res_src),
         ("swell_src", &p.swell_src),
+        ("glide_src", &p.glide_src),
         ("level_src", &p.level_src),
         ("amp_src", &p.amp_src),
     ] {
@@ -849,6 +852,8 @@ fn check_envelope(
             ("fall_src", &ch.fall_src),
             ("shape_src", &ch.shape_src),
             ("atten_src", &ch.atten_src),
+            ("offset_src", &ch.offset_src),
+            ("pluck_src", &ch.pluck_src),
         ] {
             check_src(src, &format!("{chl}.{field}"), loc, declared, r);
         }
@@ -936,6 +941,19 @@ fn check_mixer(
         ] {
             check_src(src, &format!("{tl}.{field}"), loc, declared, r);
         }
+    }
+    for (field, src) in [
+        ("master_src", &p.master_src),
+        ("master_width_src", &p.master_width_src),
+        ("master_drive_src", &p.master_drive_src),
+        ("master_lo_src", &p.master_lo_src),
+        ("master_mid_src", &p.master_mid_src),
+        ("master_freq_src", &p.master_freq_src),
+        ("master_hi_src", &p.master_hi_src),
+        ("master_send_a_src", &p.master_send_a_src),
+        ("master_send_b_src", &p.master_send_b_src),
+    ] {
+        check_src(src, field, loc, declared, r);
     }
 }
 
@@ -1126,10 +1144,12 @@ fn check_dld(p: &DldParams, loc: &str, declared: &BTreeSet<(String, usize)>, r: 
             ("win_src", &ch.win_src),
             ("hold_src", &ch.hold_src),
             ("rev_src", &ch.rev_src),
+            ("mix_src", &ch.mix_src),
         ] {
             check_src(src, field, loc, declared, r);
         }
     }
+    check_src(&p.ping_src, "ping_src", loc, declared, r);
     if let Some(v) = p.ping_ms {
         if !(0.0..=10_000.0).contains(&v) {
             r.error(loc, format!("ping_ms: {v} out of range 0–10000"));
@@ -1189,8 +1209,12 @@ fn check_sampler(
     for (field, src) in [
         ("pitch_src", &p.pitch_src),
         ("speed_src", &p.speed_src),
+        ("start_src", &p.start_src),
+        ("len_src", &p.len_src),
         ("gene_src", &p.gene_src),
         ("slide_src", &p.slide_src),
+        ("atk_src", &p.atk_src),
+        ("dec_src", &p.dec_src),
         ("level_src", &p.level_src),
         ("amp_src", &p.amp_src),
     ] {
@@ -1216,6 +1240,8 @@ fn check_wasp(p: &WaspParams, loc: &str, declared: &BTreeSet<(String, usize)>, r
         ("res_src", &p.res_src),
         ("mix_src", &p.mix_src),
         ("dirt_src", &p.dirt_src),
+        ("bp_src", &p.bp_src),
+        ("dry_src", &p.dry_src),
     ] {
         check_src(src, field, loc, declared, r);
     }
@@ -1292,6 +1318,7 @@ fn check_lfo(p: &LfoParams, loc: &str, declared: &BTreeSet<(String, usize)>, r: 
         range01(c.freq, &format!("ch{}: freq", i + 1), loc, r);
         range01(c.phase, &format!("ch{}: phase", i + 1), loc, r);
         check_src(&c.freq_src, "freq_src", loc, declared, r);
+        check_src(&c.phase_src, "phase_src", loc, declared, r);
     }
     check_src(&p.rst_src, "rst_src", loc, declared, r);
 }
@@ -1609,25 +1636,38 @@ fn decode<T: serde::de::DeserializeOwned>(
 /// the detection.
 const KNOWN_KEYS: &[&str] = &[
     "active", "active_pane", "active_slot", "active_window", "amount", "amp_src", "and_enabled",
-    "arg", "armed", "atten_src", "attenuverter", "auto", "band_srcs", "bank_a", "bank_b", "bind",
-    "bpm", "by", "channel", "channels", "chord", "cmds", "created", "cutoff", "cutoff_src",
-    "cycle", "decay", "decay_src", "delay", "delay_prob", "delay_unit", "depth", "depth_src",
+    "arg", "armed", "atk", "atk_src", "atten_src", "attenuverter", "auto", "band_srcs",
+    "bank_a", "bank_b", "bind",
+    "blow_meta_src", "blow_src", "blow_timbre_src", "bow_src", "bow_timbre_src", "bp", "bp_src",
+    "bpm", "bpm_src", "by", "channel", "channels", "chord", "cmds", "created", "cutoff",
+    "cutoff_src",
+    "cycle", "dec", "dec_src", "decay", "decay_src", "delay", "delay_prob", "delay_unit",
+    "depth", "depth_src",
     "detune", "detune_src", "drive", "drive_src", "dry", "dry_src", "eq_freq", "eq_hi", "eq_lo",
     "eq_mid", "euclidean_length", "euclidean_pulses", "euclidean_rotation", "fader", "fader_src",
     "fall", "fall_src", "fm", "fm_src", "format", "freeze", "freeze_src", "freq", "freq_src",
-    "gain", "gate", "gate_mode", "glide", "groove", "hi_src", "humanize", "id", "input",
+    "gain", "gate", "gate_mode", "gene", "gene_src", "glide", "glide_src", "groove", "hi_src",
+    "humanize", "id",
+    "input",
     "instance", "kind", "lane", "lane_len", "layout", "length", "level", "level_src", "lo_src",
-    "logic_outputs", "loop_in", "loop_mode", "loop_on", "loop_out", "lpg", "macros", "master",
-    "master_drive", "master_eq_freq", "master_eq_hi", "master_eq_lo", "master_eq_mid",
-    "master_send_a", "master_send_b", "master_width", "meta", "mid_src", "mod_value",
-    "modbus_channel", "mode", "module", "monitor", "morph", "morph_src", "muted", "mute", "name",
+    "logic_outputs", "loop_in", "loop_mode", "loop_on", "loop_out", "lpg", "lpg_src", "macros",
+    "master",
+    "master_drive", "master_drive_src", "master_eq_freq", "master_eq_hi", "master_eq_lo",
+    "master_eq_mid", "master_freq_src", "master_hi_src", "master_lo_src", "master_mid_src",
+    "master_send_a", "master_send_a_src", "master_send_b", "master_send_b_src", "master_src",
+    "master_width", "master_width_src", "meta", "mid_src", "mod_value",
+    "mix", "mix_src", "modbus_channel", "mode", "module", "monitor", "morph", "morph_src",
+    "muted", "mute", "name", "offset_src",
     "note", "notes_src", "offset", "or_enabled", "output", "pan", "pan_src", "panes", "patch",
-    "patch_inline", "phase", "pitch", "pitch_src", "playing", "pluck", "prob", "pulses", "quant",
+    "patch_inline", "phase", "phase_src", "ping_ms", "ping_src", "pitch", "pitch_src", "playing",
+    "pluck", "pluck_src", "prob", "pulses", "quant",
     "rate", "rate_src", "ratchet_decay", "regen", "regen_src", "repeat_prob", "repeats", "res",
     "res_src", "reversed", "rise", "rise_src", "root", "rotation", "scale", "scale_cents",
     "scale_period", "send_a", "send_a_src", "send_b", "send_b_src", "session_name", "shape",
     "shape_src", "shim", "shim_src", "signal_src", "slot", "slots", "solo", "source", "speed",
-    "speed_src", "split", "split_src", "spread", "spread_src", "start", "step", "steps", "sub",
+    "speed_src", "slide", "slide_src", "split", "split_src", "spread", "spread_src", "start",
+    "start_src", "len_src", "step", "steps",
+    "strike_meta_src", "strike_src", "strike_timbre_src", "sub",
     "sub_src", "sum_enabled", "swell", "swell_src", "swing", "tap", "taps", "time", "time_src",
     "tmux", "track", "tracks", "trigger_level", "trigger_src", "unipolar", "velocity", "wash",
     "wash_src", "wcent", "wcent_src", "windows", "window_size",
