@@ -26,8 +26,8 @@ use std::path::Path;
 
 use crate::routing::{output_labels, SourceAddr};
 use crate::state::{
-    DelayParams, DldParams, DpoParamsState, EnvelopeParams, FilterbankParams, MacroCmd,
-    MixerParams, SamplerParams, ScopeParams, SequencerParams, SessionState, StepParam,
+    DelayParams, DldParams, DpoParamsState, EnvelopeParams, FilterbankParams, LfoParams,
+    MacroCmd, MixerParams, SamplerParams, ScopeParams, SequencerParams, SessionState, StepParam,
     SwarmParams, TapeParams, TemplateParams, TrackMode, VoiceParams, WaspParams, STATE_FORMAT,
 };
 use crate::theory;
@@ -270,6 +270,11 @@ fn validate_session(st: &SessionState, r: &mut Report) {
             "dpo" => {
                 if let Some(p) = decode::<DpoParamsState>(value, &loc, r) {
                     check_dpo(&p, &loc, &declared, r, &mut pending);
+                }
+            }
+            "lfo" => {
+                if let Some(p) = decode::<LfoParams>(value, &loc, r) {
+                    check_lfo(&p, &loc, &declared, r);
                 }
             }
             // No params structs: state is ephemeral or none.
@@ -1260,6 +1265,31 @@ fn check_dpo(
     check_notes_src(&p.notes_src, loc, declared, r, pending);
 }
 
+/// LFO (lfo.rs): mode + shape names, knobs 0-1, rate-CV sources.
+fn check_lfo(p: &LfoParams, loc: &str, declared: &BTreeSet<(String, usize)>, r: &mut Report) {
+    const MODES: [&str; 4] = ["free", "quad", "phase", "div"];
+    const SHAPES: [&str; 6] = ["sine", "tri", "saw", "sqr", "s&h", "snh"];
+    if let Some(m) = p.mode.as_deref() {
+        if !MODES.contains(&m) {
+            r.error(loc, format!("mode: {m:?} — one of {}", MODES.join(" ")));
+        }
+    }
+    if p.channels.len() > 4 {
+        r.error(loc, format!("{} channels — the bank has 4", p.channels.len()));
+    }
+    for (i, c) in p.channels.iter().enumerate().take(4) {
+        if let Some(sh) = c.shape.as_deref() {
+            if !SHAPES.contains(&sh) {
+                r.error(loc, format!("ch{}: shape {sh:?} — one of {}", i + 1, SHAPES.join(" ")));
+            }
+        }
+        range01(c.freq, &format!("ch{}: freq", i + 1), loc, r);
+        range01(c.phase, &format!("ch{}: phase", i + 1), loc, r);
+        check_src(&c.freq_src, "freq_src", loc, declared, r);
+    }
+    check_src(&p.rst_src, "rst_src", loc, declared, r);
+}
+
 /// Template (template.rs SHAPES): shape by name.
 fn check_template(
     p: &TemplateParams,
@@ -1311,7 +1341,7 @@ const AUDIO_MODULES: [&str; 10] =
     ["voice", "swarm", "tone", "template", "delay", "filterbank", "dld", "sampler", "wasp", "dpo"];
 
 /// Canonical module names, for misspelled-pane suggestions.
-const MODULE_NAMES: [&str; 17] = ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo"];
+const MODULE_NAMES: [&str; 18] = ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo"];
 
 /// An optional `*_src` field: grammar, known output, declared instance.
 /// Returns the parsed address so callers can queue cross-module checks.

@@ -568,6 +568,30 @@ pub struct DpoParamsState {
     pub notes_src: Option<String>,
 }
 
+/// One LFO channel (modules/lfo.rs).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LfoChannelParams {
+    pub freq: Option<f32>,
+    /// Shape by name: "sine", "tri", "saw", "sqr", "s&h".
+    pub shape: Option<String>,
+    pub phase: Option<f32>,
+    #[serde(default)]
+    pub freq_src: Option<String>,
+}
+
+/// The quad LFO (modules/lfo.rs) — Batumi-style bank.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LfoParams {
+    #[serde(default)]
+    pub format: u32,
+    /// Mode by name: "free", "quad", "phase", "div".
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub rst_src: Option<String>,
+    #[serde(default)]
+    pub channels: Vec<LfoChannelParams>,
+}
+
 /// The swarm voice (modules/swarm.rs) — the CS-80-flavored brass pad:
 /// chord by name ("min7"), the five knobs, glide, and the three kinds
 /// of binding (knob sources, amp, notes).

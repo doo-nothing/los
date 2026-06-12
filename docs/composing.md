@@ -297,6 +297,14 @@ steps note 60 for the kick, 61 for slot b, etc. The CV bank
 (`pitch_src speed_src gene_src slide_src level_src`) overlays every
 slot, Morphagene-style. Publishes `sampler/N/env`.
 
+**lfo** (Batumi-style quad bank): the dedicated slow-curve source —
+`mode` ∈ free, quad (90° bank), phase, div (/2…/16, integer-locked);
+per channel `freq` (0–1 log over 209 s–50 Hz), `shape` (sine, tri,
+saw, sqr, s&h), `phase`; `rst_src` re-zeros the bank on a trigger
+(bind a track and the LFOs snap to the form). Sources:
+`lfo/N/s1`–`s4` (sines) and `a1`–`a4` (the shaped assigns). Stop
+borrowing MATHs loop channels for vibrato — bind `lfo/0/s2` instead.
+
 **mixer**: per-track `level` (0–1), `pan` (−1–1), `drive` (0–1), 3-band
 EQ (±15 dB, `eq_freq` 0–1), `mute`/`solo`; a master strip with the
 same console plus `master_width` (0–2).
@@ -313,6 +321,7 @@ Any `*_src` field binds a parameter to a source address,
 | `delay/N/` | `in`, `t1`–`t8` (envelope followers on the taps) |
 | `filterbank/N/` | `b1`–`b16` (per-band followers) |
 | `swarm/N/` | `swl` (the ladder's swell — the bloom as a source) |
+| `lfo/N/` | `s1`–`s4` (sines), `a1`–`a4` (assigns) |
 | `template/N/` | `lfo` |
 
 Audio `input` fields are 2-segment: a producing module (`voice`,
