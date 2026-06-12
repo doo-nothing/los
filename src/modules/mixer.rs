@@ -593,6 +593,10 @@ fn mixer_thread(
             }
         }
         for i in to_remove.into_iter().rev() {
+            forensics(&format!(
+                "strip removed: {} (entry dead or claimed)",
+                inner.audio_sources[i].shm_name
+            ));
             inner.audio_sources.remove(i);
             inner.tracks.remove(i);
             if inner.selected > 0 && inner.selected >= inner.tracks.len() {
@@ -624,6 +628,7 @@ fn mixer_thread(
 
             if let Ok(ringbuf) = AudioRingbuf::open(shm_name) {
                 let label = format!("{} {}", capitalize(&entry.module_name), entry.instance);
+                forensics(&format!("strip adopted: {label}"));
                 // house balance: the bass voice (voice 1) carries the
                 // floor, the melody sits inside it, and the fx returns
                 // ride hot enough to be characters, not seasoning
@@ -641,7 +646,8 @@ fn mixer_thread(
                 // stays dry: a return feeding its own send is a loop you
                 // should have to ask for.
                 let (sa, sb) = match entry.module_name.as_str() {
-                    "voice" | "tone" | "template" => (0.4, 0.3),
+                    "voice" | "tone" | "template" | "swarm" | "elements" | "dpo"
+                    | "sampler" => (0.4, 0.3),
                     "filterbank" => (0.3, 0.0),
                     _ => (0.0, 0.0),
                 };
@@ -701,6 +707,20 @@ fn mixer_thread(
     }
 
     Ok(())
+}
+
+/// Append a timestamped line to ~/.config/los/tmp/mixer.log — the
+/// black box for silent-session forensics. Best effort, never fails.
+fn forensics(msg: &str) {
+    use std::io::Write;
+    let path = crate::state::tmp_dir().join("mixer.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(f, "[{t}] {msg}");
+    }
 }
 
 fn capitalize(s: &str) -> String {
