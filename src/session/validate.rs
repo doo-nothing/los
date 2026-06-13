@@ -27,8 +27,9 @@ use std::path::Path;
 use crate::routing::{output_labels, SourceAddr};
 use crate::state::{
     DelayParams, DldParams, DpoParamsState, ElementsParams, EnvelopeParams, FilterbankParams,
-    BranchesParams, EdgesParams, GridsParams, LfoParams, MacroCmd, MixerParams, PeaksParams,
-    RingsParams, SamplerParams, ScopeParams, SequencerParams, SessionState, StepParam,
+    BranchesParams, EdgesParams, FramesParams, GridsParams, LfoParams, MacroCmd, MixerParams,
+    PeaksParams, RingsParams, SamplerParams, ScopeParams, SequencerParams, SessionState,
+    StepParam,
     SwarmParams,
     TapeParams, TemplateParams, TidesParams, TrackMode, VoiceParams, WaspParams, STATE_FORMAT,
 };
@@ -312,6 +313,11 @@ fn validate_session(st: &SessionState, r: &mut Report) {
             "edges" => {
                 if let Some(p) = decode::<EdgesParams>(value, &loc, r) {
                     check_edges(&p, &loc, &declared, r, &mut pending);
+                }
+            }
+            "frames" => {
+                if let Some(p) = decode::<FramesParams>(value, &loc, r) {
+                    check_frames(&p, &loc, &declared, r);
                 }
             }
             // No params structs: state is ephemeral or none.
@@ -1657,6 +1663,57 @@ fn check_edges(
     }
 }
 
+/// Frames (modules/frames): mode/easing names, knob ranges,
+/// keyframe sanity, srcs.
+fn check_frames(
+    p: &FramesParams,
+    loc: &str,
+    declared: &BTreeSet<(String, usize)>,
+    r: &mut Report,
+) {
+    if let Some(m) = p.mode.as_deref() {
+        if !["keyframer", "polylfo"].contains(&m) {
+            r.error(loc, format!("mode {m:?} — keyframer or polylfo"));
+        }
+    }
+    const EASES: [&str; 6] = ["step", "linear", "in4", "out4", "sine", "bounce"];
+    for (i, e) in p.easing.iter().enumerate() {
+        if !EASES.contains(&e.as_str()) {
+            r.error(loc, format!("easing[{i}] {e:?} — one of {}", EASES.join(" ")));
+        }
+    }
+    range01(p.frame, "frame", loc, r);
+    range01(p.shape, "shape", loc, r);
+    range01(p.spread, "spread", loc, r);
+    range01(p.shape_spread, "shape_spread", loc, r);
+    range01(p.coupling, "coupling", loc, r);
+    for (i, k) in p.keyframes.iter().enumerate() {
+        if !(0.0..=1.0).contains(&k.t) {
+            r.error(loc, format!("keyframes[{i}].t {} is out of range 0–1", k.t));
+        }
+        if k.values.len() > 4 {
+            r.error(loc, format!("keyframes[{i}]: {} values — channels have 4", k.values.len()));
+        }
+    }
+    for (field, src) in [
+        ("frame_src", &p.frame_src),
+        ("ch1_src", &p.ch1_src),
+        ("ch2_src", &p.ch2_src),
+        ("ch3_src", &p.ch3_src),
+        ("ch4_src", &p.ch4_src),
+        ("resp1_src", &p.resp1_src),
+        ("resp2_src", &p.resp2_src),
+        ("resp3_src", &p.resp3_src),
+        ("resp4_src", &p.resp4_src),
+        ("shape_src", &p.shape_src),
+        ("spread_src", &p.spread_src),
+        ("shape_spread_src", &p.shape_spread_src),
+        ("coupling_src", &p.coupling_src),
+    ] {
+        check_src(src, field, loc, declared, r);
+    }
+}
+
 /// Template (template.rs SHAPES): shape by name.
 fn check_template(
     p: &TemplateParams,
@@ -1708,8 +1765,8 @@ const AUDIO_MODULES: [&str; 15] =
     ["voice", "swarm", "tone", "template", "delay", "filterbank", "dld", "sampler", "wasp", "dpo", "elements", "rings", "tides", "peaks", "edges"];
 
 /// Canonical module names, for misspelled-pane suggestions.
-const MODULE_NAMES: [&str; 25] =
-    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements", "rings", "tides", "peaks", "branches", "grids", "edges"];
+const MODULE_NAMES: [&str; 26] =
+    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements", "rings", "tides", "peaks", "branches", "grids", "edges", "frames"];
 
 /// An optional `*_src` field: grammar, known output, declared instance.
 /// Returns the parsed address so callers can queue cross-module checks.
@@ -1948,7 +2005,10 @@ const KNOWN_KEYS: &[&str] = &[
     "depth", "depth_src",
     "detune", "detune_src", "drive", "drive_src", "dry", "dry_src", "eq_freq", "eq_hi", "eq_lo",
     "eq_mid", "euclidean_length", "euclidean_pulses", "euclidean_rotation", "fader", "fader_src",
-    "fall", "fall_src", "fm", "fm_src", "format", "freeze", "freeze_src", "freq", "freq_src",
+    "fall", "fall_src", "fm", "fm_src", "format", "frame", "frame_src", "freeze", "freeze_src",
+    "freq", "freq_src", "keyframes", "coupling", "coupling_src", "shape_spread",
+    "shape_spread_src", "easing", "response", "resp1_src", "resp2_src", "resp3_src", "resp4_src",
+    "ch", "ch1_src", "ch2_src", "ch3_src", "ch4_src", "t", "values",
     "gain", "gate", "gate_mode", "gene", "gene_src", "glide", "glide_src", "groove", "hi_src",
     "chaos", "chaos_src", "x_src", "y_src", "fill1", "fill2", "fill3", "fill1_src", "fill2_src",
     "fill3_src", "len1", "len2", "len3", "len1_src", "len2_src", "len3_src",

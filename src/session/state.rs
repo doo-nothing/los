@@ -924,6 +924,63 @@ pub struct EdgesParams {
     pub notes4_src: Option<String>,
 }
 
+/// One stored frames keyframe (timestamp + four channel values).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FramesKeyframe {
+    pub t: f32,
+    #[serde(default)]
+    pub values: Vec<f32>,
+}
+
+/// Frames (modules/frames) — the MI keyframer: the frame knob scans
+/// stored keyframes across four bus outputs; poly-LFO easter egg.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FramesParams {
+    #[serde(default)]
+    pub format: u32,
+    /// "keyframer" | "polylfo"
+    pub mode: Option<String>,
+    pub frame: Option<f32>,
+    #[serde(default)]
+    pub ch: Vec<f32>,
+    #[serde(default)]
+    pub easing: Vec<String>,
+    #[serde(default)]
+    pub response: Vec<f32>,
+    pub shape: Option<f32>,
+    pub spread: Option<f32>,
+    pub shape_spread: Option<f32>,
+    pub coupling: Option<f32>,
+    #[serde(default)]
+    pub keyframes: Vec<FramesKeyframe>,
+    #[serde(default)]
+    pub frame_src: Option<String>,
+    #[serde(default)]
+    pub ch1_src: Option<String>,
+    #[serde(default)]
+    pub ch2_src: Option<String>,
+    #[serde(default)]
+    pub ch3_src: Option<String>,
+    #[serde(default)]
+    pub ch4_src: Option<String>,
+    #[serde(default)]
+    pub resp1_src: Option<String>,
+    #[serde(default)]
+    pub resp2_src: Option<String>,
+    #[serde(default)]
+    pub resp3_src: Option<String>,
+    #[serde(default)]
+    pub resp4_src: Option<String>,
+    #[serde(default)]
+    pub shape_src: Option<String>,
+    #[serde(default)]
+    pub spread_src: Option<String>,
+    #[serde(default)]
+    pub shape_spread_src: Option<String>,
+    #[serde(default)]
+    pub coupling_src: Option<String>,
+}
+
 /// The swarm voice (modules/swarm.rs) — the CS-80-flavored brass pad:
 /// chord by name ("min7"), the five knobs, glide, and the three kinds
 /// of binding (knob sources, amp, notes).

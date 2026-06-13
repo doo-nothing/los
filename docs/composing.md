@@ -385,6 +385,18 @@ bitcrush hold), `xpose` (±24 st), `lvl` — all with per-channel
 1+3 left, 2+4 right. The NES LFSRs and 8-bit quantization are the
 firmware's, bit for bit.
 
+**frames** (the Mutable Instruments keyframer, full port): the
+`frame` knob scans stored keyframes across four bus outputs
+(`frames/N/ch1`–`ch4`) — bind `frame_src` to an LFO or the
+sequencer and a whole mixer scene morphs by itself. `keyframes` live
+in the patch (`[[…keyframes]] t = 0.3, values = [a,b,c,d]`); in the
+TUI `a` records the current `ch` values at the frame position, `d`
+deletes the nearest. Per-channel `easing` ∈ step, linear, in4, out4,
+sine, bounce and `response` (linear ↔ exponential, the 2164 law).
+`mode = "polylfo"` repurposes the four outputs as coupled wavetable
+LFOs (frame = rate over 13 octaves; `shape`, `spread`,
+`shape_spread`, `coupling`). Every knob has a `*_src` twin.
+
 **mixer**: per-track `level` (0–1), `pan` (−1–1), `drive` (0–1), 3-band
 EQ (±15 dB, `eq_freq` 0–1), `mute`/`solo`; a master strip with the
 same console plus `master_width` (0–2).
@@ -418,6 +430,7 @@ Sources:
 | `peaks/N/` | `ch1`, `ch2` (the two channel outputs) |
 | `branches/N/` | `1a`, `1b`, `2a`, `2b` (gate levels; also note re-emit sources) |
 | `grids/N/` | `bd`, `sd`, `hh` (triggers; also note sources), `acc` |
+| `frames/N/` | `ch1`–`ch4` (keyframed levels / poly LFOs) |
 | `template/N/` | `lfo` |
 
 Audio `input` fields are 2-segment: a producing module (`voice`,
