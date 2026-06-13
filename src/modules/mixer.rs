@@ -975,8 +975,18 @@ fn tape_writer(rx: std::sync::mpsc::Receiver<Vec<f32>>, path: &str, sample_rate:
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     };
-    let Ok(mut wr) = hound::WavWriter::create(path, spec) else {
-        return;
+    // Create the parent directory if it's missing — otherwise
+    // WavWriter::create fails and the render hangs to its boot deadline
+    // reporting a phantom dead audio device.
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut wr = match hound::WavWriter::create(path, spec) {
+        Ok(w) => w,
+        Err(e) => {
+            forensics(&format!("tape writer could not create {path}: {e}"));
+            return;
+        }
     };
     for block in rx {
         for s in block {
