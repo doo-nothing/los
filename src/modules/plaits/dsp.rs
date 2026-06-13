@@ -949,6 +949,176 @@ impl Engine for ChordEngine {
     }
 }
 
+// ── the waveshaping engine ───────────────────────────────────────────────────
+
+const WAVESHAPER_BIN: &[u8] = include_bytes!("waveshaper_tables.bin");
+
+struct WaveshaperTables {
+    ws: Vec<Vec<i16>>, // 5 × 257
+    fold: Vec<f32>,    // 516
+    fold_2: Vec<f32>,  // 516
+}
+
+static WS_TABLES: OnceLock<WaveshaperTables> = OnceLock::new();
+
+fn ws_tables() -> &'static WaveshaperTables {
+    WS_TABLES.get_or_init(|| {
+        let mut off = 0usize;
+        let ws: Vec<Vec<i16>> = (0..5)
+            .map(|_| {
+                let v: Vec<i16> = WAVESHAPER_BIN[off..off + 257 * 2]
+                    .chunks_exact(2)
+                    .map(|b| i16::from_le_bytes([b[0], b[1]]))
+                    .collect();
+                off += 257 * 2;
+                v
+            })
+            .collect();
+        let fold: Vec<f32> = WAVESHAPER_BIN[off..off + 516 * 4]
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
+        off += 516 * 4;
+        let fold_2: Vec<f32> = WAVESHAPER_BIN[off..off + 516 * 4]
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
+        WaveshaperTables { ws, fold, fold_2 }
+    })
+}
+
+#[inline]
+fn interpolate_hermite(table: &[f32], base: usize, t: f32, size: f32) -> f32 {
+    let p = (t.clamp(0.0, 1.0) * size).min(size - 1.0);
+    let i = p as usize;
+    let frac = p - i as f32;
+    let idx = |k: isize| {
+        let j = (base as isize + i as isize + k).clamp(0, table.len() as isize - 1) as usize;
+        table[j]
+    };
+    let xm1 = idx(-1);
+    let x0 = idx(0);
+    let x1 = idx(1);
+    let x2 = idx(2);
+    let c = (x1 - xm1) * 0.5;
+    let v = x0 - x1;
+    let w = c + v;
+    let a = w + v + (x2 - x0) * 0.5;
+    let b = w + a;
+    ((((a * frac) - b) * frac + c) * frac) + x0
+}
+
+#[inline]
+fn ws_sine(phase: f32) -> f32 {
+    let t = fm_tables();
+    let p = (phase - phase.floor()) * 512.0;
+    let i = p as usize;
+    let frac = p - i as f32;
+    let a = t.sine[i.min(t.sine.len() - 1)];
+    let b = t.sine[(i + 1).min(t.sine.len() - 1)];
+    a + (b - a) * frac
+}
+
+#[inline]
+fn tame(f0: f32, harmonics: f32, order: f32) -> f32 {
+    let f0 = f0 * harmonics;
+    let max_f = 0.5 / order;
+    let amount = (1.0 - (f0 - max_f) / (0.5 - max_f)).clamp(0.0, 1.0);
+    amount * amount * amount
+}
+
+/// A waveshaping + wavefolding engine: a slope oscillator through one
+/// of five waveshaper transfer curves and a wavefolder. The slope
+/// source uses the variable-shape oscillator (documented simplification
+/// of the firmware's dedicated slope oscillator); the waveshaper and
+/// folder tables are extracted byte-exact.
+pub struct WaveshapingEngine {
+    slope: VariableShapeOscillator,
+    triangle: VariableShapeOscillator,
+    prev_shape: f32,
+    prev_wf_gain: f32,
+    prev_overtone: f32,
+    temp: Vec<f32>,
+}
+
+impl WaveshapingEngine {
+    pub fn new() -> Self {
+        Self {
+            slope: VariableShapeOscillator::new(),
+            triangle: VariableShapeOscillator::new(),
+            prev_shape: 0.0,
+            prev_wf_gain: 0.0,
+            prev_overtone: 0.0,
+            temp: Vec::new(),
+        }
+    }
+}
+
+impl Default for WaveshapingEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Engine for WaveshapingEngine {
+    fn render(&mut self, p: &EngineParameters, out: &mut [f32], aux: &mut [f32]) -> bool {
+        let t = ws_tables();
+        let size = out.len();
+        if self.temp.len() < size {
+            self.temp.resize(size, 0.0);
+        }
+        let f0 = note_to_frequency(p.note);
+        let pw = p.morph * 0.45 + 0.5;
+        // slope source (variable-shape saw) and a triangle reference
+        self.slope.render(f0, pw, 0.0, &mut self.temp[..size]);
+        self.triangle.render(f0, 0.5, 0.5, aux);
+
+        let slope = 3.0 + (p.morph - 0.5).abs() * 5.0;
+        let shape_amount = (p.harmonics - 0.5).abs() * 2.0;
+        let shape_atten = tame(f0, slope, 16.0);
+        let wf_gain = p.timbre;
+        let wf_gain_atten = tame(f0, slope * (3.0 + shape_amount * shape_atten * 5.0), 12.0);
+
+        let shape_target = 0.5 + (p.harmonics - 0.5) * shape_atten;
+        let wf_target = 0.03 + 0.46 * wf_gain * wf_gain_atten;
+        let overtone = p.timbre * (2.0 - p.timbre);
+        let overtone_target = overtone * (2.0 - overtone);
+
+        let shape_step = (shape_target - self.prev_shape) / size.max(1) as f32;
+        let wf_step = (wf_target - self.prev_wf_gain) / size.max(1) as f32;
+        let ot_step = (overtone_target - self.prev_overtone) / size.max(1) as f32;
+        let (mut shape_m, mut wf_m, mut ot_m) =
+            (self.prev_shape, self.prev_wf_gain, self.prev_overtone);
+
+        for i in 0..size {
+            shape_m += shape_step;
+            wf_m += wf_step;
+            ot_m += ot_step;
+            let shape = (shape_m * 3.9999).clamp(0.0, 3.9999);
+            let shape_i = shape as usize;
+            let shape_f = shape - shape_i as f32;
+            let s1 = &t.ws[shape_i.min(4)];
+            let s2 = &t.ws[(shape_i + 1).min(4)];
+            let ws_index = 127.0 * self.temp[i] + 128.0;
+            let wi = (ws_index as usize) & 255;
+            let wf = ws_index - ws_index.floor();
+            let x = (s1[wi] as f32 + (s1[(wi + 1).min(256)] as f32 - s1[wi] as f32) * wf) / 32768.0;
+            let y = (s2[wi] as f32 + (s2[(wi + 1).min(256)] as f32 - s2[wi] as f32) * wf) / 32768.0;
+            let mix = x + (y - x) * shape_f;
+            let index = (mix * wf_m + 0.5).clamp(0.0, 1.0);
+            let fold = interpolate_hermite(&t.fold, 1, index, 512.0);
+            let fold_2 = -interpolate_hermite(&t.fold_2, 1, index, 512.0);
+            let sine = ws_sine(aux[i] * 0.25 + 0.5);
+            out[i] = fold;
+            aux[i] = sine + (fold_2 - sine) * ot_m;
+        }
+        self.prev_shape = shape_target;
+        self.prev_wf_gain = wf_target;
+        self.prev_overtone = overtone_target;
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1018,6 +1188,38 @@ mod tests {
             energy += out.iter().map(|v| v * v).sum::<f32>();
         }
         assert!(energy > 0.0, "the noise engine sings: {energy}");
+    }
+
+    #[test]
+    fn waveshaping_engine_makes_sound_and_folds() {
+        let mut eng = WaveshapingEngine::new();
+        let mut out = vec![0.0_f32; 64];
+        let mut aux = vec![0.0_f32; 64];
+        for (h, tb) in [(0.2, 0.3), (0.5, 0.6), (0.8, 0.9)] {
+            let p = EngineParameters {
+                note: 48.0,
+                harmonics: h,
+                timbre: tb,
+                morph: 0.5,
+                ..Default::default()
+            };
+            let mut energy = 0.0;
+            for _ in 0..50 {
+                eng.render(&p, &mut out, &mut aux);
+                assert!(out.iter().chain(aux.iter()).all(|v| v.is_finite()), "h={h} finite");
+                energy += out.iter().map(|v| v * v).sum::<f32>();
+            }
+            assert!(energy > 0.01, "waveshaper sounds at h={h}: {energy}");
+        }
+    }
+
+    #[test]
+    fn waveshaper_tables_load() {
+        let t = ws_tables();
+        assert_eq!(t.ws.len(), 5);
+        assert!(t.ws.iter().all(|w| w.len() == 257));
+        assert_eq!(t.fold.len(), 516);
+        assert_eq!(t.fold_2.len(), 516);
     }
 
     #[test]
