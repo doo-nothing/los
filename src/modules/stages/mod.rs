@@ -8,3 +8,6 @@
 //! six-segment shell publishing stages/N/o1..o6.
 
 pub mod dsp;
+pub mod ui;
+
+pub use ui::run;

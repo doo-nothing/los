@@ -1,0 +1,107 @@
+# streams-demo.toml — the vactrol LPG doing its thing: a swarm pad
+# runs through streams; the left side is a plucked vactrol gated by
+# the kick track (duck-and-bloom), the right side a compressor. The
+# vactrol's frequency CV closes the loop into a wasp's cutoff.
+# Uncommitted example (house rule).
+
+[meta]
+name = "streams-demo"
+created = ""
+format = 2
+
+[[windows]]
+name = "modules"
+
+[[windows.panes]]
+module = "sequencer"
+instance = 0
+
+[windows.panes.patch_inline]
+bpm = 96.0
+playing = false
+
+# t1 — the gate pattern that plucks the vactrol
+[[windows.panes.patch_inline.tracks]]
+length = 16
+steps = [
+  { active = true, note = 36, velocity = 112 },
+  { active = false, note = 36, velocity = 80 },
+  { active = false, note = 36, velocity = 80 },
+  { active = true, note = 36, velocity = 64 },
+  { active = false, note = 36, velocity = 80 },
+  { active = false, note = 36, velocity = 80 },
+  { active = true, note = 36, velocity = 96 },
+  { active = false, note = 36, velocity = 80 },
+  { active = false, note = 36, velocity = 80 },
+  { active = true, note = 36, velocity = 72, prob = 60 },
+  { active = false, note = 36, velocity = 80 },
+  { active = false, note = 36, velocity = 80 },
+  { active = true, note = 36, velocity = 104 },
+  { active = false, note = 36, velocity = 80 },
+  { active = true, note = 36, velocity = 56, prob = 40 },
+  { active = false, note = 36, velocity = 80 },
+]
+
+# t2 — slow notes for the swarm pad
+[[windows.panes.patch_inline.tracks]]
+length = 8
+steps = [
+  { active = true, note = 48, velocity = 90 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = true, note = 43, velocity = 84 },
+  { active = false, note = 43, velocity = 80 },
+  { active = true, note = 46, velocity = 80 },
+  { active = false, note = 46, velocity = 80 },
+]
+
+[[windows.panes]]
+module = "swarm"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+chord = "5th"
+detune = 0.35
+cutoff = 0.6
+swell = 0.3
+level = 0.8
+notes_src = "sequencer/0/t2"
+
+[[windows.panes]]
+module = "streams"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+input = "swarm/0"
+fn1 = "vactrol"
+alt1 = true            # plucked — snaps open, Gompertz ring-down
+p1 = [0.35, 0.7]       # shape (attack/decay), →freq amount
+notes1_src = "sequencer/0/t1"
+fn2 = "compressor"
+alt2 = true            # soft knee
+p2 = [0.45, 0.7]       # threshold, ratio→makeup
+excite2 = 0.0
+
+[[windows.panes]]
+module = "wasp"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+input = "streams/0"
+freq = 0.5
+res = 0.45
+mix = 0.0
+dirt = 0.25
+freq_src = "streams/0/f1"   # the vactrol's frequency CV drives the cutoff
+
+[[windows.panes]]
+module = "mixer"
+instance = 0
+
+[[windows.panes]]
+module = "scope"
+instance = 0

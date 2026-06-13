@@ -981,6 +981,60 @@ pub struct FramesParams {
     pub coupling_src: Option<String>,
 }
 
+/// Stages (modules/stages) — the MI segment generator: six segments
+/// (type ramp|step|hold, loop flag, two knobs each), wired into
+/// groups by gate bindings exactly like the hardware. CV-only;
+/// publishes stages/N/o1..o6.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StagesParams {
+    #[serde(default)]
+    pub format: u32,
+    #[serde(default)]
+    pub types: Vec<String>,
+    #[serde(default)]
+    pub loops: Vec<bool>,
+    #[serde(default)]
+    pub p: Vec<f32>,
+    #[serde(default)]
+    pub s: Vec<f32>,
+    #[serde(default)]
+    pub p1_src: Option<String>,
+    #[serde(default)]
+    pub p2_src: Option<String>,
+    #[serde(default)]
+    pub p3_src: Option<String>,
+    #[serde(default)]
+    pub p4_src: Option<String>,
+    #[serde(default)]
+    pub p5_src: Option<String>,
+    #[serde(default)]
+    pub p6_src: Option<String>,
+    #[serde(default)]
+    pub s1_src: Option<String>,
+    #[serde(default)]
+    pub s2_src: Option<String>,
+    #[serde(default)]
+    pub s3_src: Option<String>,
+    #[serde(default)]
+    pub s4_src: Option<String>,
+    #[serde(default)]
+    pub s5_src: Option<String>,
+    #[serde(default)]
+    pub s6_src: Option<String>,
+    #[serde(default)]
+    pub gate1_src: Option<String>,
+    #[serde(default)]
+    pub gate2_src: Option<String>,
+    #[serde(default)]
+    pub gate3_src: Option<String>,
+    #[serde(default)]
+    pub gate4_src: Option<String>,
+    #[serde(default)]
+    pub gate5_src: Option<String>,
+    #[serde(default)]
+    pub gate6_src: Option<String>,
+}
+
 /// Streams (modules/streams) — the MI dual dynamics gate: two
 /// channels (left/right of the claimed input), each running one of
 /// six processors (envelope, vactrol, follower, compressor, filter

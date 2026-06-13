@@ -252,6 +252,9 @@ pub enum SegmentType {
     Ramp,
     Step,
     Hold,
+    /// Like Hold in a group, but a single ALT segment is an audio
+    /// oscillator (free-running or PLL-locked).
+    Alt,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -367,7 +370,7 @@ impl RampExtractor {
                 }
                 self.samples_since_edge = 0.0;
                 self.edge_count += 1;
-                if self.edge_count % q == 0 {
+                if self.edge_count.is_multiple_of(q) {
                     self.phase = 0.0; // hard lock every q-th edge
                 }
                 frequency = ratio.0 / self.period.max(1.0);
@@ -524,6 +527,11 @@ impl SegmentGenerator {
                 (SegmentType::Hold, 0 | 1) => ProcessMode::Delay,
                 (SegmentType::Hold, 2) => ProcessMode::TimedPulse,
                 (SegmentType::Hold, _) => ProcessMode::GateGenerator,
+                // ALT row: zero, free osc, decay env, PLL osc
+                (SegmentType::Alt, 0) => ProcessMode::Zero,
+                (SegmentType::Alt, 1) => ProcessMode::FreeOscillator,
+                (SegmentType::Alt, 2) => ProcessMode::DecayEnvelope,
+                (SegmentType::Alt, _) => ProcessMode::PllOscillator,
             };
             self.num_segments = 1;
             return;
@@ -603,7 +611,8 @@ impl SegmentGenerator {
                         Some(ValRef::One) // track
                     };
                 }
-                SegmentType::Hold => {
+                // ALT in a group behaves like HOLD (upstream's else branch)
+                SegmentType::Hold | SegmentType::Alt => {
                     s.start = Some(ValRef::Primary(i));
                     s.end = ValRef::Primary(i);
                     s.curve = ValRef::Half;
