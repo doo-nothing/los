@@ -33,6 +33,8 @@ pub struct Tables {
     pub ws_sine_fold: Vec<i16>,            // 257
     pub ws_tri_fold: Vec<i16>,             // 257
     pub comb: Vec<Vec<i16>>,               // 15 × 257
+    pub svf_cutoff: Vec<u16>,              // 257
+    pub violent_overdrive: Vec<i16>,       // 257
 }
 
 static TABLES: OnceLock<Tables> = OnceLock::new();
@@ -63,14 +65,45 @@ pub fn tables() -> &'static Tables {
         let comb: Vec<Vec<i16>> = (0..NUM_ZONES)
             .map(|z| all[514 + z * 257..514 + (z + 1) * 257].to_vec())
             .collect();
+        // svf_cutoff is u16 (stored as raw bits after the 4369 i16),
+        // then violent_overdrive (i16)
+        let svf_base = 4369 * 2; // bytes
+        let svf_cutoff: Vec<u16> = BRAIDS_TABLES_BIN[svf_base..svf_base + 257 * 2]
+            .chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        let vio_base = svf_base + 257 * 2;
+        let violent_overdrive: Vec<i16> = BRAIDS_TABLES_BIN[vio_base..vio_base + 257 * 2]
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect();
         Tables {
             wav_sine,
             increments,
             ws_sine_fold,
             ws_tri_fold,
             comb,
+            svf_cutoff,
+            violent_overdrive,
         }
     })
+}
+
+#[inline]
+fn interpolate824_u16(table: &[u16], phase: u32) -> i32 {
+    let i = (phase >> 24) as usize;
+    let a = table[i.min(table.len() - 1)] as i64;
+    let b = table[(i + 1).min(table.len() - 1)] as i64;
+    // u16 deltas times a 16-bit fraction overflow i32 — widen
+    (a + ((b - a) * (((phase >> 8) & 0xffff) as i64) >> 16)) as i32
+}
+
+#[inline]
+fn mix(a: i16, b: i16, balance: u16) -> i16 {
+    let a = a as i64;
+    let b = b as i64;
+    // (b-a)·balance overflows i32 when both span full i16 — widen
+    (a + ((b - a) * balance as i64 >> 16)).clamp(-32768, 32767) as i16
 }
 
 // ── fixed-point helpers ──────────────────────────────────────────────────────
@@ -275,6 +308,7 @@ impl AnalogOscillator {
     ) {
         let inc = self.phase_increment;
         let mut next_sample = self.next_sample;
+        #[allow(clippy::needless_range_loop)] // n strides buffer + temp
         for n in 0..size {
             let mut sync_reset = false;
             let mut transition_during_reset = false;
@@ -326,6 +360,7 @@ impl AnalogOscillator {
         }
         let pw = ((32768 - self.parameter as i32) as u32) << 16;
         let mut next_sample = self.next_sample;
+        #[allow(clippy::needless_range_loop)] // n strides buffer + temp
         for n in 0..size {
             let mut sync_reset = false;
             let mut self_reset;
@@ -397,6 +432,7 @@ impl AnalogOscillator {
         }
         let pw = (self.parameter as u32) << 16;
         let mut next_sample = self.next_sample;
+        #[allow(clippy::needless_range_loop)] // n strides buffer + temp
         for n in 0..size {
             let mut sync_reset = false;
             let mut self_reset;
@@ -466,6 +502,7 @@ impl AnalogOscillator {
     ) {
         let inc = self.phase_increment;
         let mut next_sample = self.next_sample;
+        #[allow(clippy::needless_range_loop)] // n strides buffer + temp
         for n in 0..size {
             let mut sync_reset = false;
             let mut self_reset;
@@ -546,6 +583,7 @@ impl AnalogOscillator {
     fn render_triangle(&mut self, sync_in: &[u8], buffer: &mut [i16], size: usize) {
         let inc = self.phase_increment;
         let mut phase = self.phase;
+        #[allow(clippy::needless_range_loop)] // n strides buffer + temp
         for n in 0..size {
             if sync_in[n] != 0 {
                 phase = 0;
@@ -570,6 +608,7 @@ impl AnalogOscillator {
         let t = tables();
         let inc = self.phase_increment;
         let mut phase = self.phase;
+        #[allow(clippy::needless_range_loop)] // n strides buffer + temp
         for n in 0..size {
             phase = phase.wrapping_add(inc);
             if sync_in[n] != 0 {
@@ -584,6 +623,7 @@ impl AnalogOscillator {
         let t = tables();
         let inc = self.phase_increment;
         let mut phase = self.phase;
+        #[allow(clippy::needless_range_loop)] // n strides buffer + temp
         for n in 0..size {
             let gain = 2048 + (self.parameter as i32 * 30720 >> 15);
             if sync_in[n] != 0 {
@@ -613,6 +653,7 @@ impl AnalogOscillator {
         let t = tables();
         let inc = self.phase_increment;
         let mut phase = self.phase;
+        #[allow(clippy::needless_range_loop)] // n strides buffer + temp
         for n in 0..size {
             let gain = 2048 + (self.parameter as i32 * 30720 >> 15);
             if sync_in[n] != 0 {
@@ -647,12 +688,356 @@ impl AnalogOscillator {
         }
         let wave_1 = &t.comb[index];
         let wave_2 = &t.comb[index2];
+        #[allow(clippy::needless_range_loop)] // n strides buffer + temp
         for n in 0..size {
             self.phase = self.phase.wrapping_add(inc);
             if sync_in[n] != 0 {
                 self.phase = 0;
             }
             buffer[n] = crossfade(wave_1, wave_2, self.phase, crossfade_amt) as i16;
+        }
+    }
+}
+
+// ── macro oscillator (the models) ───────────────────────────────────────────
+
+const SEMI: i16 = 128;
+
+/// macro_oscillator.cc intervals[65] — detune offsets (semitones×128).
+const INTERVALS: [i16; 65] = [
+    -24 * SEMI, -24 * SEMI, -24 * SEMI + 4,
+    -23 * SEMI, -22 * SEMI, -21 * SEMI, -20 * SEMI, -19 * SEMI, -18 * SEMI,
+    -17 * SEMI - 4, -17 * SEMI,
+    -16 * SEMI, -15 * SEMI, -14 * SEMI, -13 * SEMI,
+    -12 * SEMI - 4, -12 * SEMI,
+    -11 * SEMI, -10 * SEMI, -9 * SEMI, -8 * SEMI,
+    -7 * SEMI - 4, -7 * SEMI,
+    -6 * SEMI, -5 * SEMI, -4 * SEMI, -3 * SEMI, -2 * SEMI, -SEMI,
+    -24, -8, -4, 0, 4, 8, 24,
+    SEMI, 2 * SEMI, 3 * SEMI, 4 * SEMI, 5 * SEMI, 6 * SEMI,
+    7 * SEMI, 7 * SEMI + 4,
+    8 * SEMI, 9 * SEMI, 10 * SEMI, 11 * SEMI,
+    12 * SEMI, 12 * SEMI + 4,
+    13 * SEMI, 14 * SEMI, 15 * SEMI, 16 * SEMI,
+    17 * SEMI, 17 * SEMI + 4,
+    18 * SEMI, 19 * SEMI, 20 * SEMI, 21 * SEMI, 22 * SEMI, 23 * SEMI,
+    24 * SEMI - 4, 24 * SEMI, 24 * SEMI,
+];
+
+/// The braids macro-oscillator models. The analog models (0..=12) are
+/// ported here; the digital models (13+) dispatch to the digital
+/// oscillator (ported in a later pass; currently silent placeholders).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MacroModel {
+    CSaw,
+    Morph,
+    SawSquare,
+    SineTriangle,
+    Buzz,
+    SquareSub,
+    SawSub,
+    SquareSync,
+    SawSync,
+    TripleSaw,
+    TripleSquare,
+    TripleTriangle,
+    TripleSine,
+}
+
+pub const ANALOG_MODELS: [MacroModel; 13] = [
+    MacroModel::CSaw,
+    MacroModel::Morph,
+    MacroModel::SawSquare,
+    MacroModel::SineTriangle,
+    MacroModel::Buzz,
+    MacroModel::SquareSub,
+    MacroModel::SawSub,
+    MacroModel::SquareSync,
+    MacroModel::SawSync,
+    MacroModel::TripleSaw,
+    MacroModel::TripleSquare,
+    MacroModel::TripleTriangle,
+    MacroModel::TripleSine,
+];
+
+pub const MODEL_NAMES: [&str; 13] = [
+    "csaw",
+    "morph",
+    "saw_square",
+    "sine_triangle",
+    "buzz",
+    "square_sub",
+    "saw_sub",
+    "square_sync",
+    "saw_sync",
+    "triple_saw",
+    "triple_square",
+    "triple_triangle",
+    "triple_sine",
+];
+
+pub struct MacroOscillator {
+    osc: [AnalogOscillator; 3],
+    pub model: MacroModel,
+    pub pitch: i16,
+    pub parameter: [i16; 2],
+    temp: Vec<i16>,
+    sync_buffer: Vec<u8>,
+    lp_state: i32,
+}
+
+impl Default for MacroOscillator {
+    fn default() -> Self {
+        Self {
+            osc: [
+                AnalogOscillator::new(),
+                AnalogOscillator::new(),
+                AnalogOscillator::new(),
+            ],
+            model: MacroModel::Morph,
+            pitch: 60 << 7,
+            parameter: [0, 0],
+            temp: vec![0; 128],
+            sync_buffer: vec![0; 128],
+            lp_state: 0,
+        }
+    }
+}
+
+impl MacroOscillator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_model(&mut self, model: MacroModel) {
+        self.model = model;
+    }
+    pub fn set_pitch(&mut self, pitch: i16) {
+        self.pitch = pitch;
+    }
+    pub fn set_parameters(&mut self, p0: i16, p1: i16) {
+        self.parameter = [p0, p1];
+    }
+
+    fn ensure(&mut self, size: usize) {
+        if self.temp.len() < size {
+            self.temp.resize(size, 0);
+            self.sync_buffer.resize(size, 0);
+        }
+    }
+
+    pub fn render(&mut self, sync: &[u8], buffer: &mut [i16], size: usize) {
+        self.ensure(size);
+        match self.model {
+            MacroModel::CSaw => self.render_csaw(sync, buffer, size),
+            MacroModel::Morph => self.render_morph(sync, buffer, size),
+            MacroModel::SawSquare => self.render_saw_square(sync, buffer, size),
+            MacroModel::SineTriangle => self.render_sine_triangle(sync, buffer, size),
+            MacroModel::Buzz => self.render_buzz(sync, buffer, size),
+            MacroModel::SquareSub | MacroModel::SawSub => self.render_sub(sync, buffer, size),
+            MacroModel::SquareSync | MacroModel::SawSync => self.render_dual_sync(sync, buffer, size),
+            MacroModel::TripleSaw
+            | MacroModel::TripleSquare
+            | MacroModel::TripleTriangle
+            | MacroModel::TripleSine => self.render_triple(sync, buffer, size),
+        }
+    }
+
+    fn render_csaw(&mut self, sync: &[u8], buffer: &mut [i16], size: usize) {
+        self.osc[0].set_pitch(self.pitch);
+        self.osc[0].set_shape(AnalogShape::CSaw);
+        self.osc[0].set_parameter(self.parameter[0]);
+        self.osc[0].set_aux_parameter(self.parameter[1]);
+        self.osc[0].render(sync, buffer, None, size);
+        let shift = (32767 - self.parameter[1] as i32) >> 4;
+        for b in buffer.iter_mut().take(size) {
+            let s = *b as i32 + shift;
+            *b = ((s * 13) >> 3).clamp(-32768, 32767) as i16;
+        }
+    }
+
+    fn render_morph(&mut self, sync: &[u8], buffer: &mut [i16], size: usize) {
+        let t = tables();
+        self.osc[0].set_pitch(self.pitch);
+        self.osc[1].set_pitch(self.pitch);
+        let p0 = self.parameter[0] as i32;
+        let balance: u16;
+        if p0 <= 10922 {
+            self.osc[0].set_parameter(0);
+            self.osc[1].set_parameter(0);
+            self.osc[0].set_shape(AnalogShape::Triangle);
+            self.osc[1].set_shape(AnalogShape::Saw);
+            balance = (p0 * 6).clamp(0, 65535) as u16;
+        } else if p0 <= 21845 {
+            self.osc[0].set_parameter(0);
+            self.osc[1].set_parameter(0);
+            self.osc[0].set_shape(AnalogShape::Square);
+            self.osc[1].set_shape(AnalogShape::Saw);
+            balance = (65535 - (p0 - 10923) * 6).clamp(0, 65535) as u16;
+        } else {
+            self.osc[0].set_parameter(((p0 - 21846) * 3).clamp(-32768, 32767) as i16);
+            self.osc[1].set_parameter(0);
+            self.osc[0].set_shape(AnalogShape::Square);
+            self.osc[1].set_shape(AnalogShape::Sine);
+            balance = 0;
+        }
+        self.osc[0].render(sync, buffer, None, size);
+        self.osc[1].render(sync, &mut self.temp[..size], None, size);
+
+        let mut lp_cutoff = self.pitch as i32 - (self.parameter[1] as i32 >> 1) + 128 * 128;
+        lp_cutoff = lp_cutoff.clamp(0, 32767);
+        let f = interpolate824_u16(&t.svf_cutoff, (lp_cutoff as u32) << 17);
+        let mut lp_state = self.lp_state;
+        let mut fuzz_amount = (self.parameter[1] as i32) << 1;
+        if self.pitch as i32 > (80 << 7) {
+            fuzz_amount -= (self.pitch as i32 - (80 << 7)) << 4;
+            if fuzz_amount < 0 {
+                fuzz_amount = 0;
+            }
+        }
+        #[allow(clippy::needless_range_loop)] // n strides buffer + temp
+        for n in 0..size {
+            let sample = mix(buffer[n], self.temp[n], balance);
+            let shifted_sample = sample as i32;
+            lp_state += ((shifted_sample - lp_state) as i64 * f as i64 >> 15) as i32;
+            lp_state = lp_state.clamp(-32768, 32767);
+            let idx = (lp_state + 32768).clamp(0, 65535) as u16;
+            let fuzzed = interpolate88(&t.violent_overdrive, idx) as i16;
+            buffer[n] = mix(sample, fuzzed, fuzz_amount.clamp(0, 65535) as u16);
+        }
+        self.lp_state = lp_state;
+    }
+
+    fn render_saw_square(&mut self, sync: &[u8], buffer: &mut [i16], size: usize) {
+        self.osc[0].set_parameter(self.parameter[0]);
+        self.osc[1].set_parameter(self.parameter[0]);
+        self.osc[0].set_pitch(self.pitch);
+        self.osc[1].set_pitch(self.pitch);
+        self.osc[0].set_shape(AnalogShape::VariableSaw);
+        self.osc[1].set_shape(AnalogShape::Square);
+        self.osc[0].render(sync, buffer, None, size);
+        self.osc[1].render(sync, &mut self.temp[..size], None, size);
+        let balance = ((self.parameter[0] as i32) << 1).clamp(0, 65535) as u16;
+        #[allow(clippy::needless_range_loop)] // n strides buffer + temp
+        for n in 0..size {
+            let attenuated_square = ((self.temp[n] as i32) * 148 >> 8) as i16;
+            buffer[n] = mix(buffer[n], attenuated_square, balance);
+        }
+    }
+
+    fn render_sine_triangle(&mut self, sync: &[u8], buffer: &mut [i16], size: usize) {
+        let mut att_sine = 32767 - 6 * (self.pitch as i32 - (92 << 7));
+        let mut att_tri = 32767 - 7 * (self.pitch as i32 - (80 << 7));
+        att_tri = att_tri.clamp(0, 32767);
+        att_sine = att_sine.clamp(0, 32767);
+        let timbre = self.parameter[0] as i32;
+        self.osc[0].set_parameter((timbre * att_sine >> 15) as i16);
+        self.osc[1].set_parameter((timbre * att_tri >> 15) as i16);
+        self.osc[0].set_pitch(self.pitch);
+        self.osc[1].set_pitch(self.pitch);
+        self.osc[0].set_shape(AnalogShape::SineFold);
+        self.osc[1].set_shape(AnalogShape::TriangleFold);
+        self.osc[0].render(sync, buffer, None, size);
+        self.osc[1].render(sync, &mut self.temp[..size], None, size);
+        let balance = ((self.parameter[1] as i32) << 1).clamp(0, 65535) as u16;
+        #[allow(clippy::needless_range_loop)] // n strides buffer + temp
+        for n in 0..size {
+            buffer[n] = mix(buffer[n], self.temp[n], balance);
+        }
+    }
+
+    fn render_buzz(&mut self, sync: &[u8], buffer: &mut [i16], size: usize) {
+        self.osc[0].set_parameter(self.parameter[0]);
+        self.osc[0].set_shape(AnalogShape::Buzz);
+        self.osc[0].set_pitch(self.pitch);
+        self.osc[1].set_parameter(self.parameter[0]);
+        self.osc[1].set_shape(AnalogShape::Buzz);
+        self.osc[1].set_pitch(self.pitch + (self.parameter[1] >> 8));
+        self.osc[0].render(sync, buffer, None, size);
+        self.osc[1].render(sync, &mut self.temp[..size], None, size);
+        #[allow(clippy::needless_range_loop)] // n strides buffer + temp
+        for n in 0..size {
+            buffer[n] = (buffer[n] >> 1).wrapping_add(self.temp[n] >> 1);
+        }
+    }
+
+    fn render_sub(&mut self, sync: &[u8], buffer: &mut [i16], size: usize) {
+        let base = if self.model == MacroModel::SquareSub {
+            AnalogShape::Square
+        } else {
+            AnalogShape::VariableSaw
+        };
+        self.osc[0].set_parameter(self.parameter[0]);
+        self.osc[0].set_shape(base);
+        self.osc[0].set_pitch(self.pitch);
+        self.osc[1].set_parameter(0);
+        self.osc[1].set_shape(AnalogShape::Square);
+        let octave = if self.parameter[1] < 16384 { 24 << 7 } else { 12 << 7 };
+        self.osc[1].set_pitch(self.pitch - octave);
+        self.osc[0].render(sync, buffer, None, size);
+        self.osc[1].render(sync, &mut self.temp[..size], None, size);
+        let p1 = self.parameter[1] as i32;
+        let sub_gain = (if p1 < 16384 { 16383 - p1 } else { p1 - 16384 } << 1).clamp(0, 65535) as u16;
+        #[allow(clippy::needless_range_loop)] // n strides buffer + temp
+        for n in 0..size {
+            buffer[n] = mix(buffer[n], self.temp[n], sub_gain);
+        }
+    }
+
+    fn render_dual_sync(&mut self, sync: &[u8], buffer: &mut [i16], size: usize) {
+        let base = if self.model == MacroModel::SquareSync {
+            AnalogShape::Square
+        } else {
+            AnalogShape::Saw
+        };
+        self.osc[0].set_parameter(0);
+        self.osc[0].set_shape(base);
+        self.osc[0].set_pitch(self.pitch);
+        self.osc[1].set_parameter(0);
+        self.osc[1].set_shape(base);
+        self.osc[1].set_pitch(self.pitch + (self.parameter[0] >> 2));
+        // osc0 publishes its resets into sync_buffer; osc1 follows them
+        let mut sb = std::mem::take(&mut self.sync_buffer);
+        self.osc[0].render(sync, buffer, Some(&mut sb[..size]), size);
+        self.osc[1].render(&sb[..size], &mut self.temp[..size], None, size);
+        self.sync_buffer = sb;
+        let balance = ((self.parameter[1] as i32) << 1).clamp(0, 65535) as u16;
+        #[allow(clippy::needless_range_loop)] // n strides buffer + temp
+        for n in 0..size {
+            buffer[n] = ((mix(buffer[n], self.temp[n], balance) >> 2) as i32 * 3) as i16;
+        }
+    }
+
+    fn render_triple(&mut self, sync: &[u8], buffer: &mut [i16], size: usize) {
+        let base = match self.model {
+            MacroModel::TripleSaw => AnalogShape::Saw,
+            MacroModel::TripleTriangle => AnalogShape::Triangle,
+            MacroModel::TripleSquare => AnalogShape::Square,
+            _ => AnalogShape::Sine,
+        };
+        self.osc[0].set_parameter(0);
+        self.osc[1].set_parameter(0);
+        self.osc[2].set_parameter(0);
+        self.osc[0].set_pitch(self.pitch);
+        for i in 0..2 {
+            let p = self.parameter[i] as i32;
+            let detune_1 = INTERVALS[(p >> 9).clamp(0, 64) as usize] as i32;
+            let detune_2 = INTERVALS[(((p >> 8) + 1) >> 1).clamp(0, 64) as usize] as i32;
+            let xfade = (p << 8) & 0xffff;
+            let detune = detune_1 + ((detune_2 - detune_1) * xfade >> 16);
+            self.osc[i + 1].set_pitch((self.pitch as i32 + detune).clamp(0, 32767) as i16);
+        }
+        self.osc[0].set_shape(base);
+        self.osc[1].set_shape(base);
+        self.osc[2].set_shape(base);
+        buffer[..size].fill(0);
+        for i in 0..3 {
+            self.osc[i].render(sync, &mut self.temp[..size], None, size);
+            #[allow(clippy::needless_range_loop)] // n strides buffer + temp
+            for n in 0..size {
+                buffer[n] =
+                    buffer[n].wrapping_add(((self.temp[n] as i32) * 21 >> 6) as i16);
+            }
         }
     }
 }
@@ -772,6 +1157,66 @@ mod tests {
         // first render after a shape change calls init(); must not panic
         osc.render(&sync, &mut out, None, 256);
         assert!(out.iter().all(|&v| (-32768..=32767).contains(&(v as i32))));
+    }
+
+    #[test]
+    fn all_analog_macro_models_render_bounded_audio() {
+        for model in ANALOG_MODELS {
+            let mut m = MacroOscillator::new();
+            m.set_model(model);
+            m.set_pitch(55 << 7);
+            m.set_parameters(20000, 16000);
+            let sync = vec![0u8; 128];
+            let mut out = vec![0i16; 128];
+            let mut energy = 0i64;
+            for _ in 0..16 {
+                m.render(&sync, &mut out, 128);
+                energy += out.iter().map(|&v| (v as i64) * (v as i64)).sum::<i64>();
+                assert!(
+                    out.iter().all(|&v| (-32768..=32767).contains(&(v as i32))),
+                    "{model:?} bounded"
+                );
+            }
+            assert!(energy > 0, "{model:?} produces audio");
+        }
+    }
+
+    #[test]
+    fn morph_sweeps_through_waveshapes() {
+        // the morph model crosses triangle→saw→square→sine as parameter 0
+        // rises; output stays bounded and present at every position
+        let mut m = MacroOscillator::new();
+        m.set_model(MacroModel::Morph);
+        m.set_pitch(50 << 7);
+        let sync = vec![0u8; 128];
+        let mut out = vec![0i16; 128];
+        for p0 in [0i16, 8000, 16000, 24000, 32000] {
+            m.set_parameters(p0, 8000);
+            let mut energy = 0i64;
+            for _ in 0..20 {
+                m.render(&sync, &mut out, 128);
+                energy += out.iter().map(|&v| (v as i64) * (v as i64)).sum::<i64>();
+            }
+            assert!(energy > 0, "morph at param {p0} produces audio");
+            assert!(out.iter().all(|&v| (-32768..=32767).contains(&(v as i32))));
+        }
+    }
+
+    #[test]
+    fn triple_detunes_three_voices() {
+        // a triple saw with detune should be louder/fuller than a single
+        let mut m = MacroOscillator::new();
+        m.set_model(MacroModel::TripleSaw);
+        m.set_pitch(48 << 7);
+        m.set_parameters(20000, 12000);
+        let sync = vec![0u8; 128];
+        let mut out = vec![0i16; 128];
+        let mut nonzero = false;
+        for _ in 0..16 {
+            m.render(&sync, &mut out, 128);
+            nonzero |= out.iter().any(|&v| v.abs() > 1000);
+        }
+        assert!(nonzero, "triple saw sings");
     }
 
     #[test]
