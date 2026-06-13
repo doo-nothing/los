@@ -28,6 +28,7 @@ use crate::routing::{output_labels, SourceAddr};
 use crate::state::{
     DelayParams, DldParams, DpoParamsState, ElementsParams, EnvelopeParams, FilterbankParams,
     BraidsParams, BranchesParams, CloudsParams, EdgesParams, FramesParams, GridsParams, LfoParams, MacroCmd, MarblesParams, MixerParams,
+    PlaitsParams,
     PeaksParams, RingsParams, SamplerParams, ScopeParams, SequencerParams, SessionState,
     StagesParams,
     StepParam,
@@ -345,6 +346,11 @@ fn validate_session(st: &SessionState, r: &mut Report) {
             "clouds" => {
                 if let Some(p) = decode::<CloudsParams>(value, &loc, r) {
                     check_clouds(&p, &loc, &declared, r);
+                }
+            }
+            "plaits" => {
+                if let Some(p) = decode::<PlaitsParams>(value, &loc, r) {
+                    check_plaits(&p, &loc, &declared, r, &mut pending);
                 }
             }
             "warps" => {
@@ -1852,6 +1858,41 @@ fn check_stages(
     }
 }
 
+/// Plaits (modules/plaits): the engine name, knob ranges, the
+/// macro srcs, amp + notes sources.
+fn check_plaits(
+    p: &PlaitsParams,
+    loc: &str,
+    declared: &BTreeSet<(String, usize)>,
+    r: &mut Report,
+    pending: &mut Vec<PendingTrackRef>,
+) {
+    const ENGINES: [&str; 2] = ["noise", "fm"];
+    if let Some(e) = p.engine.as_deref() {
+        if !ENGINES.contains(&e) {
+            r.error(loc, format!("engine {e:?} — one of {}", ENGINES.join(" ")));
+        }
+    }
+    for (name, v) in [
+        ("harmonics", p.harmonics),
+        ("timbre", p.timbre),
+        ("morph", p.morph),
+        ("level", p.level),
+    ] {
+        range01(v, name, loc, r);
+    }
+    for (field, src) in [
+        ("harmonics_src", &p.harmonics_src),
+        ("timbre_src", &p.timbre_src),
+        ("morph_src", &p.morph_src),
+        ("level_src", &p.level_src),
+        ("amp_src", &p.amp_src),
+    ] {
+        check_src(src, field, loc, declared, r);
+    }
+    check_notes_src(&p.notes_src, loc, declared, r, pending);
+}
+
 /// Clouds (modules/clouds): the nine knob ranges, their srcs, the
 /// stereo audio input.
 fn check_clouds(
@@ -2065,12 +2106,12 @@ const SOURCE_MODULES: [&str; 6] = [
 ];
 
 /// Modules that publish audio rings an fx/tape input can claim.
-const AUDIO_MODULES: [&str; 19] =
-    ["voice", "swarm", "tone", "template", "delay", "filterbank", "dld", "sampler", "wasp", "dpo", "elements", "rings", "tides", "peaks", "edges", "streams", "warps", "braids", "clouds"];
+const AUDIO_MODULES: [&str; 20] =
+    ["voice", "swarm", "tone", "template", "delay", "filterbank", "dld", "sampler", "wasp", "dpo", "elements", "rings", "tides", "peaks", "edges", "streams", "warps", "braids", "clouds", "plaits"];
 
 /// Canonical module names, for misspelled-pane suggestions.
-const MODULE_NAMES: [&str; 32] =
-    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements", "rings", "tides", "peaks", "branches", "grids", "edges", "frames", "streams", "stages", "marbles", "warps", "braids", "clouds"];
+const MODULE_NAMES: [&str; 33] =
+    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements", "rings", "tides", "peaks", "branches", "grids", "edges", "frames", "streams", "stages", "marbles", "warps", "braids", "clouds", "plaits"];
 
 /// An optional `*_src` field: grammar, known output, declared instance.
 /// Returns the parsed address so callers can queue cross-module checks.
@@ -2351,6 +2392,7 @@ const KNOWN_KEYS: &[&str] = &[
     "algorithm_src", "timbre_src", "drive1_src", "drive2_src", "note_src",
     "color", "color_src", "timbre", "level_src",
     "density", "texture", "dry_wet", "freeze", "position_src", "size_src", "pitch_src",
+    "engine", "harmonics", "morph", "harmonics_src", "morph_src",
     "density_src", "texture_src", "dry_wet_src", "spread_src", "feedback_src", "reverb_src",
     "p1d_src", "p2a_src", "p2b_src", "p2c_src", "p2d_src",
     "patch_inline", "phase", "phase_src", "ping_ms", "ping_src", "pitch", "pitch_src", "playing",

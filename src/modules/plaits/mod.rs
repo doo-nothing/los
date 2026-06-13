@@ -7,3 +7,6 @@
 //! module — engines land incrementally.
 
 pub mod dsp;
+pub mod ui;
+
+pub use ui::run;
