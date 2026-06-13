@@ -35,7 +35,8 @@ use ratatui::{
 };
 
 use super::dsp::{
-    Engine, EngineParameters, FmEngine, NoiseEngine, TRIGGER_HIGH, TRIGGER_RISING_EDGE,
+    Engine, EngineParameters, FmEngine, NoiseEngine, VirtualAnalogEngine, TRIGGER_HIGH,
+    TRIGGER_RISING_EDGE,
 };
 use crate::ipc::routing::{self, SourceAddr};
 use crate::shm::{AudioRingbuf, EventRingbuf, Manifest, ModulationBus, ShmTransport};
@@ -44,7 +45,7 @@ use crate::state;
 const FALLBACK_RATE: f32 = 48_000.0;
 const BLOCK: usize = 24;
 
-pub const ENGINE_NAMES: [&str; 2] = ["noise", "fm"];
+pub const ENGINE_NAMES: [&str; 3] = ["noise", "fm", "virtual_analog"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Row {
@@ -260,6 +261,7 @@ fn audio_thread(shared: Arc<Mutex<PlaitsState>>, instance: usize) -> Result<()> 
 
     let mut noise = NoiseEngine::new(0x9e1 ^ instance as u32);
     let mut fm = FmEngine::new();
+    let mut va = VirtualAnalogEngine::new();
     let mut out_buf = vec![0.0_f32; slot_frames + BLOCK];
     let mut aux_buf = vec![0.0_f32; slot_frames + BLOCK];
 
@@ -370,7 +372,11 @@ fn audio_thread(shared: Arc<Mutex<PlaitsState>>, instance: usize) -> Result<()> 
         let mut rendered = 0;
         while rendered < need {
             let n = (need - rendered).min(BLOCK);
-            let eng: &mut dyn Engine = if engine == 1 { &mut fm } else { &mut noise };
+            let eng: &mut dyn Engine = match engine {
+                1 => &mut fm,
+                2 => &mut va,
+                _ => &mut noise,
+            };
             eng.render(
                 &params,
                 &mut out_buf[rendered..rendered + n],
@@ -410,6 +416,7 @@ fn audio_thread(shared: Arc<Mutex<PlaitsState>>, instance: usize) -> Result<()> 
             block.fill(0.0);
             noise = NoiseEngine::new(0x9e1 ^ instance as u32);
             fm = FmEngine::new();
+            va = VirtualAnalogEngine::new();
             resample_pos = 0.0;
         }
         if let (Some(base), Some(bus)) = (mod_base, modbus.as_mut()) {
