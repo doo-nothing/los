@@ -36,9 +36,9 @@ use ratatui::{
 
 use super::dsp::{
     AdditiveEngine, BassDrumEngine, ChordEngine, Engine, EngineParameters, FmEngine, GrainEngine,
-    HiHatEngine, ModalEngine, NoiseEngine, ParticleEngine, SnareDrumEngine, StringEngine,
-    SwarmEngine, VirtualAnalogEngine, WaveshapingEngine, WavetableEngine, TRIGGER_HIGH,
-    TRIGGER_RISING_EDGE,
+    HiHatEngine, ModalEngine, NoiseEngine, ParticleEngine, SnareDrumEngine, SpeechEngine,
+    StringEngine, SwarmEngine, VirtualAnalogEngine, WaveshapingEngine, WavetableEngine,
+    TRIGGER_HIGH, TRIGGER_RISING_EDGE,
 };
 use crate::ipc::routing::{self, SourceAddr};
 use crate::shm::{AudioRingbuf, EventRingbuf, Manifest, ModulationBus, ShmTransport};
@@ -47,9 +47,9 @@ use crate::state;
 const FALLBACK_RATE: f32 = 48_000.0;
 const BLOCK: usize = 24;
 
-pub const ENGINE_NAMES: [&str; 15] = [
+pub const ENGINE_NAMES: [&str; 16] = [
     "noise", "fm", "virtual_analog", "chord", "waveshaping", "additive", "swarm", "grain",
-    "wavetable", "modal", "string", "bass_drum", "snare_drum", "hi_hat", "particle",
+    "wavetable", "modal", "string", "bass_drum", "snare_drum", "hi_hat", "particle", "speech",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -279,6 +279,7 @@ fn audio_thread(shared: Arc<Mutex<PlaitsState>>, instance: usize) -> Result<()> 
     let mut snare_drum = SnareDrumEngine::new();
     let mut hi_hat = HiHatEngine::new();
     let mut particle = ParticleEngine::new();
+    let mut speech = SpeechEngine::new();
     let mut out_buf = vec![0.0_f32; slot_frames + BLOCK];
     let mut aux_buf = vec![0.0_f32; slot_frames + BLOCK];
 
@@ -404,6 +405,7 @@ fn audio_thread(shared: Arc<Mutex<PlaitsState>>, instance: usize) -> Result<()> 
                 12 => &mut snare_drum,
                 13 => &mut hi_hat,
                 14 => &mut particle,
+                15 => &mut speech,
                 _ => &mut noise,
             };
             eng.render(
@@ -458,6 +460,7 @@ fn audio_thread(shared: Arc<Mutex<PlaitsState>>, instance: usize) -> Result<()> 
             snare_drum = SnareDrumEngine::new();
             hi_hat = HiHatEngine::new();
             particle = ParticleEngine::new();
+            speech = SpeechEngine::new();
             resample_pos = 0.0;
         }
         if let (Some(base), Some(bus)) = (mod_base, modbus.as_mut()) {
