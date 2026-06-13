@@ -27,7 +27,7 @@ use std::path::Path;
 use crate::routing::{output_labels, SourceAddr};
 use crate::state::{
     DelayParams, DldParams, DpoParamsState, ElementsParams, EnvelopeParams, FilterbankParams,
-    BranchesParams, EdgesParams, FramesParams, GridsParams, LfoParams, MacroCmd, MarblesParams, MixerParams,
+    BraidsParams, BranchesParams, EdgesParams, FramesParams, GridsParams, LfoParams, MacroCmd, MarblesParams, MixerParams,
     PeaksParams, RingsParams, SamplerParams, ScopeParams, SequencerParams, SessionState,
     StagesParams,
     StepParam,
@@ -335,6 +335,11 @@ fn validate_session(st: &SessionState, r: &mut Report) {
             "marbles" => {
                 if let Some(p) = decode::<MarblesParams>(value, &loc, r) {
                     check_marbles(&p, &loc, &declared, r);
+                }
+            }
+            "braids" => {
+                if let Some(p) = decode::<BraidsParams>(value, &loc, r) {
+                    check_braids(&p, &loc, &declared, r, &mut pending);
                 }
             }
             "warps" => {
@@ -1842,6 +1847,38 @@ fn check_stages(
     }
 }
 
+/// Braids (modules/braids): the macro-oscillator model name, knob
+/// ranges, the timbre/color/level srcs, amp + notes sources.
+fn check_braids(
+    p: &BraidsParams,
+    loc: &str,
+    declared: &BTreeSet<(String, usize)>,
+    r: &mut Report,
+    pending: &mut Vec<PendingTrackRef>,
+) {
+    const MODELS: [&str; 13] = [
+        "csaw", "morph", "saw_square", "sine_triangle", "buzz", "square_sub", "saw_sub",
+        "square_sync", "saw_sync", "triple_saw", "triple_square", "triple_triangle", "triple_sine",
+    ];
+    if let Some(m) = p.model.as_deref() {
+        if !MODELS.contains(&m) {
+            r.error(loc, format!("model {m:?} — one of {}", MODELS.join(" ")));
+        }
+    }
+    for (name, v) in [("timbre", p.timbre), ("color", p.color), ("level", p.level)] {
+        range01(v, name, loc, r);
+    }
+    for (field, src) in [
+        ("timbre_src", &p.timbre_src),
+        ("color_src", &p.color_src),
+        ("level_src", &p.level_src),
+        ("amp_src", &p.amp_src),
+    ] {
+        check_src(src, field, loc, declared, r);
+    }
+    check_notes_src(&p.notes_src, loc, declared, r, pending);
+}
+
 /// Marbles (modules/marbles): model/range/scale names, knob ranges,
 /// the continuous-knob srcs.
 fn check_marbles(
@@ -1986,12 +2023,12 @@ const SOURCE_MODULES: [&str; 6] = [
 ];
 
 /// Modules that publish audio rings an fx/tape input can claim.
-const AUDIO_MODULES: [&str; 17] =
-    ["voice", "swarm", "tone", "template", "delay", "filterbank", "dld", "sampler", "wasp", "dpo", "elements", "rings", "tides", "peaks", "edges", "streams", "warps"];
+const AUDIO_MODULES: [&str; 18] =
+    ["voice", "swarm", "tone", "template", "delay", "filterbank", "dld", "sampler", "wasp", "dpo", "elements", "rings", "tides", "peaks", "edges", "streams", "warps", "braids"];
 
 /// Canonical module names, for misspelled-pane suggestions.
-const MODULE_NAMES: [&str; 30] =
-    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements", "rings", "tides", "peaks", "branches", "grids", "edges", "frames", "streams", "stages", "marbles", "warps"];
+const MODULE_NAMES: [&str; 31] =
+    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements", "rings", "tides", "peaks", "branches", "grids", "edges", "frames", "streams", "stages", "marbles", "warps", "braids"];
 
 /// An optional `*_src` field: grammar, known output, declared instance.
 /// Returns the parsed address so callers can queue cross-module checks.
@@ -2270,6 +2307,7 @@ const KNOWN_KEYS: &[&str] = &[
     "x_deja_vu_src", "y_spread_src", "y_steps_src",
     "algorithm", "timbre", "drive1", "drive2", "carrier", "modulator",
     "algorithm_src", "timbre_src", "drive1_src", "drive2_src", "note_src",
+    "color", "color_src", "timbre", "level_src",
     "p1d_src", "p2a_src", "p2b_src", "p2c_src", "p2d_src",
     "patch_inline", "phase", "phase_src", "ping_ms", "ping_src", "pitch", "pitch_src", "playing",
     "pluck", "pluck_src", "prob", "pulses", "quant",

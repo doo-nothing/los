@@ -5,3 +5,6 @@
 //! macro-oscillator model wiring and the digital models build on it.
 
 pub mod dsp;
+pub mod ui;
+
+pub use ui::run;
