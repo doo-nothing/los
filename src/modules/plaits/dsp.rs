@@ -94,6 +94,15 @@ impl Svf {
         self.h = 1.0 / (1.0 + self.r * self.g + self.g * self.g);
     }
 
+    /// `set_f_q` with a precomputed `g` (the tangent), for the FAST/DIRTY
+    /// frequency approximations the string voice uses.
+    #[inline]
+    pub fn set_g_q(&mut self, g: f32, q: f32) {
+        self.g = g;
+        self.r = 1.0 / q.max(0.01);
+        self.h = 1.0 / (1.0 + self.r * self.g + self.g * self.g);
+    }
+
     #[inline]
     pub fn process(&mut self, input: f32, mode: SvfMode) -> f32 {
         let hp = (input - self.r * self.state_1 - self.g * self.state_1 - self.state_2) * self.h;
@@ -2523,6 +2532,407 @@ impl Engine for ModalEngine {
     }
 }
 
+// ── the string engine ────────────────────────────────────────────────────────
+
+/// stmlib's `OnePole::tan<FREQUENCY_DIRTY>` — a cheaper tangent (good
+/// below 4 kHz), used to voice the string's excitation filter.
+#[inline]
+fn tan_dirty(f: f32) -> f32 {
+    use std::f32::consts::PI;
+    let a = 3.736e-01 * PI * PI * PI;
+    f * (PI + a * f * f)
+}
+
+/// `lut_svf_shift`: group-delay compensation for the damping filter,
+/// `2·atan(2^(−i/12))/(2π)` evaluated continuously (the table is read
+/// with scale 1.0, so this is the exact per-sample value).
+#[inline]
+fn svf_shift(index: f32) -> f32 {
+    let i = index.clamp(0.0, 256.0);
+    let ratio = (i / 12.0).exp2();
+    2.0 * (1.0 / ratio).atan() / (2.0 * std::f32::consts::PI)
+}
+
+#[inline]
+fn crossfade(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+/// stmlib's `DCBlocker` — a one-pole high-pass that removes DC drift
+/// from the recirculating string.
+#[derive(Debug, Clone)]
+struct DcBlocker {
+    pole: f32,
+    x: f32,
+    y: f32,
+}
+
+impl DcBlocker {
+    fn new(pole: f32) -> Self {
+        Self { pole, x: 0.0, y: 0.0 }
+    }
+    #[inline]
+    fn process(&mut self, s: f32) -> f32 {
+        let y = self.pole * self.y + s - self.x;
+        self.x = s;
+        self.y = y;
+        y
+    }
+}
+
+/// A delay line that does not own its buffer (stmlib `DelayLine`), with
+/// linear, hermite, and allpass reads. `SIZE` is the ring length.
+#[derive(Debug, Clone)]
+struct DelayLine {
+    line: Vec<f32>,
+    write_ptr: usize,
+    size: usize,
+}
+
+impl DelayLine {
+    fn new(size: usize) -> Self {
+        Self {
+            line: vec![0.0; size],
+            write_ptr: 0,
+            size,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.line.iter_mut().for_each(|s| *s = 0.0);
+        self.write_ptr = 0;
+    }
+
+    #[inline]
+    fn write(&mut self, sample: f32) {
+        self.line[self.write_ptr] = sample;
+        self.write_ptr = (self.write_ptr + self.size - 1) % self.size;
+    }
+
+    #[inline]
+    fn allpass(&mut self, sample: f32, delay: usize, coefficient: f32) -> f32 {
+        let read = self.line[(self.write_ptr + delay) % self.size];
+        let write = sample + coefficient * read;
+        self.write(write);
+        -write * coefficient + read
+    }
+
+    #[inline]
+    fn read(&self, delay: f32) -> f32 {
+        let di = delay as usize;
+        let df = delay - di as f32;
+        let a = self.line[(self.write_ptr + di) % self.size];
+        let b = self.line[(self.write_ptr + di + 1) % self.size];
+        a + (b - a) * df
+    }
+
+    #[inline]
+    fn read_hermite(&self, delay: f32) -> f32 {
+        let di = delay as usize;
+        let df = delay - di as f32;
+        let t = self.write_ptr + di + self.size;
+        let xm1 = self.line[(t - 1) % self.size];
+        let x0 = self.line[t % self.size];
+        let x1 = self.line[(t + 1) % self.size];
+        let x2 = self.line[(t + 2) % self.size];
+        let c = (x1 - xm1) * 0.5;
+        let v = x0 - x1;
+        let w = c + v;
+        let a = w + v + (x2 - x0) * 0.5;
+        let b_neg = w + a;
+        (((a * df) - b_neg) * df + c) * df + x0
+    }
+}
+
+const STRING_DELAY_LINE_SIZE: usize = 1024;
+
+/// plaits' `String` — a comb-filter Karplus-Strong waveguide (the "lite"
+/// version of the Rings string), with two non-linearity modes: a curved
+/// bridge (negative `structure`) and string dispersion (positive).
+struct PluckedString {
+    string: DelayLine,
+    stretch: DelayLine,
+    iir_damping_filter: Svf,
+    dc_blocker: DcBlocker,
+    delay: f32,
+    dispersion_noise: f32,
+    curved_bridge: f32,
+    src_phase: f32,
+    out_sample: [f32; 2],
+    rng: Rng,
+}
+
+impl PluckedString {
+    fn new() -> Self {
+        let mut s = Self {
+            string: DelayLine::new(STRING_DELAY_LINE_SIZE),
+            stretch: DelayLine::new(STRING_DELAY_LINE_SIZE / 4),
+            iir_damping_filter: Svf::new(),
+            dc_blocker: DcBlocker::new(1.0 - 20.0 / SAMPLE_RATE),
+            delay: 100.0,
+            dispersion_noise: 0.0,
+            curved_bridge: 0.0,
+            src_phase: 0.0,
+            out_sample: [0.0; 2],
+            rng: Rng::new(0x5_1d57),
+        };
+        s.reset();
+        s
+    }
+
+    fn reset(&mut self) {
+        self.string.reset();
+        self.stretch.reset();
+        self.dispersion_noise = 0.0;
+        self.curved_bridge = 0.0;
+        self.out_sample = [0.0; 2];
+        self.src_phase = 0.0;
+    }
+
+    fn process(
+        &mut self,
+        f0: f32,
+        non_linearity_amount: f32,
+        brightness: f32,
+        damping: f32,
+        input: &[f32],
+        out: &mut [f32],
+    ) {
+        // dispersion (true) vs curved bridge (false)
+        let dispersion = non_linearity_amount > 0.0;
+        let nl = non_linearity_amount.abs();
+
+        let mut delay = (1.0 / f0).clamp(4.0, STRING_DELAY_LINE_SIZE as f32 - 4.0);
+        let mut src_ratio = delay * f0;
+        if src_ratio >= 0.9999 {
+            self.src_phase = 1.0;
+            src_ratio = 1.0;
+        }
+
+        let mut damping_cutoff = (12.0 + damping * damping * 60.0 + brightness * 24.0).min(84.0);
+        let mut brightness = brightness;
+        let mut damping_f = (f0 * semitones_to_ratio(damping_cutoff)).min(0.499);
+        if damping >= 0.95 {
+            let to_infinite = 20.0 * (damping - 0.95);
+            brightness += to_infinite * (1.0 - brightness);
+            damping_f += to_infinite * (0.4999 - damping_f);
+            damping_cutoff += to_infinite * (128.0 - damping_cutoff);
+        }
+        self.iir_damping_filter.set_g_q(tan_fast(damping_f), 0.5);
+        let damping_compensation = svf_shift(damping_cutoff);
+
+        let delay_target = delay * damping_compensation;
+        let size = input.len();
+        let mut delay_mod = ParamInterp::new(self.delay, delay_target, size);
+
+        let stretch_point = nl * (2.0 - nl) * 0.225;
+        let stretch_correction = ((160.0 / SAMPLE_RATE) * delay).clamp(1.0, 2.1);
+        let noise_amount_sqrt = if nl > 0.75 { 4.0 * (nl - 0.75) } else { 0.0 };
+        let noise_amount = noise_amount_sqrt * noise_amount_sqrt * 0.1;
+        let noise_filter = 0.06 + 0.94 * brightness * brightness;
+        let bridge_curving = nl * nl * 0.01;
+        let ap_gain = -0.618 * non_linearity_amount / (0.15 + non_linearity_amount.abs());
+
+        for (o, &s_in) in out.iter_mut().zip(input.iter()) {
+            self.src_phase += src_ratio;
+            if self.src_phase > 1.0 {
+                self.src_phase -= 1.0;
+                delay = delay_mod.next();
+                let mut s;
+                if dispersion {
+                    let noise = self.rng.get_float() - 0.5;
+                    self.dispersion_noise += (noise - self.dispersion_noise) * noise_filter;
+                    delay *= 1.0 + self.dispersion_noise * noise_amount;
+                } else {
+                    delay *= 1.0 - self.curved_bridge * bridge_curving;
+                }
+
+                if dispersion {
+                    let ap_delay = delay * stretch_point;
+                    let main_delay =
+                        delay - ap_delay * (0.408 - stretch_point * 0.308) * stretch_correction;
+                    if ap_delay >= 4.0 && main_delay >= 4.0 {
+                        s = self.string.read(main_delay);
+                        s = self.stretch.allpass(s, ap_delay as usize, ap_gain);
+                    } else {
+                        s = self.string.read_hermite(delay);
+                    }
+                } else {
+                    s = self.string.read_hermite(delay);
+                    let value = s.abs() - 0.025;
+                    let sign = if s > 0.0 { 1.0 } else { -1.5 };
+                    self.curved_bridge = (value.abs() + value) * sign;
+                }
+
+                s += s_in;
+                s = s.clamp(-20.0, 20.0);
+                s = self.dc_blocker.process(s);
+                s = self.iir_damping_filter.process(s, SvfMode::LowPass);
+                self.string.write(s);
+                self.out_sample[1] = self.out_sample[0];
+                self.out_sample[0] = s;
+            }
+            *o += crossfade(self.out_sample[1], self.out_sample[0], self.src_phase);
+        }
+        self.delay = delay_target;
+    }
+}
+
+/// An extended Karplus-Strong voice: a band-limited noise/dust burst
+/// through an excitation low-pass, into the plucked string.
+struct StringVoice {
+    excitation_filter: Svf,
+    string: PluckedString,
+    remaining_noise_samples: usize,
+    rng: Rng,
+}
+
+impl StringVoice {
+    fn new(seed: u32) -> Self {
+        Self {
+            excitation_filter: Svf::new(),
+            string: PluckedString::new(),
+            remaining_noise_samples: 0,
+            rng: Rng::new(seed),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render(
+        &mut self,
+        sustain: bool,
+        trigger: bool,
+        accent: f32,
+        f0: f32,
+        structure: f32,
+        mut brightness: f32,
+        mut damping: f32,
+        temp: &mut [f32],
+        out: &mut [f32],
+        aux: &mut [f32],
+    ) {
+        let density = brightness * brightness;
+        brightness += 0.25 * accent * (1.0 - brightness);
+        damping += 0.25 * accent * (1.0 - damping);
+
+        if trigger || sustain {
+            let range = 72.0;
+            let f = 4.0 * f0;
+            let cutoff =
+                (f * semitones_to_ratio((brightness * (2.0 - brightness) - 0.5) * range)).min(0.499);
+            let q = if sustain { 1.0 } else { 0.5 };
+            self.remaining_noise_samples = (1.0 / f0) as usize;
+            self.excitation_filter.set_g_q(tan_dirty(cutoff), q);
+        }
+
+        let size = temp.len();
+        if sustain {
+            let dust_f = 0.00005 + 0.99995 * density * density;
+            for t in temp.iter_mut() {
+                *t = dust(dust_f, &mut self.rng) * (8.0 - dust_f * 6.0) * accent;
+            }
+        } else if self.remaining_noise_samples > 0 {
+            let noise_samples = self.remaining_noise_samples.min(size);
+            self.remaining_noise_samples -= noise_samples;
+            for (i, t) in temp.iter_mut().enumerate() {
+                *t = if i < noise_samples {
+                    2.0 * self.rng.get_float() - 1.0
+                } else {
+                    0.0
+                };
+            }
+        } else {
+            temp.iter_mut().for_each(|t| *t = 0.0);
+        }
+
+        for t in temp.iter_mut() {
+            *t = self.excitation_filter.process(*t, SvfMode::LowPass);
+        }
+        for (a, &t) in aux.iter_mut().zip(temp.iter()) {
+            *a += t;
+        }
+
+        let non_linearity = if structure < 0.24 {
+            (structure - 0.24) * 4.166
+        } else if structure > 0.26 {
+            (structure - 0.26) * 1.35135
+        } else {
+            0.0
+        };
+        self.string
+            .process(f0, non_linearity, brightness, damping, temp, out);
+    }
+}
+
+const NUM_STRINGS: usize = 3;
+
+/// The string engine: three Karplus-Strong voices round-robined on each
+/// trigger so notes ring into one another. harmonics → non-linearity
+/// (curved bridge ↔ dispersion), timbre² → brightness, morph → damping.
+pub struct StringEngine {
+    voices: Vec<StringVoice>,
+    f0: [f32; NUM_STRINGS],
+    f0_delay: DelayLine,
+    active_string: usize,
+    temp: Vec<f32>,
+}
+
+impl Default for StringEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StringEngine {
+    pub fn new() -> Self {
+        Self {
+            voices: (0..NUM_STRINGS)
+                .map(|i| StringVoice::new(0x7_3a11 ^ (i as u32 * 0x9e37)))
+                .collect(),
+            f0: [0.01; NUM_STRINGS],
+            f0_delay: DelayLine::new(16),
+            active_string: NUM_STRINGS - 1,
+            temp: Vec::new(),
+        }
+    }
+}
+
+impl Engine for StringEngine {
+    fn render(&mut self, p: &EngineParameters, out: &mut [f32], aux: &mut [f32]) -> bool {
+        let rising = (p.trigger & TRIGGER_RISING_EDGE) != 0;
+        let unpatched = (p.trigger & TRIGGER_UNPATCHED) != 0;
+        if rising {
+            self.f0[self.active_string] = self.f0_delay.read(14.0);
+            self.active_string = (self.active_string + 1) % NUM_STRINGS;
+        }
+        let f0 = note_to_frequency(p.note);
+        self.f0[self.active_string] = f0;
+        self.f0_delay.write(f0);
+
+        out.iter_mut().for_each(|o| *o = 0.0);
+        aux.iter_mut().for_each(|a| *a = 0.0);
+        self.temp.resize(out.len(), 0.0);
+        let mut temp = std::mem::take(&mut self.temp);
+
+        for (i, voice) in self.voices.iter_mut().enumerate() {
+            voice.render(
+                unpatched && i == self.active_string,
+                rising && i == self.active_string,
+                p.accent,
+                self.f0[i],
+                p.harmonics,
+                p.timbre * p.timbre,
+                p.morph,
+                &mut temp,
+                out,
+                aux,
+            );
+        }
+        self.temp = temp;
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2592,6 +3002,24 @@ mod tests {
             energy += out.iter().map(|v| v * v).sum::<f32>();
         }
         assert!(energy > 0.0, "the noise engine sings: {energy}");
+    }
+
+    #[test]
+    fn string_engine_plucks() {
+        let mut eng = StringEngine::new();
+        let mut out = vec![0.0_f32; 64];
+        let mut aux = vec![0.0_f32; 64];
+        for (h, tb, mo) in [(0.1, 0.4, 0.4), (0.5, 0.5, 0.5), (0.9, 0.7, 0.6)] {
+            let mut energy = 0.0;
+            for blk in 0..200 {
+                let trig = if blk == 0 { TRIGGER_RISING_EDGE | TRIGGER_HIGH } else { TRIGGER_HIGH };
+                let p = EngineParameters { trigger: trig, note: 48.0, harmonics: h, timbre: tb, morph: mo, ..Default::default() };
+                eng.render(&p, &mut out, &mut aux);
+                assert!(out.iter().chain(aux.iter()).all(|v| v.is_finite() && v.abs() <= 24.0), "h={h} bounded");
+                energy += out.iter().map(|v| v * v).sum::<f32>();
+            }
+            assert!(energy > 1e-7, "string sounds at h={h}: {energy}");
+        }
     }
 
     #[test]
