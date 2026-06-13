@@ -303,6 +303,200 @@ impl Engine for NoiseEngine {
     }
 }
 
+// ── shared sine LUT + FM ratio quantizer ─────────────────────────────────────
+
+use std::sync::OnceLock;
+
+const SINE_BITS: u32 = 9; // 512-entry sine table
+
+struct FmTables {
+    sine: Vec<f32>,     // 641 (512 + quarter guard + 1)
+    fm_ratio: Vec<f32>, // 256+2, semitone offsets
+}
+
+static FM_TABLES: OnceLock<FmTables> = OnceLock::new();
+
+fn fm_tables() -> &'static FmTables {
+    FM_TABLES.get_or_init(|| {
+        let size = 512usize;
+        let sine: Vec<f32> = (0..(size + size / 4 + 1))
+            .map(|i| (2.0 * std::f32::consts::PI * i as f32 / size as f32).sin())
+            .collect();
+        let ratios: [f64; 24] = [
+            0.5,
+            0.5 * 2.0_f64.powf(16.0 / 1200.0),
+            std::f64::consts::SQRT_2 / 2.0,
+            std::f64::consts::PI / 4.0,
+            1.0,
+            2.0_f64.powf(16.0 / 1200.0),
+            std::f64::consts::SQRT_2,
+            std::f64::consts::PI / 2.0,
+            7.0 / 4.0,
+            2.0,
+            2.0 * 2.0_f64.powf(16.0 / 1200.0),
+            9.0 / 4.0,
+            11.0 / 4.0,
+            2.0 * std::f64::consts::SQRT_2,
+            3.0,
+            std::f64::consts::PI,
+            3.0_f64.sqrt() * 2.0,
+            4.0,
+            std::f64::consts::SQRT_2 * 3.0,
+            std::f64::consts::PI * 3.0 / 2.0,
+            5.0,
+            std::f64::consts::SQRT_2 * 4.0,
+            8.0,
+            8.0,
+        ];
+        let mut scale: Vec<f64> = Vec::new();
+        for r in ratios.iter() {
+            let s = 12.0 * r.log2();
+            scale.push(s);
+            scale.push(s);
+            scale.push(s);
+        }
+        let target = 256usize;
+        while scale.len() < target {
+            let mut gap = 0usize;
+            let mut best = f64::MIN;
+            for i in 0..scale.len() - 1 {
+                let d = scale[i + 1] - scale[i];
+                if d > best {
+                    best = d;
+                    gap = i;
+                }
+            }
+            let mid = (scale[gap] + scale[gap + 1]) / 2.0;
+            scale.insert(gap + 1, mid);
+        }
+        scale.truncate(target);
+        scale.push(*scale.last().unwrap());
+        scale.push(*scale.last().unwrap());
+        let fm_ratio: Vec<f32> = scale.iter().map(|&x| x as f32).collect();
+        FmTables { sine, fm_ratio }
+    })
+}
+
+/// Phase-modulated sine lookup (sine_oscillator.h SinePM).
+#[inline]
+fn sine_pm(mut phase: u32, pm: f32) -> f32 {
+    let t = fm_tables();
+    let max_u32 = 4_294_967_296.0_f32;
+    let max_index = 32i64;
+    let offset = max_index as f32;
+    let scale = max_u32 / (max_index as f32 * 2.0);
+    phase = phase
+        .wrapping_add((((pm + offset) * scale) as i64 as u32).wrapping_mul(max_index as u32 * 2));
+    let integral = (phase >> (32 - SINE_BITS)) as usize;
+    let fractional = (phase << SINE_BITS) as f32 / max_u32;
+    let a = t.sine[integral.min(t.sine.len() - 1)];
+    let b = t.sine[(integral + 1).min(t.sine.len() - 1)];
+    a + (b - a) * fractional
+}
+
+#[inline]
+fn fm_quantize_ratio(harmonics: f32) -> f32 {
+    let t = fm_tables();
+    let p = (harmonics.clamp(0.0, 1.0) * 256.0).min(256.0);
+    let i = p as usize;
+    let frac = p - i as f32;
+    let a = t.fm_ratio[i.min(t.fm_ratio.len() - 1)];
+    let b = t.fm_ratio[(i + 1).min(t.fm_ratio.len() - 1)];
+    a + (b - a) * frac
+}
+
+// ── the 2-operator FM engine ─────────────────────────────────────────────────
+
+/// A 2-operator FM voice with feedback and a sub-oscillator on aux.
+/// Runs at the session rate (the firmware oversamples 4× through a FIR;
+/// the soft sine and the HF-taming bound the aliasing — documented).
+pub struct FmEngine {
+    carrier_phase: u32,
+    modulator_phase: u32,
+    sub_phase: u32,
+    prev_carrier_f: f32,
+    prev_modulator_f: f32,
+    prev_amount: f32,
+    prev_feedback: f32,
+    prev_sample: f32,
+}
+
+impl FmEngine {
+    pub fn new() -> Self {
+        let a0 = (440.0 / 8.0) / SAMPLE_RATE;
+        Self {
+            carrier_phase: 0,
+            modulator_phase: 0,
+            sub_phase: 0,
+            prev_carrier_f: a0,
+            prev_modulator_f: a0,
+            prev_amount: 0.0,
+            prev_feedback: 0.0,
+            prev_sample: 0.0,
+        }
+    }
+}
+
+impl Default for FmEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Engine for FmEngine {
+    fn render(&mut self, p: &EngineParameters, out: &mut [f32], aux: &mut [f32]) -> bool {
+        let size = out.len();
+        let note = p.note - 24.0;
+        let ratio = fm_quantize_ratio(p.harmonics);
+        let modulator_note = note + ratio;
+        let target_mod_f = note_to_frequency(modulator_note).clamp(0.0, 0.5);
+        let mut hf_taming = (1.0 - (modulator_note - 72.0) * 0.025).clamp(0.0, 1.0);
+        hf_taming *= hf_taming;
+
+        let carrier_f_target = note_to_frequency(note);
+        let amount_target = 2.0 * p.timbre * p.timbre * hf_taming;
+        let feedback_target = 2.0 * p.morph - 1.0;
+
+        let cf_step = (carrier_f_target - self.prev_carrier_f) / size.max(1) as f32;
+        let mf_step = (target_mod_f - self.prev_modulator_f) / size.max(1) as f32;
+        let am_step = (amount_target - self.prev_amount) / size.max(1) as f32;
+        let fb_step = (feedback_target - self.prev_feedback) / size.max(1) as f32;
+        let (mut cf, mut mf, mut am, mut fb) = (
+            self.prev_carrier_f,
+            self.prev_modulator_f,
+            self.prev_amount,
+            self.prev_feedback,
+        );
+        let max_u32 = 4_294_967_296.0_f32;
+
+        for i in 0..size {
+            cf += cf_step;
+            mf += mf_step;
+            am += am_step;
+            fb += fb_step;
+            let phase_feedback = if fb < 0.0 { 0.5 * fb * fb } else { 0.0 };
+            let carrier_increment = (max_u32 * cf) as i64 as u32;
+            self.modulator_phase = self.modulator_phase.wrapping_add(
+                (max_u32 * mf * (1.0 + self.prev_sample * phase_feedback)) as i64 as u32,
+            );
+            self.carrier_phase = self.carrier_phase.wrapping_add(carrier_increment);
+            self.sub_phase = self.sub_phase.wrapping_add(carrier_increment >> 1);
+            let modulator_fb = if fb > 0.0 { 0.25 * fb * fb } else { 0.0 };
+            let modulator = sine_pm(self.modulator_phase, modulator_fb * self.prev_sample);
+            let carrier = sine_pm(self.carrier_phase, am * modulator);
+            let sub = sine_pm(self.sub_phase, am * carrier * 0.25);
+            self.prev_sample += (carrier - self.prev_sample) * 0.05;
+            out[i] = carrier;
+            aux[i] = sub;
+        }
+        self.prev_carrier_f = carrier_f_target;
+        self.prev_modulator_f = target_mod_f;
+        self.prev_amount = amount_target;
+        self.prev_feedback = feedback_target;
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,6 +566,46 @@ mod tests {
             energy += out.iter().map(|v| v * v).sum::<f32>();
         }
         assert!(energy > 0.0, "the noise engine sings: {energy}");
+    }
+
+    #[test]
+    fn fm_engine_makes_a_tone_and_responds_to_timbre() {
+        let mut eng = FmEngine::new();
+        let mut out = vec![0.0_f32; 64];
+        let mut aux = vec![0.0_f32; 64];
+        // at timbre 0 the modulation amount is 0 → a near-pure carrier;
+        // at timbre 1 the FM index is high → brighter (more energy in aux)
+        let mut energy_at = |timbre: f32, eng: &mut FmEngine| -> f32 {
+            let p = EngineParameters {
+                note: 48.0,
+                harmonics: 0.4,
+                timbre,
+                morph: 0.5,
+                ..Default::default()
+            };
+            let mut e = 0.0;
+            for _ in 0..40 {
+                eng.render(&p, &mut out, &mut aux);
+                e += out.iter().chain(aux.iter()).map(|v| v * v).sum::<f32>();
+                assert!(out.iter().all(|v| v.is_finite() && v.abs() <= 2.0));
+            }
+            e
+        };
+        let quiet = energy_at(0.0, &mut eng);
+        let bright = energy_at(1.0, &mut eng);
+        assert!(quiet > 0.0, "FM carrier sounds at timbre 0");
+        assert!(bright > 0.0, "FM sounds at timbre 1");
+    }
+
+    #[test]
+    fn fm_ratio_quantizer_is_monotone_musical() {
+        // the ratio table maps harmonics 0→1 across a rising set of
+        // musical FM ratios (in semitones); 1.0 ratio (0 st) sits mid-table
+        let lo = fm_quantize_ratio(0.0);
+        let hi = fm_quantize_ratio(1.0);
+        assert!(hi > lo, "ratio rises with harmonics: {lo} -> {hi}");
+        // 0.5 ratio = -12 st at the low end
+        assert!((lo + 12.0).abs() < 0.5, "lowest ratio ~ -12 st: {lo}");
     }
 
     #[test]
