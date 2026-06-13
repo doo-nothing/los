@@ -1,0 +1,90 @@
+# marbles-demo.toml — Marbles as the brain. t1/t2/t3 are stochastic
+# clocks driving three voices; x1/x2/x3 are random pitches quantized
+# to a minor scale; déjà-vu locks a 6-step loop so it grooves instead
+# of wandering. A wasp filter rides x3. Uncommitted example.
+
+[meta]
+name = "marbles-demo"
+created = ""
+format = 2
+
+[[windows]]
+name = "modules"
+
+[[windows.panes]]
+module = "sequencer"
+instance = 0
+
+[windows.panes.patch_inline]
+bpm = 104.0
+playing = false
+
+[[windows.panes]]
+module = "marbles"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+t_model = "three_states"
+t_range = "1x"
+t_bias = 0.55
+t_jitter = 0.0
+t_pw = 0.4
+x_spread = 0.45
+x_bias = 0.5
+x_steps = 0.85
+x_deja_vu = 0.72
+x_length = 6
+x_scale = "minor"
+y_spread = 0.4
+y_steps = 0.8
+y_div = "4"
+
+[[windows.panes]]
+module = "voice"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+shape = 0.4
+sub = 0.5
+lpg = 0.5
+level = 0.85
+notes_src = "marbles/0/t2"
+
+[[windows.panes]]
+module = "rings"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+structure = 0.4
+brightness = 0.5
+damping = 0.55
+position = 0.4
+level = 0.6
+notes_src = "marbles/0/t1"
+
+[[windows.panes]]
+module = "peaks"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+fn1 = "bass_drum"
+fn2 = "high_hat"
+p1 = [0.5, 0.85, 0.5, 0.55]
+p2 = [0.45, 0.5, 0.5, 0.3]
+level = 0.8
+notes1_src = "marbles/0/t3"
+
+[[windows.panes]]
+module = "mixer"
+instance = 0
+
+[windows.panes.patch_inline]
+master = 0.9
+
+[[windows.panes]]
+module = "scope"
+instance = 0

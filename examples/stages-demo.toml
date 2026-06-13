@@ -1,0 +1,94 @@
+# stages-demo.toml — Stages as modulation brains. Segments 1+2 form a
+# gated attack/decay envelope (triggered by the kick track) shaping a
+# voice's amp; segments 3+4 are a free-running looping-ramp LFO that
+# sweeps a wasp filter. The segment generator drawn as cables.
+# Uncommitted example (house rule).
+
+[meta]
+name = "stages-demo"
+created = ""
+format = 2
+
+[[windows]]
+name = "modules"
+
+[[windows.panes]]
+module = "sequencer"
+instance = 0
+
+[windows.panes.patch_inline]
+bpm = 100.0
+playing = false
+
+# t1 — trigger the envelope
+[[windows.panes.patch_inline.tracks]]
+length = 16
+steps = [
+  { active = true, note = 48, velocity = 110 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = true, note = 55, velocity = 90 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = true, note = 52, velocity = 100 },
+  { active = false, note = 48, velocity = 80 },
+  { active = true, note = 60, velocity = 96 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = true, note = 55, velocity = 88, prob = 70 },
+  { active = false, note = 48, velocity = 80 },
+  { active = true, note = 52, velocity = 92 },
+  { active = false, note = 48, velocity = 80 },
+  { active = true, note = 48, velocity = 70, prob = 50 },
+]
+
+[[windows.panes]]
+module = "stages"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+# seg1+2: AD envelope (two ramps, gated by t1) -> o1
+# seg3+4: looping-ramp LFO (free) -> o3
+# seg5+6: idle ramps
+types = ["ramp", "ramp", "ramp", "ramp", "ramp", "ramp"]
+loops = [false, false, true, true, false, false]
+p = [0.2, 0.45, 0.12, 0.12, 0.5, 0.5]
+s = [0.5, 0.65, 0.7, 0.7, 0.5, 0.5]
+gate1_src = "sequencer/0/t1"
+
+[[windows.panes]]
+module = "voice"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+shape = 0.4
+sub = 0.4
+lpg = 0.3
+level = 0.9
+notes_src = "sequencer/0/t1"
+amp_src = "stages/0/o1"
+
+[[windows.panes]]
+module = "wasp"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+input = "voice/0"
+freq = 0.45
+res = 0.5
+dirt = 0.3
+freq_src = "stages/0/o3"
+
+[[windows.panes]]
+module = "mixer"
+instance = 0
+
+[windows.panes.patch_inline]
+master = 0.9
+
+[[windows.panes]]
+module = "scope"
+instance = 0

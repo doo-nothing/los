@@ -428,6 +428,22 @@ knob has a `p{n}_src`/`s{n}_src` twin. CV-only — publishes
 gate); patch `o1` into a voice's `amp_src` for a hand-drawn
 envelope, or into a `level_src` to shape a whole strip.
 
+**marbles** (the Mutable Instruments random sampler, full port of
+its random core): a stochastic generator clocked by the transport.
+The **t-section** makes random rhythms — `t_model` ∈ bernoulli,
+clusters, drums, independent, divider, three_states, markov; `t_bias`
+biases which of t1/t3 fires (t2 is the steady master); `t_range`
+multiplies the clock 0.25/1/4×. The **x-section** makes random
+voltages — `x_spread` morphs from constant (all the same) through a
+bell to bernoulli (extremes); `x_bias` centres them; `x_steps`
+crossfades a smooth glide into hard quantization to `x_scale`;
+`x_deja_vu` is the signature knob — 0 is fresh every clock, 1 locks
+a loop of `x_length` (1–16). The real scipy Beta-distribution tables
+shape the spread. t1/t2/t3 emit note events (bind them to a voice's
+`notes_src` — three stochastic voices); marbles/N/{t1,t2,t3,x1,x2,x3,y}
+publish on the bus (x's are pitched CV, y a slower companion). Every
+continuous knob has a `*_src` twin.
+
 **mixer**: per-track `level` (0–1), `pan` (−1–1), `drive` (0–1), 3-band
 EQ (±15 dB, `eq_freq` 0–1), `mute`/`solo`; a master strip with the
 same console plus `master_width` (0–2).
@@ -464,6 +480,7 @@ Sources:
 | `frames/N/` | `ch1`–`ch4` (keyframed levels / poly LFOs) |
 | `streams/N/` | `g1`, `f1`, `g2`, `f2` (gain + frequency CV per side) |
 | `stages/N/` | `o1`–`o6` (segment outputs: envelopes, LFOs, sequencer steps) |
+| `marbles/N/` | `t1`–`t3` (random gates; also note sources), `x1`–`x3`, `y` (random CV) |
 | `template/N/` | `lfo` |
 
 Audio `input` fields are 2-segment: a producing module (`voice`,

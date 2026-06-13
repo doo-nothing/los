@@ -2055,6 +2055,16 @@ fn check_notes_src(
         }
         return;
     }
+    // marbles emits stochastic gates on t1/t2/t3
+    if addr.module == "marbles" {
+        if !["t1", "t2", "t3"].contains(&addr.output.as_str()) {
+            r.error(
+                loc,
+                format!("notes_src \"{s}\": marbles note outputs are t1, t2, t3"),
+            );
+        }
+        return;
+    }
     if addr.module != "sequencer" {
         r.error(
             loc,
