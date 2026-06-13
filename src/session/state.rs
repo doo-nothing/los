@@ -981,6 +981,36 @@ pub struct FramesParams {
     pub coupling_src: Option<String>,
 }
 
+/// Warps (modules/warps) — the MI meta-modulator: two audio inputs
+/// (carrier + modulator) through the cross-mod sweep; algorithm is
+/// the meta morph, timbre each algorithm's parameter, drive per
+/// channel, carrier-shape an internal oscillator option.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WarpsParams {
+    #[serde(default)]
+    pub format: u32,
+    pub algorithm: Option<f32>,
+    pub timbre: Option<f32>,
+    pub drive1: Option<f32>,
+    pub drive2: Option<f32>,
+    pub shape: Option<String>,
+    pub note: Option<f32>,
+    #[serde(default)]
+    pub carrier: Option<String>,
+    #[serde(default)]
+    pub modulator: Option<String>,
+    #[serde(default)]
+    pub algorithm_src: Option<String>,
+    #[serde(default)]
+    pub timbre_src: Option<String>,
+    #[serde(default)]
+    pub drive1_src: Option<String>,
+    #[serde(default)]
+    pub drive2_src: Option<String>,
+    #[serde(default)]
+    pub note_src: Option<String>,
+}
+
 /// Marbles (modules/marbles) — the MI random sampler: a t-section
 /// (rhythm model, bias, jitter) and an x/y section (spread, bias,
 /// steps, déjà-vu loop length, scale). CV+gate generator.

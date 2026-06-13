@@ -33,7 +33,7 @@ use crate::state::{
     StepParam,
     StreamsParams,
     SwarmParams,
-    TapeParams, TemplateParams, TidesParams, TrackMode, VoiceParams, WaspParams, STATE_FORMAT,
+    TapeParams, TemplateParams, TidesParams, TrackMode, VoiceParams, WarpsParams, WaspParams, STATE_FORMAT,
 };
 use crate::theory;
 
@@ -335,6 +335,11 @@ fn validate_session(st: &SessionState, r: &mut Report) {
             "marbles" => {
                 if let Some(p) = decode::<MarblesParams>(value, &loc, r) {
                     check_marbles(&p, &loc, &declared, r);
+                }
+            }
+            "warps" => {
+                if let Some(p) = decode::<WarpsParams>(value, &loc, r) {
+                    check_warps(&p, &loc, &declared, r);
                 }
             }
             // No params structs: state is ephemeral or none.
@@ -1898,6 +1903,42 @@ fn check_marbles(
     }
 }
 
+/// Warps (modules/warps): shape name, knob ranges, srcs, the two
+/// audio inputs.
+fn check_warps(
+    p: &WarpsParams,
+    loc: &str,
+    declared: &BTreeSet<(String, usize)>,
+    r: &mut Report,
+) {
+    const SHAPES: [&str; 6] = ["external", "sine", "triangle", "saw", "pulse", "noise"];
+    if let Some(sh) = p.shape.as_deref() {
+        if !SHAPES.contains(&sh) {
+            r.error(loc, format!("shape {sh:?} — one of {}", SHAPES.join(" ")));
+        }
+    }
+    for (name, v) in [
+        ("algorithm", p.algorithm),
+        ("timbre", p.timbre),
+        ("drive1", p.drive1),
+        ("drive2", p.drive2),
+        ("note", p.note),
+    ] {
+        range01(v, name, loc, r);
+    }
+    check_input(&p.carrier, "carrier", loc, declared, r);
+    check_input(&p.modulator, "modulator", loc, declared, r);
+    for (field, src) in [
+        ("algorithm_src", &p.algorithm_src),
+        ("timbre_src", &p.timbre_src),
+        ("drive1_src", &p.drive1_src),
+        ("drive2_src", &p.drive2_src),
+        ("note_src", &p.note_src),
+    ] {
+        check_src(src, field, loc, declared, r);
+    }
+}
+
 /// Template (template.rs SHAPES): shape by name.
 fn check_template(
     p: &TemplateParams,
@@ -1945,12 +1986,12 @@ const SOURCE_MODULES: [&str; 6] = [
 ];
 
 /// Modules that publish audio rings an fx/tape input can claim.
-const AUDIO_MODULES: [&str; 16] =
-    ["voice", "swarm", "tone", "template", "delay", "filterbank", "dld", "sampler", "wasp", "dpo", "elements", "rings", "tides", "peaks", "edges", "streams"];
+const AUDIO_MODULES: [&str; 17] =
+    ["voice", "swarm", "tone", "template", "delay", "filterbank", "dld", "sampler", "wasp", "dpo", "elements", "rings", "tides", "peaks", "edges", "streams", "warps"];
 
 /// Canonical module names, for misspelled-pane suggestions.
-const MODULE_NAMES: [&str; 29] =
-    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements", "rings", "tides", "peaks", "branches", "grids", "edges", "frames", "streams", "stages", "marbles"];
+const MODULE_NAMES: [&str; 30] =
+    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements", "rings", "tides", "peaks", "branches", "grids", "edges", "frames", "streams", "stages", "marbles", "warps"];
 
 /// An optional `*_src` field: grammar, known output, declared instance.
 /// Returns the parsed address so callers can queue cross-module checks.
@@ -2227,6 +2268,8 @@ const KNOWN_KEYS: &[&str] = &[
     "x_deja_vu", "x_length", "x_scale", "y_spread", "y_steps", "y_div",
     "t_bias_src", "t_jitter_src", "t_pw_src", "x_spread_src", "x_bias_src", "x_steps_src",
     "x_deja_vu_src", "y_spread_src", "y_steps_src",
+    "algorithm", "timbre", "drive1", "drive2", "carrier", "modulator",
+    "algorithm_src", "timbre_src", "drive1_src", "drive2_src", "note_src",
     "p1d_src", "p2a_src", "p2b_src", "p2c_src", "p2d_src",
     "patch_inline", "phase", "phase_src", "ping_ms", "ping_src", "pitch", "pitch_src", "playing",
     "pluck", "pluck_src", "prob", "pulses", "quant",
