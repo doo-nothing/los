@@ -397,6 +397,22 @@ sine, bounce and `response` (linear ↔ exponential, the 2164 law).
 LFOs (frame = rate over 13 octaves; `shape`, `spread`,
 `shape_spread`, `coupling`). Every knob has a `*_src` twin.
 
+**streams** (the Mutable Instruments dual dynamics gate, full
+port): claims one audio input (ch1 = left, ch2 = right) and runs
+each side through one of six processors — `fn` ∈ envelope, vactrol,
+follower, compressor, filter, lorenz — applying the resulting VCA
+gain in-line at the firmware's 31.25 kHz. The vactrol is the face:
+smooth mode is the hysteresis low-pass-gate, `alt` (plucked) snaps
+it open and rings it down through the Gompertz law. Excitation per
+channel: an `excite*_src` cable beats a `notes*_src` gate beats the
+`excite` knob (a kick track on `notes1_src` ducks-and-blooms the
+left side like an LPG). Two knobs per channel relabel per function
+(`p1`/`p2`: shape & →freq, thresh & ratio, rate & balance …), all
+with `*_src` twins. Both sides publish gain and frequency CVs as
+`streams/N/{g1,f1,g2,f2}` (g 0.5 = unity) — patch `f1` into a
+wasp's `freq_src` to close the vactrol-filter loop the hardware
+implies.
+
 **mixer**: per-track `level` (0–1), `pan` (−1–1), `drive` (0–1), 3-band
 EQ (±15 dB, `eq_freq` 0–1), `mute`/`solo`; a master strip with the
 same console plus `master_width` (0–2).
@@ -431,10 +447,11 @@ Sources:
 | `branches/N/` | `1a`, `1b`, `2a`, `2b` (gate levels; also note re-emit sources) |
 | `grids/N/` | `bd`, `sd`, `hh` (triggers; also note sources), `acc` |
 | `frames/N/` | `ch1`–`ch4` (keyframed levels / poly LFOs) |
+| `streams/N/` | `g1`, `f1`, `g2`, `f2` (gain + frequency CV per side) |
 | `template/N/` | `lfo` |
 
 Audio `input` fields are 2-segment: a producing module (`voice`,
-`swarm`, `tone`, `template`, `delay`, `filterbank`) or a mixer virtual
+`swarm`, `tone`, `template`, `delay`, `filterbank`, `streams`) or a mixer virtual
 (`send/0`, `send/1`, `mix/0`). Addresses are names, not channel
 numbers — they survive restarts, and a binding to a module not in the
 file is legal-but-dead until `los add` brings it up (check warns).
