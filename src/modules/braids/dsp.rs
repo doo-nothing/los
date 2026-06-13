@@ -48,9 +48,14 @@ pub struct Tables {
     pub wav_formant_square: Vec<i16>,      // 256
     pub formant_f_data: Vec<i16>,          // 125 (5×5×5)
     pub formant_a_data: Vec<i16>,          // 125
+    // noise tables (braids_noise_tables.bin)
+    pub svf_scale: Vec<u16>,               // 257
+    pub resonator_coefficient: Vec<u16>,   // 129
+    pub resonator_scale: Vec<u16>,         // 129
 }
 
 const BRAIDS_FORMANT_TABLES_BIN: &[u8] = include_bytes!("braids_formant_tables.bin");
+const BRAIDS_NOISE_TABLES_BIN: &[u8] = include_bytes!("braids_noise_tables.bin");
 
 const BRAIDS_DIGITAL_TABLES_BIN: &[u8] = include_bytes!("braids_digital_tables.bin");
 
@@ -151,6 +156,17 @@ pub fn tables() -> &'static Tables {
         let wav_formant_square = take_i16(fd, &mut fo, n_fsq);
         let formant_f_data = take_i16(fd, &mut fo, n_ff);
         let formant_a_data = take_i16(fd, &mut fo, n_fa);
+        // noise tables: header of 3 u32 lengths, then svf_scale, res_coeff,
+        // res_scale (all u16)
+        let nd = BRAIDS_NOISE_TABLES_BIN;
+        let nlen = |i: usize| {
+            u32::from_le_bytes([nd[i * 4], nd[i * 4 + 1], nd[i * 4 + 2], nd[i * 4 + 3]]) as usize
+        };
+        let (n_sc, n_rc, n_rs) = (nlen(0), nlen(1), nlen(2));
+        let mut no = 12;
+        let svf_scale = take_u16(nd, &mut no, n_sc);
+        let resonator_coefficient = take_u16(nd, &mut no, n_rc);
+        let resonator_scale = take_u16(nd, &mut no, n_rs);
         Tables {
             wav_sine,
             increments,
@@ -168,6 +184,9 @@ pub fn tables() -> &'static Tables {
             wav_formant_square,
             formant_f_data,
             formant_a_data,
+            svf_scale,
+            resonator_coefficient,
+            resonator_scale,
         }
     })
 }
@@ -914,10 +933,13 @@ pub enum MacroModel {
     Fm,
     FeedbackFm,
     ChaoticFeedbackFm,
+    FilteredNoise,
+    TwinPeaksNoise,
+    ClockedNoise,
 }
 
 /// All macro models in panel order — parallel to [`MODEL_NAMES`].
-pub const MODELS: [MacroModel; 28] = [
+pub const MODELS: [MacroModel; 31] = [
     MacroModel::CSaw,
     MacroModel::Morph,
     MacroModel::SawSquare,
@@ -946,9 +968,12 @@ pub const MODELS: [MacroModel; 28] = [
     MacroModel::Fm,
     MacroModel::FeedbackFm,
     MacroModel::ChaoticFeedbackFm,
+    MacroModel::FilteredNoise,
+    MacroModel::TwinPeaksNoise,
+    MacroModel::ClockedNoise,
 ];
 
-pub const MODEL_NAMES: [&str; 28] = [
+pub const MODEL_NAMES: [&str; 31] = [
     "csaw",
     "morph",
     "saw_square",
@@ -977,6 +1002,9 @@ pub const MODEL_NAMES: [&str; 28] = [
     "fm",
     "feedback_fm",
     "chaotic_feedback_fm",
+    "filtered_noise",
+    "twin_peaks_noise",
+    "clocked_noise",
 ];
 
 pub struct MacroOscillator {
@@ -1077,6 +1105,15 @@ impl MacroOscillator {
             }
             MacroModel::ChaoticFeedbackFm => {
                 self.render_digital(DigitalShape::ChaoticFeedbackFm, sync, buffer, size)
+            }
+            MacroModel::FilteredNoise => {
+                self.render_digital(DigitalShape::FilteredNoise, sync, buffer, size)
+            }
+            MacroModel::TwinPeaksNoise => {
+                self.render_digital(DigitalShape::TwinPeaksNoise, sync, buffer, size)
+            }
+            MacroModel::ClockedNoise => {
+                self.render_digital(DigitalShape::ClockedNoise, sync, buffer, size)
             }
         }
     }
@@ -1326,6 +1363,9 @@ pub enum DigitalShape {
     Fm,
     FeedbackFm,
     ChaoticFeedbackFm,
+    FilteredNoise,
+    TwinPeaksNoise,
+    ClockedNoise,
 }
 
 const NUM_FORMANTS: usize = 5;
@@ -1401,6 +1441,15 @@ pub struct DigitalOscillator {
     add_previous_sample: i16,
     fm_modulator_phase: u32,
     fm_previous_sample: i16,
+    // noise models (svf / pno / clk) state
+    svf_bp: i32,
+    svf_lp: i32,
+    pno_filter_state: [[i32; 2]; 2],
+    clk_cycle_phase: u32,
+    clk_cycle_phase_increment: u32,
+    clk_rng_state: u32,
+    clk_seed: u32,
+    clk_sample: i16,
 }
 
 impl Default for DigitalOscillator {
@@ -1441,6 +1490,14 @@ impl Default for DigitalOscillator {
             add_previous_sample: 0,
             fm_modulator_phase: 0,
             fm_previous_sample: 0,
+            svf_bp: 0,
+            svf_lp: 0,
+            pno_filter_state: [[0; 2]; 2],
+            clk_cycle_phase: 0,
+            clk_cycle_phase_increment: 0,
+            clk_rng_state: 0,
+            clk_seed: 0,
+            clk_sample: 0,
         }
     }
 }
@@ -1495,6 +1552,14 @@ impl DigitalOscillator {
         self.add_previous_sample = 0;
         self.fm_modulator_phase = 0;
         self.fm_previous_sample = 0;
+        self.svf_bp = 0;
+        self.svf_lp = 0;
+        self.pno_filter_state = [[0; 2]; 2];
+        self.clk_cycle_phase = 0;
+        self.clk_cycle_phase_increment = 0;
+        self.clk_rng_state = 0;
+        self.clk_seed = 0;
+        self.clk_sample = 0;
         // previous_parameter is NOT reset by Init in the firmware
         self.phase = 0;
         self.strike = true;
@@ -1505,6 +1570,12 @@ impl DigitalOscillator {
         // stmlib Random LCG.
         self.rng = self.rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         self.rng
+    }
+
+    /// stmlib `Random::GetSample()` — the top 16 bits as a signed sample.
+    #[inline]
+    fn next_sample(&mut self) -> i16 {
+        (self.next_word() >> 16) as i16
     }
 
     pub fn render(&mut self, sync: &[u8], buffer: &mut [i16], size: usize) {
@@ -1547,7 +1618,161 @@ impl DigitalOscillator {
             DigitalShape::Fm => self.render_fm(sync, buffer, size),
             DigitalShape::FeedbackFm => self.render_feedback_fm(sync, buffer, size),
             DigitalShape::ChaoticFeedbackFm => self.render_chaotic_feedback_fm(sync, buffer, size),
+            DigitalShape::FilteredNoise => self.render_filtered_noise(buffer, size),
+            DigitalShape::TwinPeaksNoise => self.render_twin_peaks_noise(buffer, size),
+            DigitalShape::ClockedNoise => self.render_clocked_noise(sync, buffer, size),
         }
+    }
+
+    /// FILTERED_NOISE — white noise through a state-variable filter,
+    /// morphing LP→BP→HP (parameter_1), resonance via parameter_0.
+    fn render_filtered_noise(&mut self, buffer: &mut [i16], size: usize) {
+        let t = tables();
+        let f = interpolate824_u16(&t.svf_cutoff, (self.pitch as u32) << 17) as i64;
+        let damp = interpolate824_u16(&t.svf_damp, (self.parameter[0] as u32) << 17) as i64;
+        let scale = interpolate824_u16(&t.svf_scale, (self.parameter[0] as u32) << 17) as i64;
+        let (bp_gain, lp_gain, hp_gain) = if self.parameter[1] < 16384 {
+            let bp = self.parameter[1] as i32;
+            (bp, 16384 - bp, 0)
+        } else {
+            (32767 - self.parameter[1] as i32, 0, self.parameter[1] as i32 - 16384)
+        };
+        let gain_correction = if f > scale {
+            (scale * 32767 / f) as i32
+        } else {
+            32767
+        };
+        let mut bp = self.svf_bp;
+        let mut lp = self.svf_lp;
+        for b in buffer.iter_mut().take(size) {
+            let input = (self.next_sample() >> 1) as i32;
+            let notch = input - ((bp as i64 * damp >> 15) as i32);
+            lp += (f * bp as i64 >> 15) as i32;
+            lp = clip16(lp);
+            let hp = notch - lp;
+            bp += (f * hp as i64 >> 15) as i32;
+            let mut result = (lp_gain * lp) >> 14;
+            result += (bp_gain * bp) >> 14;
+            result += (hp_gain * hp) >> 14;
+            result = clip16(result);
+            result = (result as i64 * gain_correction as i64 >> 15) as i32;
+            *b = interpolate88(&t.moderate_overdrive, (result + 32768) as u16) as i16;
+        }
+        self.svf_bp = bp;
+        self.svf_lp = lp;
+    }
+
+    /// TWIN_PEAKS_NOISE — noise through two resonators (a formant pair),
+    /// the second offset by parameter_1; parameter_0 sets Q and makeup.
+    fn render_twin_peaks_noise(&mut self, buffer: &mut [i16], size: usize) {
+        let t = tables();
+        let mut y11 = self.pno_filter_state[0][0];
+        let mut y12 = self.pno_filter_state[0][1];
+        let mut y21 = self.pno_filter_state[1][0];
+        let mut y22 = self.pno_filter_state[1][1];
+        let q = 65240u32 + (self.parameter[0] as u32 >> 7);
+        let q_squared = ((q as u64 * q as u64) >> 17) as i64;
+        let p1 = (self.pitch).clamp(0, 16383);
+        let c1 = (interpolate824_u16(&t.resonator_coefficient, (p1 as u32) << 17) as i64 * q as i64
+            >> 16) as i32;
+        let s1 = interpolate824_u16(&t.resonator_scale, (p1 as u32) << 17);
+        let p2 = (self.pitch as i32 + ((self.parameter[1] as i32 - 16384) >> 1)).clamp(0, 16383)
+            as i16;
+        let c2 = (interpolate824_u16(&t.resonator_coefficient, (p2 as u32) << 17) as i64 * q as i64
+            >> 16) as i32;
+        let s2 = interpolate824_u16(&t.resonator_scale, (p2 as u32) << 17);
+        let makeup_gain = 8191 - (self.parameter[0] as i32 >> 2);
+        let mut j = 0;
+        while j < size {
+            let sample0 = (self.next_sample() >> 1) as i32;
+            let (mut y10, mut y20);
+            if sample0 > 0 {
+                y10 = sample0 * s1 >> 16;
+                y20 = sample0 * s2 >> 16;
+            } else {
+                y10 = -((-sample0) * s1 >> 16);
+                y20 = -((-sample0) * s2 >> 16);
+            }
+            y10 += (y11 as i64 * c1 as i64 >> 15) as i32;
+            y10 -= (y12 as i64 * q_squared >> 15) as i32;
+            y10 = clip16(y10);
+            y12 = y11;
+            y11 = y10;
+            y20 += (y21 as i64 * c2 as i64 >> 15) as i32;
+            y20 -= (y22 as i64 * q_squared >> 15) as i32;
+            y20 = clip16(y20);
+            y22 = y21;
+            y21 = y20;
+            y10 += y20;
+            y10 += (y10 * makeup_gain) >> 13;
+            y10 = clip16(y10);
+            let sample = interpolate88(&t.moderate_overdrive, (y10 + 32768) as u16) as i16;
+            buffer[j] = sample;
+            if j + 1 < size {
+                buffer[j + 1] = sample;
+            }
+            j += 2;
+        }
+        self.pno_filter_state[0][0] = y11;
+        self.pno_filter_state[0][1] = y12;
+        self.pno_filter_state[1][0] = y21;
+        self.pno_filter_state[1][1] = y22;
+    }
+
+    /// CLOCKED_NOISE — a sample-and-hold random source clocked at the
+    /// oscillator rate (parameter_0 = clock divider, parameter_1 = steps).
+    fn render_clocked_noise(&mut self, sync: &[u8], buffer: &mut [i16], size: usize) {
+        let (p1, pp1) = (self.parameter[1] as i32, self.previous_parameter[1] as i32);
+        if p1 > pp1 + 64 || p1 < pp1 - 64 {
+            self.previous_parameter[1] = self.parameter[1];
+        }
+        let (p0, pp0) = (self.parameter[0] as i32, self.previous_parameter[0] as i32);
+        if p0 > pp0 + 16 || p0 < pp0 - 16 {
+            self.previous_parameter[0] = self.parameter[0];
+        }
+        if self.strike {
+            self.clk_seed = self.next_word();
+            self.strike = false;
+        }
+        let mut phase = self.phase;
+        let mut phase_increment = self.phase_increment;
+        for _ in 0..3 {
+            if phase_increment < (1u32 << 31) {
+                phase_increment <<= 1;
+            }
+        }
+        self.clk_cycle_phase_increment =
+            compute_phase_increment(self.previous_parameter[0] - 16384) << 1;
+        let mut num_steps = 1 + (self.previous_parameter[1] as u32 >> 10);
+        if num_steps == 1 {
+            num_steps = 2;
+        }
+        let quantizer_divider = 65536 / num_steps;
+        for (n, b) in buffer.iter_mut().take(size).enumerate() {
+            phase = phase.wrapping_add(phase_increment);
+            if sync[n] != 0 {
+                phase = 0;
+            }
+            if phase < phase_increment {
+                self.clk_rng_state = self
+                    .clk_rng_state
+                    .wrapping_mul(1_664_525)
+                    .wrapping_add(1_013_904_223);
+                self.clk_cycle_phase =
+                    self.clk_cycle_phase.wrapping_add(self.clk_cycle_phase_increment);
+                if self.clk_cycle_phase < self.clk_cycle_phase_increment {
+                    self.clk_rng_state = self.clk_seed;
+                    self.clk_cycle_phase = self.clk_cycle_phase_increment;
+                }
+                let mut sample = self.clk_rng_state as u16;
+                sample -= sample % quantizer_divider as u16;
+                sample = sample.wrapping_add((quantizer_divider >> 1) as u16);
+                self.clk_sample = sample as i16;
+                phase = phase_increment;
+            }
+            *b = self.clk_sample;
+        }
+        self.phase = phase;
     }
 
     /// VOWEL_FOF — the firmware renders the FOF vowel as a bank of five
@@ -2321,6 +2546,9 @@ mod tests {
             MacroModel::Fm,
             MacroModel::FeedbackFm,
             MacroModel::ChaoticFeedbackFm,
+            MacroModel::FilteredNoise,
+            MacroModel::TwinPeaksNoise,
+            MacroModel::ClockedNoise,
         ] {
             let mut m = MacroOscillator::new();
             m.set_model(model);
