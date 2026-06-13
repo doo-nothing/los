@@ -2165,6 +2165,364 @@ impl Engine for WavetableEngine {
     }
 }
 
+// ── the modal engine ─────────────────────────────────────────────────────────
+
+const MODAL_MAX_MODES: usize = 24;
+const MODE_BATCH_SIZE: usize = 4;
+
+/// plaits' `lut_stiffness`, extracted byte-exact from resources.cc — the
+/// inharmonicity-to-stretch curve the resonator reads with `structure`.
+#[rustfmt::skip]
+const LUT_STIFFNESS: [f32; 65] = [
+    -6.250000000e-02, -5.859375000e-02, -5.468750000e-02, -5.078125000e-02, -4.687500000e-02, -4.296875000e-02,
+    -3.906250000e-02, -3.515625000e-02, -3.125000000e-02, -2.734375000e-02, -2.343750000e-02, -1.953125000e-02,
+    -1.562500000e-02, -1.171875000e-02, -7.812500000e-03, -3.906250000e-03, 0.000000000e+00, 0.000000000e+00,
+    0.000000000e+00, 0.000000000e+00, 1.009582073e-03, 2.416076364e-03, 4.002252878e-03, 5.791066350e-03,
+    7.808404022e-03, 1.008346028e-02, 1.264915914e-02, 1.554263074e-02, 1.880574864e-02, 2.248573583e-02,
+    2.663584813e-02, 3.131614488e-02, 3.659435812e-02, 4.254687278e-02, 4.925983210e-02, 5.683038428e-02,
+    6.536808837e-02, 7.499649981e-02, 8.585495846e-02, 9.810060511e-02, 1.119106556e-01, 1.274849653e-01,
+    1.450489216e-01, 1.648567056e-01, 1.871949702e-01, 2.123869891e-01, 2.407973346e-01, 2.728371538e-01,
+    3.089701187e-01, 3.497191360e-01, 3.956739150e-01, 4.474995013e-01, 5.059459012e-01, 5.718589358e-01,
+    6.461924814e-01, 7.300222738e-01, 8.245614757e-01, 9.311782340e-01, 1.000037649e+00, 1.005639154e+00,
+    1.048005353e+00, 1.183990632e+00, 1.457101344e+00, 2.000000000e+00, 2.000000000e+00,
+];
+
+/// Linear interpolation into a LUT, stmlib `Interpolate` semantics:
+/// `index = x * scale`, integral/fractional split.
+#[inline]
+fn interp_lut(table: &[f32], x: f32, scale: f32) -> f32 {
+    let index = (x * scale).max(0.0);
+    let i = (index as usize).min(table.len().saturating_sub(2));
+    let f = index - i as f32;
+    table[i] + (table[i + 1] - table[i]) * f
+}
+
+/// stmlib's `OnePole::tan<FREQUENCY_FAST>` — the 16 Hz–16 kHz optimized
+/// tangent approximation the resonator uses for its mode frequencies.
+#[inline]
+fn tan_fast(f: f32) -> f32 {
+    use std::f32::consts::PI;
+    let a = 3.260e-01 * PI * PI * PI;
+    let b = 1.823e-01 * PI * PI * PI * PI * PI;
+    let f2 = f * f;
+    f * (PI + f2 * (a + b * f2))
+}
+
+/// stmlib's `CosineOscillator` (approximate init) — a folded parabola
+/// standing in for 2·cos(2πf), used to voice the mode-amplitude comb.
+#[derive(Debug, Clone, Default)]
+struct CosineOscillator {
+    y1: f32,
+    y0: f32,
+    iir: f32,
+    initial: f32,
+}
+
+impl CosineOscillator {
+    fn init_approximate(&mut self, frequency: f32) {
+        let mut sign = 16.0;
+        let mut f = frequency - 0.25;
+        if f < 0.0 {
+            f = -f;
+        } else if f > 0.5 {
+            f -= 0.5;
+        } else {
+            sign = -16.0;
+        }
+        self.iir = sign * f * (1.0 - 2.0 * f);
+        self.initial = self.iir * 0.25;
+        self.y1 = self.initial;
+        self.y0 = 0.5;
+    }
+    #[inline]
+    fn next(&mut self) -> f32 {
+        let temp = self.y0;
+        self.y0 = self.iir * self.y0 - self.y1;
+        self.y1 = temp;
+        temp + 0.5
+    }
+}
+
+/// A batched bank of `N` band-pass SVFs (stmlib `ResonatorSvf`), summed
+/// (optionally added) into the output.
+#[derive(Debug, Clone)]
+struct ResonatorSvf<const N: usize> {
+    state_1: [f32; N],
+    state_2: [f32; N],
+}
+
+impl<const N: usize> ResonatorSvf<N> {
+    fn new() -> Self {
+        Self {
+            state_1: [0.0; N],
+            state_2: [0.0; N],
+        }
+    }
+
+    /// `band_pass` selects BP (true) vs LP (false); `add` accumulates.
+    #[allow(clippy::too_many_arguments)]
+    fn process(
+        &mut self,
+        f: &[f32; N],
+        q: &[f32; N],
+        gain: &[f32; N],
+        band_pass: bool,
+        add: bool,
+        input: &[f32],
+        out: &mut [f32],
+    ) {
+        let mut g = [0.0f32; N];
+        let mut r_plus_g = [0.0f32; N];
+        let mut h = [0.0f32; N];
+        for i in 0..N {
+            g[i] = tan_fast(f[i]);
+            let r = 1.0 / q[i];
+            h[i] = 1.0 / (1.0 + r * g[i] + g[i] * g[i]);
+            r_plus_g[i] = r + g[i];
+        }
+        let mut s1 = self.state_1;
+        let mut s2 = self.state_2;
+        for (n, &s_in) in input.iter().enumerate() {
+            let mut s_out = 0.0;
+            for i in 0..N {
+                let hp = (s_in - r_plus_g[i] * s1[i] - s2[i]) * h[i];
+                let bp = g[i] * hp + s1[i];
+                s1[i] = g[i] * hp + bp;
+                let lp = g[i] * bp + s2[i];
+                s2[i] = g[i] * bp + lp;
+                s_out += gain[i] * if band_pass { bp } else { lp };
+            }
+            if add {
+                out[n] += s_out;
+            } else {
+                out[n] = s_out;
+            }
+        }
+        self.state_1 = s1;
+        self.state_2 = s2;
+    }
+}
+
+#[inline]
+fn nth_harmonic_compensation(n: i32, mut stiffness: f32) -> f32 {
+    let mut stretch_factor = 1.0;
+    for _ in 0..(n - 1) {
+        stretch_factor += stiffness;
+        if stiffness < 0.0 {
+            stiffness *= 0.93;
+        } else {
+            stiffness *= 0.98;
+        }
+    }
+    1.0 / stretch_factor
+}
+
+/// plaits' modal `Resonator`: up to 24 band-pass modes (in batches of 4),
+/// their frequencies stretched by an inharmonicity curve and their Q
+/// shaped by damping and brightness.
+struct Resonator {
+    resolution: usize,
+    mode_amplitude: [f32; MODAL_MAX_MODES],
+    mode_filters: [ResonatorSvf<MODE_BATCH_SIZE>; MODAL_MAX_MODES / MODE_BATCH_SIZE],
+}
+
+impl Resonator {
+    fn new(position: f32, resolution: usize) -> Self {
+        let mut amplitudes = CosineOscillator::default();
+        amplitudes.init_approximate(position);
+        let mut mode_amplitude = [0.0; MODAL_MAX_MODES];
+        for a in mode_amplitude.iter_mut() {
+            *a = amplitudes.next() * 0.25;
+        }
+        Self {
+            resolution: resolution.min(MODAL_MAX_MODES),
+            mode_amplitude,
+            mode_filters: std::array::from_fn(|_| ResonatorSvf::new()),
+        }
+    }
+
+    fn process(
+        &mut self,
+        f0: f32,
+        structure: f32,
+        brightness: f32,
+        damping: f32,
+        input: &[f32],
+        out: &mut [f32],
+    ) {
+        let mut stiffness = interp_lut(&LUT_STIFFNESS, structure, 64.0);
+        let f0 = f0 * nth_harmonic_compensation(3, stiffness);
+
+        let mut harmonic = f0;
+        let mut stretch_factor = 1.0;
+        let q_sqrt = semitones_to_ratio(damping * 79.7);
+        let mut q = 500.0 * q_sqrt * q_sqrt;
+        let brightness = brightness * (1.0 - structure * 0.3) * (1.0 - damping * 0.3);
+        let q_loss = brightness * (2.0 - brightness) * 0.85 + 0.15;
+
+        let mut mode_q = [0.0f32; MODE_BATCH_SIZE];
+        let mut mode_f = [0.0f32; MODE_BATCH_SIZE];
+        let mut mode_a = [0.0f32; MODE_BATCH_SIZE];
+        let mut batch_counter = 0;
+        let mut batch_index = 0;
+
+        for i in 0..self.resolution {
+            let mode_frequency = (harmonic * stretch_factor).min(0.499);
+            let mode_attenuation = 1.0 - mode_frequency * 2.0;
+            mode_f[batch_counter] = mode_frequency;
+            mode_q[batch_counter] = 1.0 + mode_frequency * q;
+            mode_a[batch_counter] = self.mode_amplitude[i] * mode_attenuation;
+            batch_counter += 1;
+            if batch_counter == MODE_BATCH_SIZE {
+                batch_counter = 0;
+                self.mode_filters[batch_index]
+                    .process(&mode_f, &mode_q, &mode_a, true, true, input, out);
+                batch_index += 1;
+            }
+            stretch_factor += stiffness;
+            if stiffness < 0.0 {
+                stiffness *= 0.93;
+            } else {
+                stiffness *= 0.98;
+            }
+            harmonic += f0;
+            q *= q_loss;
+        }
+    }
+}
+
+/// A 1-mode excitation filter (the modal voice's input shaper).
+type ExcitationFilter = ResonatorSvf<1>;
+
+#[inline]
+fn dust(frequency: f32, rng: &mut Rng) -> f32 {
+    let inv = 1.0 / frequency;
+    let u = rng.get_float();
+    if u < frequency {
+        u * inv
+    } else {
+        0.0
+    }
+}
+
+/// The modal voice: an excitation (struck impulse or sustained dust)
+/// through a low-pass into the modal resonator.
+struct ModalVoice {
+    excitation_filter: ExcitationFilter,
+    resonator: Resonator,
+    rng: Rng,
+}
+
+impl ModalVoice {
+    fn new() -> Self {
+        Self {
+            excitation_filter: ExcitationFilter::new(),
+            resonator: Resonator::new(0.015, MODAL_MAX_MODES),
+            rng: Rng::new(0x2_9a3f),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render(
+        &mut self,
+        sustain: bool,
+        trigger: bool,
+        accent: f32,
+        f0: f32,
+        structure: f32,
+        mut brightness: f32,
+        mut damping: f32,
+        temp: &mut [f32],
+        out: &mut [f32],
+        aux: &mut [f32],
+    ) {
+        let density = brightness * brightness;
+        brightness += 0.25 * accent * (1.0 - brightness);
+        damping += 0.25 * accent * (1.0 - damping);
+
+        let range = if sustain { 36.0 } else { 60.0 };
+        let f = if sustain { 4.0 * f0 } else { 2.0 * f0 };
+        let cutoff =
+            (f * semitones_to_ratio((brightness * (2.0 - brightness) - 0.5) * range)).min(0.499);
+        let q = if sustain { 0.7 } else { 1.5 };
+
+        if sustain {
+            let dust_f = 0.00005 + 0.99995 * density * density;
+            for t in temp.iter_mut() {
+                *t = dust(dust_f, &mut self.rng) * (4.0 - dust_f * 3.0) * accent;
+            }
+        } else {
+            temp.iter_mut().for_each(|t| *t = 0.0);
+            if trigger {
+                let attenuation = 1.0 - damping * 0.5;
+                let amplitude = (0.12 + 0.08 * accent) * attenuation;
+                temp[0] = amplitude * semitones_to_ratio(cutoff * cutoff * 24.0) / cutoff;
+            }
+        }
+        let cutoff_arr = [cutoff];
+        let q_arr = [q];
+        let one = [1.0];
+        let temp_in = temp.to_vec();
+        self.excitation_filter
+            .process(&cutoff_arr, &q_arr, &one, false, false, &temp_in, temp);
+        for (a, &t) in aux.iter_mut().zip(temp.iter()) {
+            *a += t;
+        }
+        self.resonator
+            .process(f0, structure, brightness, damping, temp, out);
+    }
+}
+
+/// The modal engine: a single modal voice driven by the macro knobs —
+/// harmonics→mode-amplitude density, timbre→brightness, morph→damping.
+pub struct ModalEngine {
+    voice: ModalVoice,
+    harmonics_lp: f32,
+    temp: Vec<f32>,
+}
+
+impl Default for ModalEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ModalEngine {
+    pub fn new() -> Self {
+        Self {
+            voice: ModalVoice::new(),
+            harmonics_lp: 0.0,
+            temp: Vec::new(),
+        }
+    }
+}
+
+impl Engine for ModalEngine {
+    fn render(&mut self, p: &EngineParameters, out: &mut [f32], aux: &mut [f32]) -> bool {
+        out.iter_mut().for_each(|o| *o = 0.0);
+        aux.iter_mut().for_each(|a| *a = 0.0);
+        self.harmonics_lp += (p.harmonics - self.harmonics_lp) * 0.01;
+        self.temp.resize(out.len(), 0.0);
+        let sustain = (p.trigger & TRIGGER_UNPATCHED) != 0;
+        let trigger = (p.trigger & TRIGGER_RISING_EDGE) != 0;
+        let mut temp = std::mem::take(&mut self.temp);
+        self.voice.render(
+            sustain,
+            trigger,
+            p.accent,
+            note_to_frequency(p.note),
+            self.harmonics_lp,
+            p.timbre,
+            p.morph,
+            &mut temp,
+            out,
+            aux,
+        );
+        self.temp = temp;
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2234,6 +2592,25 @@ mod tests {
             energy += out.iter().map(|v| v * v).sum::<f32>();
         }
         assert!(energy > 0.0, "the noise engine sings: {energy}");
+    }
+
+    #[test]
+    fn modal_engine_rings() {
+        let mut eng = ModalEngine::new();
+        let mut out = vec![0.0_f32; 64];
+        let mut aux = vec![0.0_f32; 64];
+        for (h, tb, mo) in [(0.2, 0.3, 0.3), (0.5, 0.5, 0.5), (0.8, 0.7, 0.6)] {
+            // strike on the first block, then let it ring
+            let mut energy = 0.0;
+            for blk in 0..200 {
+                let trig = if blk == 0 { TRIGGER_RISING_EDGE | TRIGGER_HIGH } else { TRIGGER_HIGH };
+                let p = EngineParameters { trigger: trig, note: 48.0, harmonics: h, timbre: tb, morph: mo, ..Default::default() };
+                eng.render(&p, &mut out, &mut aux);
+                assert!(out.iter().chain(aux.iter()).all(|v| v.is_finite() && v.abs() <= 8.0), "h={h} bounded");
+                energy += out.iter().map(|v| v * v).sum::<f32>();
+            }
+            assert!(energy > 1e-7, "modal rings at h={h}: {energy}");
+        }
     }
 
     #[test]

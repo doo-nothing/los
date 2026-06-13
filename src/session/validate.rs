@@ -1867,9 +1867,9 @@ fn check_plaits(
     r: &mut Report,
     pending: &mut Vec<PendingTrackRef>,
 ) {
-    const ENGINES: [&str; 9] = [
+    const ENGINES: [&str; 10] = [
         "noise", "fm", "virtual_analog", "chord", "waveshaping", "additive", "swarm", "grain",
-        "wavetable",
+        "wavetable", "modal",
     ];
     if let Some(e) = p.engine.as_deref() {
         if !ENGINES.contains(&e) {
