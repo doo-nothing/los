@@ -7,9 +7,9 @@
 //! into a main output (the audio ring) and an aux output (published as
 //! plaits/N/aux). Engines run at 48 kHz.
 //!
-//! v1 ships the filtered-noise and 2-operator FM engines; the rest
-//! (virtual-analog, waveshaping, chord, wavetable, physical, drums,
-//! speech…) land incrementally.
+//! All 16 firmware engines are available (noise, fm, virtual_analog,
+//! chord, waveshaping, additive, swarm, grain, wavetable, modal, string,
+//! bass/snare/hi-hat drums, particle, speech — see `ENGINE_NAMES`).
 
 // max/min, not clamp, where modbus values land: clamp(NaN) is NaN and a
 // stale channel must die at the boundary.
@@ -595,7 +595,7 @@ fn draw_ui(
                 Line::from("  amp        an envelope channel shapes the level"),
                 Line::from(""),
                 Line::from("Engines run at 48 kHz, resampled to the session."),
-                Line::from("(v1: noise + fm; more engines follow.)"),
+                Line::from("(all 16 engines)"),
                 Line::from(""),
                 Line::from("  ? closes help"),
             ])

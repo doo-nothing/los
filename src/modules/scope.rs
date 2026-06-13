@@ -709,7 +709,7 @@ pub fn run(instance: usize) -> Result<()> {
                             history.undo(&mut *s)
                         }));
                     }
-                    KeyCode::Char('@') => {
+                    KeyCode::Char('@') | KeyCode::Enter => {
                         count.clear();
                         let mut s = state.lock().unwrap();
                         if s.selected == ROW_MODBUS_CH || s.selected == ROW_SOURCE {

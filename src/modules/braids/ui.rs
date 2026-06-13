@@ -7,7 +7,8 @@
 //! linearly resampled to the session rate. Publishes braids/N/level
 //! (an output follower) on the bus.
 //!
-//! v1 ships the thirteen analog models; the digital models follow.
+//! All 48 firmware models are available — the 13 analog-family
+//! models and the 35 digital models (see `MODEL_NAMES`).
 
 // max/min, not clamp, where modbus values land: clamp(NaN) is NaN and a
 // stale channel must die at the boundary.
@@ -525,7 +526,7 @@ fn draw_ui(
                 Line::from("  amp      an envelope channel shapes the level"),
                 Line::from(""),
                 Line::from("Renders at 96 kHz, resampled to the session rate."),
-                Line::from("(v1: the analog models; digital models follow.)"),
+                Line::from("(all 48 models: analog + digital)"),
                 Line::from(""),
                 Line::from("  ? closes help"),
             ])

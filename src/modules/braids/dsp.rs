@@ -986,9 +986,9 @@ const INTERVALS: [i16; 65] = [
     24 * SEMI - 4, 24 * SEMI, 24 * SEMI,
 ];
 
-/// The braids macro-oscillator models. The analog models (0..=12) are
-/// ported here; the digital models (13+) dispatch to the digital
-/// oscillator (ported in a later pass; currently silent placeholders).
+/// The braids macro-oscillator models. The analog-family models (0..=12)
+/// render here; the digital models (13..=47) dispatch to the
+/// [`DigitalOscillator`]. All 48 firmware models are implemented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MacroModel {
     CSaw,
