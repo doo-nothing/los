@@ -462,20 +462,25 @@ ring; `warps/N/aux` publishes the secondary output. Every knob has a
 vocoder is a 16-band simplification; the cross-mod algorithms are
 exact.)
 
-**braids** (the Mutable Instruments macro-oscillator, analog models):
-a monophonic synth voice driven by a note track. `model` ∈ csaw,
-morph, saw_square, sine_triangle, buzz, square/saw_sub,
-square/saw_sync, triple saw/square/triangle/sine — each a different
-oscillator topology (morph is the famous tri→saw→square→sine sweep
-through a fold/fuzz stage; the sync and sub models are classic
-analog tricks; the triples are three detuned voices). `timbre` and
+**braids** (the Mutable Instruments macro-oscillator — the complete
+firmware bank of 48 models): a monophonic synth voice driven by a
+note track. `model` selects the synthesis topology, all 48 ported:
+the analog family (csaw, morph, saw_square, sine_triangle, buzz,
+square/saw_sub, square/saw_sync, triple saw/square/triangle/sine),
+the digital models (triple_ring_mod, saw_swarm, saw_comb, toy, the
+four digital_filter shapes, vosim, vowel, vowel_fof, harmonics, fm,
+feedback_fm, chaotic_feedback_fm), the physical models (plucked,
+bowed, blown, fluted, struck_bell, struck_drum), the analog drums
+(kick, snare, cymbal), the wavetable scanners (wavetables, wave_map,
+wave_line, wave_paraphonic), the noise models (filtered_noise,
+twin_peaks_noise, clocked_noise, particle_noise, granular_cloud), and
+the oddballs (digital_modulation, question_mark). `timbre` and
 `color` are the model's two parameters (they mean different things
-per model — fold depth, pulse width, detune, sub level). `notes_src`
-sets the pitch, `amp_src` (an envelope channel) shapes the level —
-like the voice and elements modules. Every knob has a `*_src` twin.
-Renders at 96 kHz, resampled to the session rate. (The digital
-models — FM, physical models, wavetables, drums — arrive in later
-releases.)
+per model — fold depth, pulse width, detune, FM ratio, decay,
+brightness…). `notes_src` sets the pitch, `amp_src` (an envelope
+channel) shapes the level — like the voice and elements modules.
+Every knob has a `*_src` twin. Renders at 96 kHz, resampled to the
+session rate.
 
 **clouds** (the Mutable Instruments granular processor, full port of
 the granular core): a stereo FX that records its `input` into a
