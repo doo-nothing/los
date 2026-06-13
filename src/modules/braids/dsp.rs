@@ -62,6 +62,10 @@ pub struct Tables {
     // wavetable data (braids_wavetable.bin)
     pub wt_waves: Vec<u8>,                 // 33024 (256 waves × 129)
     pub wt_map: Vec<u8>,                   // 256
+    // granular/question-mark tables (braids_granular_tables.bin)
+    pub granular_envelope_rate: Vec<u16>,  // 257
+    pub granular_envelope: Vec<u16>,       // 513
+    pub wt_code: Vec<u8>,                  // 1064
 }
 
 const BRAIDS_FORMANT_TABLES_BIN: &[u8] = include_bytes!("braids_formant_tables.bin");
@@ -69,6 +73,7 @@ const BRAIDS_NOISE_TABLES_BIN: &[u8] = include_bytes!("braids_noise_tables.bin")
 const BRAIDS_BOWING_TABLES_BIN: &[u8] = include_bytes!("braids_bowing_tables.bin");
 const BRAIDS_WIND_TABLES_BIN: &[u8] = include_bytes!("braids_wind_tables.bin");
 const BRAIDS_WAVETABLE_BIN: &[u8] = include_bytes!("braids_wavetable.bin");
+const BRAIDS_GRANULAR_TABLES_BIN: &[u8] = include_bytes!("braids_granular_tables.bin");
 
 const BRAIDS_DIGITAL_TABLES_BIN: &[u8] = include_bytes!("braids_digital_tables.bin");
 
@@ -207,6 +212,17 @@ pub fn tables() -> &'static Tables {
         let n_wtm = u32::from_le_bytes([wt[4], wt[5], wt[6], wt[7]]) as usize;
         let wt_waves = wt[8..8 + n_wtw].to_vec();
         let wt_map = wt[8 + n_wtw..8 + n_wtw + n_wtm].to_vec();
+        // granular tables: header of 3 u32 lengths, then env_rate(u16),
+        // envelope(u16), wt_code(u8)
+        let gd = BRAIDS_GRANULAR_TABLES_BIN;
+        let glen = |i: usize| {
+            u32::from_le_bytes([gd[i * 4], gd[i * 4 + 1], gd[i * 4 + 2], gd[i * 4 + 3]]) as usize
+        };
+        let (n_ger, n_ge, n_wtc) = (glen(0), glen(1), glen(2));
+        let mut go = 12;
+        let granular_envelope_rate = take_u16(gd, &mut go, n_ger);
+        let granular_envelope = take_u16(gd, &mut go, n_ge);
+        let wt_code = gd[go..go + n_wtc].to_vec();
         Tables {
             wav_sine,
             increments,
@@ -234,6 +250,9 @@ pub fn tables() -> &'static Tables {
             blowing_jet,
             wt_waves,
             wt_map,
+            granular_envelope_rate,
+            granular_envelope,
+            wt_code,
         }
     })
 }
@@ -1009,10 +1028,14 @@ pub enum MacroModel {
     WaveMap,
     WaveLine,
     WaveParaphonic,
+    GranularCloud,
+    ParticleNoise,
+    DigitalModulation,
+    QuestionMark,
 }
 
 /// All macro models in panel order — parallel to [`MODEL_NAMES`].
-pub const MODELS: [MacroModel; 44] = [
+pub const MODELS: [MacroModel; 48] = [
     MacroModel::CSaw,
     MacroModel::Morph,
     MacroModel::SawSquare,
@@ -1057,9 +1080,13 @@ pub const MODELS: [MacroModel; 44] = [
     MacroModel::WaveMap,
     MacroModel::WaveLine,
     MacroModel::WaveParaphonic,
+    MacroModel::GranularCloud,
+    MacroModel::ParticleNoise,
+    MacroModel::DigitalModulation,
+    MacroModel::QuestionMark,
 ];
 
-pub const MODEL_NAMES: [&str; 44] = [
+pub const MODEL_NAMES: [&str; 48] = [
     "csaw",
     "morph",
     "saw_square",
@@ -1104,6 +1131,10 @@ pub const MODEL_NAMES: [&str; 44] = [
     "wave_map",
     "wave_line",
     "wave_paraphonic",
+    "granular_cloud",
+    "particle_noise",
+    "digital_modulation",
+    "question_mark",
 ];
 
 pub struct MacroOscillator {
@@ -1234,6 +1265,18 @@ impl MacroOscillator {
             MacroModel::WaveLine => self.render_digital(DigitalShape::WaveLine, sync, buffer, size),
             MacroModel::WaveParaphonic => {
                 self.render_digital(DigitalShape::WaveParaphonic, sync, buffer, size)
+            }
+            MacroModel::GranularCloud => {
+                self.render_digital(DigitalShape::GranularCloud, sync, buffer, size)
+            }
+            MacroModel::ParticleNoise => {
+                self.render_digital(DigitalShape::ParticleNoise, sync, buffer, size)
+            }
+            MacroModel::DigitalModulation => {
+                self.render_digital(DigitalShape::DigitalModulation, sync, buffer, size)
+            }
+            MacroModel::QuestionMark => {
+                self.render_digital(DigitalShape::QuestionMark, sync, buffer, size)
             }
         }
     }
@@ -1499,6 +1542,10 @@ pub enum DigitalShape {
     WaveMap,
     WaveLine,
     WaveParaphonic,
+    GranularCloud,
+    ParticleNoise,
+    DigitalModulation,
+    QuestionMark,
 }
 
 const NUM_FORMANTS: usize = 5;
@@ -1526,6 +1573,23 @@ const DRUM_PARTIAL_DECAY_LONG: [i32; NUM_DRUM_PARTIALS] =
     [65533, 65531, 65531, 65531, 65531, 65516];
 const DRUM_PARTIAL_DECAY_SHORT: [i32; NUM_DRUM_PARTIALS] =
     [65083, 64715, 64715, 64715, 64715, 62312];
+
+// ── granular / modulation / particle / question-mark models ──────────────────
+
+const PARTICLE_NOISE_DECAY: i64 = 64763;
+const RESONANCE_SQUARED: i64 = 32506; // 32768 * 0.996 * 0.996
+const RESONANCE_FACTOR: i64 = 32636; // 32768 * 0.996
+const CONSTELLATION_Q: [i32; 4] = [23100, -23100, -23100, 23100];
+const CONSTELLATION_I: [i32; 4] = [23100, 23100, -23100, -23100];
+
+/// One grain of the GRANULAR_CLOUD model.
+#[derive(Debug, Clone, Copy, Default)]
+struct Grain {
+    phase: u32,
+    phase_increment: u32,
+    envelope_phase: u32,
+    envelope_phase_increment: u32,
+}
 
 // ── wavetable models ─────────────────────────────────────────────────────────
 
@@ -1872,6 +1936,21 @@ pub struct DigitalOscillator {
     wg_bore: Vec<i16>,
     // wavetable state (paraphonic reuses saw_phase[0..4])
     smoothed_parameter: i32,
+    // granular / modulation / particle / question-mark state
+    grain: [Grain; 4],
+    dmd_symbol_phase: u32,
+    dmd_symbol_count: u16,
+    dmd_filter_state: i32,
+    dmd_data_byte: u8,
+    pno_amplitude: u16,
+    pno3_filter_state: [[i32; 2]; 3],
+    pno3_filter_scale: [i32; 3],
+    pno3_filter_coefficient: [i32; 3],
+    qm_rng_state: u32,
+    qm_cycle_phase: u32,
+    qm_sample: i32,
+    qm_cycle_phase_increment: i32,
+    qm_seed: i32,
 }
 
 impl Default for DigitalOscillator {
@@ -1944,6 +2023,20 @@ impl Default for DigitalOscillator {
             wg_neck: vec![0; WG_NECK_LENGTH],
             wg_bore: vec![0; WG_BORE_LENGTH],
             smoothed_parameter: 0,
+            grain: [Grain::default(); 4],
+            dmd_symbol_phase: 0,
+            dmd_symbol_count: 0,
+            dmd_filter_state: 0,
+            dmd_data_byte: 0,
+            pno_amplitude: 0,
+            pno3_filter_state: [[0; 2]; 3],
+            pno3_filter_scale: [0; 3],
+            pno3_filter_coefficient: [0; 3],
+            qm_rng_state: 0,
+            qm_cycle_phase: 0,
+            qm_sample: 0,
+            qm_cycle_phase_increment: 0,
+            qm_seed: 0,
         }
     }
 }
@@ -2029,6 +2122,20 @@ impl DigitalOscillator {
         self.wg_neck.iter_mut().for_each(|s| *s = 0);
         self.wg_bore.iter_mut().for_each(|s| *s = 0);
         self.smoothed_parameter = 0;
+        self.grain = [Grain::default(); 4];
+        self.dmd_symbol_phase = 0;
+        self.dmd_symbol_count = 0;
+        self.dmd_filter_state = 0;
+        self.dmd_data_byte = 0;
+        self.pno_amplitude = 0;
+        self.pno3_filter_state = [[0; 2]; 3];
+        self.pno3_filter_scale = [0; 3];
+        self.pno3_filter_coefficient = [0; 3];
+        self.qm_rng_state = 0;
+        self.qm_cycle_phase = 0;
+        self.qm_sample = 0;
+        self.qm_cycle_phase_increment = 0;
+        self.qm_seed = 0;
         // previous_parameter is NOT reset by Init in the firmware
         self.phase = 0;
         self.strike = true;
@@ -2104,7 +2211,234 @@ impl DigitalOscillator {
             DigitalShape::WaveMap => self.render_wave_map(sync, buffer, size),
             DigitalShape::WaveLine => self.render_wave_line(sync, buffer, size),
             DigitalShape::WaveParaphonic => self.render_wave_paraphonic(buffer, size),
+            DigitalShape::GranularCloud => self.render_granular_cloud(buffer, size),
+            DigitalShape::ParticleNoise => self.render_particle_noise(buffer, size),
+            DigitalShape::DigitalModulation => self.render_digital_modulation(buffer, size),
+            DigitalShape::QuestionMark => self.render_question_mark(buffer, size),
         }
+    }
+
+    /// GRANULAR_CLOUD — four sine grains with randomly seeded pitch and
+    /// envelope rate (parameter_0 = grain length, parameter_1 = pitch
+    /// spread).
+    fn render_granular_cloud(&mut self, buffer: &mut [i16], size: usize) {
+        let t = tables();
+        let env_rate =
+            (t.granular_envelope_rate[(self.parameter[0] as usize >> 7).min(256)] as u32) << 3;
+        let phase_increment = self.phase_increment;
+        for gi in 0..4 {
+            if self.grain[gi].envelope_phase > (1 << 24)
+                || self.grain[gi].envelope_phase_increment == 0
+            {
+                self.grain[gi].envelope_phase_increment = 0;
+                if (self.rng_lcg() & 0xffff) < 0x4000 {
+                    let pitch_mod = (self.qm_next_sample() as i32 * self.parameter[1] as i32) >> 16;
+                    let phi = (phase_increment >> 8) as i32;
+                    let mut inc = phase_increment;
+                    if pitch_mod < 0 {
+                        inc = inc.wrapping_add((phi * (pitch_mod >> 8)) as u32);
+                    } else {
+                        inc = inc.wrapping_add((phi * (pitch_mod >> 7)) as u32);
+                    }
+                    let g = &mut self.grain[gi];
+                    g.envelope_phase_increment = env_rate;
+                    g.envelope_phase = 0;
+                    g.phase_increment = inc;
+                }
+            }
+        }
+        for b in buffer.iter_mut().take(size) {
+            let mut sample = 0i32;
+            for g in self.grain.iter_mut() {
+                g.phase = g.phase.wrapping_add(g.phase_increment);
+                g.envelope_phase = g.envelope_phase.wrapping_add(g.envelope_phase_increment);
+                let env =
+                    t.granular_envelope[((g.envelope_phase >> 16) as usize).min(512)] as i32;
+                sample += interpolate824(&t.wav_sine, g.phase) * env >> 17;
+            }
+            *b = clip16(sample) as i16;
+        }
+    }
+
+    /// PARTICLE_NOISE — sparse noise impulses through three tuned
+    /// resonators (parameter_0 = density, parameter_1 = pitch spread).
+    /// Rendered half-rate, upsampled 2×.
+    fn render_particle_noise(&mut self, buffer: &mut [i16], size: usize) {
+        let t = tables();
+        let mut amplitude = self.pno_amplitude;
+        let density = 1024 + self.parameter[0] as u32;
+        let mut y = self.pno3_filter_state;
+        let mut s = self.pno3_filter_scale;
+        let mut c = self.pno3_filter_coefficient;
+        let mut j = 0;
+        while j < size {
+            let noise = self.rng_lcg();
+            if (noise & 0x7fffff) < density {
+                amplitude = 65535;
+                let noise_a = ((noise & 0x0fff) as i32) - 0x800;
+                let noise_b = (((noise >> 15) & 0x1fff) as i32) - 0x1000;
+                let offsets = [0x600, 0x980, 0x790];
+                let muls = [
+                    3 * noise_a * self.parameter[1] as i32 >> 17,
+                    noise_a * self.parameter[1] as i32 >> 15,
+                    noise_b * self.parameter[1] as i32 >> 16,
+                ];
+                for k in 0..3 {
+                    let pp = (self.pitch as i32 + muls[k] + offsets[k]).clamp(0, 16383);
+                    c[k] = (interpolate824_u16(&t.resonator_coefficient, (pp as u32) << 17) as i64
+                        * RESONANCE_FACTOR
+                        >> 15) as i32;
+                    s[k] = interpolate824_u16(&t.resonator_scale, (pp as u32) << 17);
+                }
+            }
+            let sample = ((noise as i16 as i32) * amplitude as i32) >> 16;
+            amplitude = ((amplitude as i64 * PARTICLE_NOISE_DECAY) >> 16) as u16;
+            let mut acc = 0i32;
+            for k in 0..3 {
+                let mut y0 = if sample > 0 {
+                    sample * s[k] >> 16
+                } else {
+                    -((-sample) * s[k] >> 16)
+                };
+                y0 += (y[k][0] as i64 * c[k] as i64 >> 15) as i32;
+                y0 -= (y[k][1] as i64 * RESONANCE_SQUARED >> 15) as i32;
+                y0 = clip16(y0);
+                y[k][1] = y[k][0];
+                y[k][0] = y0;
+                acc += y0;
+            }
+            acc = clip16(acc);
+            buffer[j] = acc as i16;
+            if j + 1 < size {
+                buffer[j + 1] = acc as i16;
+            }
+            j += 2;
+        }
+        self.pno_amplitude = amplitude;
+        self.pno3_filter_state = y;
+        self.pno3_filter_scale = s;
+        self.pno3_filter_coefficient = c;
+    }
+
+    /// DIGITAL_MODULATION — a QPSK data-stream voice: a sine carrier
+    /// modulated by a constellation driven by a (parameter_1-seeded) symbol
+    /// stream at a parameter_0 baud rate.
+    fn render_digital_modulation(&mut self, buffer: &mut [i16], size: usize) {
+        let t = tables();
+        let symbol_stream_phase_increment = compute_phase_increment(
+            (self.pitch as i32 - 1536 + ((self.parameter[0] as i32 - 32767) >> 3)) as i16,
+        );
+        if self.strike {
+            self.dmd_symbol_count = 0;
+            self.strike = false;
+        }
+        let mut symbol_stream_phase = self.dmd_symbol_phase;
+        let mut data_byte = self.dmd_data_byte;
+        for b in buffer.iter_mut().take(size) {
+            self.phase = self.phase.wrapping_add(self.phase_increment);
+            symbol_stream_phase = symbol_stream_phase.wrapping_add(symbol_stream_phase_increment);
+            if symbol_stream_phase < symbol_stream_phase_increment {
+                self.dmd_symbol_count = self.dmd_symbol_count.wrapping_add(1);
+                if self.dmd_symbol_count & 3 == 0 {
+                    if self.dmd_symbol_count >= (64 + 4 * 256) {
+                        self.dmd_symbol_count = 0;
+                    }
+                    if self.dmd_symbol_count < 32 {
+                        data_byte = 0x00;
+                    } else if self.dmd_symbol_count < 48 {
+                        data_byte = 0x99;
+                    } else if self.dmd_symbol_count < 64 {
+                        data_byte = 0xcc;
+                    } else {
+                        self.dmd_filter_state =
+                            (self.dmd_filter_state * 3 + self.parameter[1] as i32) >> 2;
+                        data_byte = (self.dmd_filter_state >> 7) as u8;
+                    }
+                } else {
+                    data_byte >>= 2;
+                }
+            }
+            let i = interpolate824(&t.wav_sine, self.phase);
+            let q = interpolate824(&t.wav_sine, self.phase.wrapping_add(1 << 30));
+            let idx = (data_byte & 3) as usize;
+            *b = ((CONSTELLATION_Q[idx] * q >> 15) + (CONSTELLATION_I[idx] * i >> 15)) as i16;
+        }
+        self.dmd_symbol_phase = symbol_stream_phase;
+        self.dmd_data_byte = data_byte;
+    }
+
+    /// QUESTION_MARK — a morse-code "?" beep (·· − − ··) over a sine, with a
+    /// noisy radio-static bed (parameter_0 = speed, parameter_1 = noise/drive).
+    fn render_question_mark(&mut self, buffer: &mut [i16], size: usize) {
+        let t = tables();
+        if self.strike {
+            self.qm_rng_state = 0;
+            self.qm_cycle_phase = 0;
+            self.qm_sample = 10;
+            self.qm_cycle_phase_increment = -1;
+            self.qm_seed = 32767;
+            self.strike = false;
+        }
+        let mut phase = self.phase;
+        let increment = self.phase_increment;
+        let dit_duration = 3600 + ((32767 - self.parameter[0] as i32) >> 2) as u32;
+        let noise_threshold = 1024 + (self.parameter[1] as i32 >> 3);
+        for b in buffer.iter_mut().take(size) {
+            phase = phase.wrapping_add(increment);
+            let mut sample = if self.qm_rng_state != 0 {
+                (interpolate824(&t.wav_sine, phase) * 3) >> 2
+            } else {
+                0
+            };
+            self.qm_cycle_phase = self.qm_cycle_phase.wrapping_add(1);
+            if self.qm_cycle_phase > dit_duration {
+                self.qm_sample -= 1;
+                if self.qm_sample == 0 {
+                    self.qm_cycle_phase_increment += 1;
+                    self.qm_rng_state = if self.qm_rng_state != 0 { 0 } else { 1 };
+                    let address = (self.qm_cycle_phase_increment >> 2) as usize;
+                    let shift = ((self.qm_cycle_phase_increment & 0x3) << 1) as u32;
+                    let code = t.wt_code[address.min(t.wt_code.len() - 1)] as u32;
+                    self.qm_sample = (2 << ((code >> shift) & 3)) - 1;
+                    if self.qm_sample == 15 {
+                        self.qm_sample = 100;
+                        self.qm_rng_state = 0;
+                        self.qm_cycle_phase_increment = -1;
+                    }
+                    phase = 1 << 30;
+                }
+                self.qm_cycle_phase = 0;
+            }
+            self.qm_seed += (self.qm_next_sample() as i32) >> 2;
+            let mut noise_intensity = (self.qm_seed >> 8).abs();
+            if noise_intensity < noise_threshold {
+                noise_intensity = noise_threshold;
+            }
+            if noise_intensity > 16000 {
+                noise_intensity = 16000;
+            }
+            let mut noise = self.qm_next_sample() as i32 * noise_intensity >> 15;
+            noise = noise * t.wav_sine[((phase >> 22) & 0xff) as usize] as i32 >> 15;
+            sample += noise;
+            sample = clip16(sample);
+            let distorted = sample * sample >> 14;
+            sample += distorted * self.parameter[1] as i32 >> 15;
+            *b = clip16(sample) as i16;
+        }
+        self.phase = phase;
+    }
+
+    /// stmlib `Random::GetWord` (the global LCG, reused for the granular,
+    /// particle, and question-mark models).
+    #[inline]
+    fn rng_lcg(&mut self) -> u32 {
+        self.next_word()
+    }
+
+    /// stmlib `Random::GetSample` for the same models.
+    #[inline]
+    fn qm_next_sample(&mut self) -> i16 {
+        self.next_sample()
     }
 
     /// WAVETABLES — scan one of 20 wavetables (parameter_1 selects, with
