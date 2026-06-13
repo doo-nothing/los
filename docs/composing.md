@@ -475,6 +475,22 @@ Renders at 96 kHz, resampled to the session rate. (The digital
 models — FM, physical models, wavetables, drums — arrive in later
 releases.)
 
+**clouds** (the Mutable Instruments granular processor, full port of
+the granular core): a stereo FX that records its `input` into a
+3-second buffer and granulates it into a cloud. `position` is where
+in the buffer grains are drawn, `size` their length, `pitch`
+transposes them (±2 octaves), `density` is the grain rate (centre is
+silent; both directions thicken — probabilistic one way, regular the
+other), `texture` morphs the grain window and adds diffusion past
+75%, `dry_wet` blends, `spread` scatters grains across the stereo
+field, `feedback` re-injects the cloud, and `reverb` is the space.
+`freeze` holds the buffer (stops recording) so you can play a frozen
+texture. Every knob has a `*_src` twin — an LFO on `position`, a
+sequence on `pitch`, an envelope on `density`… Patch a pad, a drum
+break, or another voice to the input and granulate it; publishes
+`clouds/N/level`. (v1 is the granular playback mode; the stretch,
+looping-delay and spectral modes are follow-ups.)
+
 **mixer**: per-track `level` (0–1), `pan` (−1–1), `drive` (0–1), 3-band
 EQ (±15 dB, `eq_freq` 0–1), `mute`/`solo`; a master strip with the
 same console plus `master_width` (0–2).
@@ -514,10 +530,11 @@ Sources:
 | `marbles/N/` | `t1`–`t3` (random gates; also note sources), `x1`–`x3`, `y` (random CV) |
 | `warps/N/` | `aux` (the secondary cross-mod output) |
 | `braids/N/` | `level` (the output follower) |
+| `clouds/N/` | `level` (the output follower) |
 | `template/N/` | `lfo` |
 
 Audio `input` fields are 2-segment: a producing module (`voice`,
-`swarm`, `tone`, `template`, `delay`, `filterbank`, `streams`, `warps`) or a mixer virtual
+`swarm`, `tone`, `template`, `delay`, `filterbank`, `streams`, `warps`, `clouds`) or a mixer virtual
 (`send/0`, `send/1`, `mix/0`). Addresses are names, not channel
 numbers — they survive restarts, and a binding to a module not in the
 file is legal-but-dead until `los add` brings it up (check warns).

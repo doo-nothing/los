@@ -8,7 +8,7 @@
 
 use anyhow::Result;
 use los::{
-    badge, braids, branches, conductor, delay, dld, dpo, edges, elements, envelope, filterbank, frames, grids, lfo, marbles, mixer, peaks, rings,
+    badge, braids, branches, clouds, conductor, delay, dld, dpo, edges, elements, envelope, filterbank, frames, grids, lfo, marbles, mixer, peaks, rings,
     sampler, stages, streams, tides, warps,
     scope,
     sequencer,
@@ -117,6 +117,7 @@ fn usage() {
     eprintln!("  marbles            Random sampler (Mutable Instruments Marbles): t/x deja-vu");
     eprintln!("  warps              Meta-modulator (Mutable Instruments Warps): ring/fold/vocoder");
     eprintln!("  braids             Macro-oscillator (Mutable Instruments Braids): analog models");
+    eprintln!("  clouds             Granular processor (Mutable Instruments Clouds): grains + reverb");
     eprintln!("  badge              Los faceplate (beat-synced animation, session info)");
     eprintln!();
     eprintln!("Aliases:");
@@ -160,6 +161,7 @@ fn dispatch_module(name: &str, instance: usize) -> Result<()> {
         "marbles" => marbles::run(instance),
         "warps" => warps::run(instance),
         "braids" => braids::run(instance),
+        "clouds" => clouds::run(instance),
         "badge" => badge::run(instance),
         other => anyhow::bail!("unknown module: {other}"),
     }

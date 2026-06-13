@@ -27,7 +27,7 @@ use std::path::Path;
 use crate::routing::{output_labels, SourceAddr};
 use crate::state::{
     DelayParams, DldParams, DpoParamsState, ElementsParams, EnvelopeParams, FilterbankParams,
-    BraidsParams, BranchesParams, EdgesParams, FramesParams, GridsParams, LfoParams, MacroCmd, MarblesParams, MixerParams,
+    BraidsParams, BranchesParams, CloudsParams, EdgesParams, FramesParams, GridsParams, LfoParams, MacroCmd, MarblesParams, MixerParams,
     PeaksParams, RingsParams, SamplerParams, ScopeParams, SequencerParams, SessionState,
     StagesParams,
     StepParam,
@@ -340,6 +340,11 @@ fn validate_session(st: &SessionState, r: &mut Report) {
             "braids" => {
                 if let Some(p) = decode::<BraidsParams>(value, &loc, r) {
                     check_braids(&p, &loc, &declared, r, &mut pending);
+                }
+            }
+            "clouds" => {
+                if let Some(p) = decode::<CloudsParams>(value, &loc, r) {
+                    check_clouds(&p, &loc, &declared, r);
                 }
             }
             "warps" => {
@@ -1847,6 +1852,43 @@ fn check_stages(
     }
 }
 
+/// Clouds (modules/clouds): the nine knob ranges, their srcs, the
+/// stereo audio input.
+fn check_clouds(
+    p: &CloudsParams,
+    loc: &str,
+    declared: &BTreeSet<(String, usize)>,
+    r: &mut Report,
+) {
+    for (name, v) in [
+        ("position", p.position),
+        ("size", p.size),
+        ("pitch", p.pitch),
+        ("density", p.density),
+        ("texture", p.texture),
+        ("dry_wet", p.dry_wet),
+        ("spread", p.spread),
+        ("feedback", p.feedback),
+        ("reverb", p.reverb),
+    ] {
+        range01(v, name, loc, r);
+    }
+    check_input(&p.input, "input", loc, declared, r);
+    for (field, src) in [
+        ("position_src", &p.position_src),
+        ("size_src", &p.size_src),
+        ("pitch_src", &p.pitch_src),
+        ("density_src", &p.density_src),
+        ("texture_src", &p.texture_src),
+        ("dry_wet_src", &p.dry_wet_src),
+        ("spread_src", &p.spread_src),
+        ("feedback_src", &p.feedback_src),
+        ("reverb_src", &p.reverb_src),
+    ] {
+        check_src(src, field, loc, declared, r);
+    }
+}
+
 /// Braids (modules/braids): the macro-oscillator model name, knob
 /// ranges, the timbre/color/level srcs, amp + notes sources.
 fn check_braids(
@@ -2023,12 +2065,12 @@ const SOURCE_MODULES: [&str; 6] = [
 ];
 
 /// Modules that publish audio rings an fx/tape input can claim.
-const AUDIO_MODULES: [&str; 18] =
-    ["voice", "swarm", "tone", "template", "delay", "filterbank", "dld", "sampler", "wasp", "dpo", "elements", "rings", "tides", "peaks", "edges", "streams", "warps", "braids"];
+const AUDIO_MODULES: [&str; 19] =
+    ["voice", "swarm", "tone", "template", "delay", "filterbank", "dld", "sampler", "wasp", "dpo", "elements", "rings", "tides", "peaks", "edges", "streams", "warps", "braids", "clouds"];
 
 /// Canonical module names, for misspelled-pane suggestions.
-const MODULE_NAMES: [&str; 31] =
-    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements", "rings", "tides", "peaks", "branches", "grids", "edges", "frames", "streams", "stages", "marbles", "warps", "braids"];
+const MODULE_NAMES: [&str; 32] =
+    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements", "rings", "tides", "peaks", "branches", "grids", "edges", "frames", "streams", "stages", "marbles", "warps", "braids", "clouds"];
 
 /// An optional `*_src` field: grammar, known output, declared instance.
 /// Returns the parsed address so callers can queue cross-module checks.
@@ -2308,6 +2350,8 @@ const KNOWN_KEYS: &[&str] = &[
     "algorithm", "timbre", "drive1", "drive2", "carrier", "modulator",
     "algorithm_src", "timbre_src", "drive1_src", "drive2_src", "note_src",
     "color", "color_src", "timbre", "level_src",
+    "density", "texture", "dry_wet", "freeze", "position_src", "size_src", "pitch_src",
+    "density_src", "texture_src", "dry_wet_src", "spread_src", "feedback_src", "reverb_src",
     "p1d_src", "p2a_src", "p2b_src", "p2c_src", "p2d_src",
     "patch_inline", "phase", "phase_src", "ping_ms", "ping_src", "pitch", "pitch_src", "playing",
     "pluck", "pluck_src", "prob", "pulses", "quant",
