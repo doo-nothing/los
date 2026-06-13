@@ -457,6 +457,403 @@ impl GranularSamplePlayer {
     }
 }
 
+// ── the reverb (Dattorro topology, clouds tuning) ────────────────────────────
+
+pub const NATIVE_SR: f32 = 32_000.0;
+
+/// An allpass / delay line with interpolated reads (the fx_engine
+/// idiom, matching the elements port).
+struct Ap {
+    buf: Vec<f32>,
+    pos: usize,
+}
+
+impl Ap {
+    fn new(len: usize) -> Self {
+        Ap {
+            buf: vec![0.0; len.max(4)],
+            pos: 0,
+        }
+    }
+    #[inline]
+    fn process(&mut self, x: f32, k: f32) -> f32 {
+        let tail = self.buf[self.pos];
+        let w = x + tail * k;
+        self.buf[self.pos] = w;
+        self.pos = (self.pos + 1) % self.buf.len();
+        tail - w * k
+    }
+    #[inline]
+    fn read_at(&self, offset: f32) -> f32 {
+        let n = self.buf.len();
+        let offset = offset.clamp(1.0, (n - 2) as f32);
+        let int = offset as usize;
+        let frac = offset - int as f32;
+        let a = self.buf[(self.pos + n - 1 - int) % n];
+        let b = self.buf[(self.pos + n - 2 - int) % n];
+        a + (b - a) * frac
+    }
+    #[inline]
+    fn write_at(&mut self, offset: usize, v: f32) {
+        let n = self.buf.len();
+        let off = offset.min(n - 1);
+        self.buf[(self.pos + n - off) % n] = v;
+    }
+}
+
+struct Delay {
+    buf: Vec<f32>,
+    pos: usize,
+}
+
+impl Delay {
+    fn new(len: usize) -> Self {
+        Delay {
+            buf: vec![0.0; len.max(4)],
+            pos: 0,
+        }
+    }
+    #[inline]
+    fn read_tail(&self) -> f32 {
+        self.buf[self.pos]
+    }
+    #[inline]
+    fn read_mod(&self, offset: f32) -> f32 {
+        let n = self.buf.len();
+        let offset = offset.clamp(1.0, (n - 2) as f32);
+        let int = offset as usize;
+        let frac = offset - int as f32;
+        let a = self.buf[(self.pos + n - 1 - int) % n];
+        let b = self.buf[(self.pos + n - 2 - int) % n];
+        a + (b - a) * frac
+    }
+    #[inline]
+    fn write(&mut self, v: f32) {
+        self.buf[self.pos] = v;
+        self.pos = (self.pos + 1) % self.buf.len();
+    }
+}
+
+/// The clouds reverb (fx/reverb.h): the Dattorro/Griesinger topology
+/// — 4 input allpass diffusers + two modulated decay branches.
+pub struct Reverb {
+    ap: [Ap; 4],
+    dap1a: Ap,
+    dap1b: Ap,
+    del1: Delay,
+    dap2a: Ap,
+    dap2b: Ap,
+    del2: Delay,
+    lp1: f32,
+    lp2: f32,
+    lfo_phase: [f32; 2],
+    lfo_inc: [f32; 2],
+    rate_scale: f32,
+    pub amount: f32,
+    pub diffusion: f32,
+    pub time: f32,
+    pub input_gain: f32,
+    pub lp: f32,
+}
+
+impl Reverb {
+    pub fn new(sample_rate: f32) -> Self {
+        let s = sample_rate / NATIVE_SR;
+        let sz = |n: f32| ((n * s) as usize).max(16);
+        Reverb {
+            ap: [
+                Ap::new(sz(113.0)),
+                Ap::new(sz(162.0)),
+                Ap::new(sz(241.0)),
+                Ap::new(sz(399.0)),
+            ],
+            dap1a: Ap::new(sz(1653.0)),
+            dap1b: Ap::new(sz(2038.0)),
+            del1: Delay::new(sz(3411.0)),
+            dap2a: Ap::new(sz(1913.0)),
+            dap2b: Ap::new(sz(1663.0)),
+            del2: Delay::new(sz(4782.0)),
+            lp1: 0.0,
+            lp2: 0.0,
+            lfo_phase: [0.0, 0.0],
+            lfo_inc: [0.5 / sample_rate, 0.3 / sample_rate],
+            rate_scale: s,
+            amount: 0.0,
+            diffusion: 0.625,
+            time: 0.35,
+            input_gain: 0.2,
+            lp: 0.7,
+        }
+    }
+
+    /// Process a stereo block in place (interleaved L/R).
+    pub fn process(&mut self, io: &mut [f32], size: usize) {
+        let kap = self.diffusion;
+        let klp = self.lp;
+        let krt = self.time;
+        let amount = self.amount;
+        let gain = self.input_gain;
+        let s = self.rate_scale;
+        for i in 0..size {
+            for (phase, inc) in self.lfo_phase.iter_mut().zip(self.lfo_inc.iter()) {
+                *phase += inc;
+                if *phase >= 1.0 {
+                    *phase -= 1.0;
+                }
+            }
+            let lfo1 = 0.5 - 0.5 * (self.lfo_phase[0] * std::f32::consts::TAU).cos();
+            let lfo2 = 0.5 - 0.5 * (self.lfo_phase[1] * std::f32::consts::TAU).cos();
+
+            // smear ap1 (clouds: base 10, depth 60)
+            let smear = self.ap[0].read_at((10.0 + 60.0 * lfo1) * s);
+            self.ap[0].write_at((100.0 * s).round() as usize, smear);
+
+            let mut acc = (io[i * 2] + io[i * 2 + 1]) * gain;
+            for ap in self.ap.iter_mut() {
+                acc = ap.process(acc, kap);
+            }
+            let apout = acc;
+
+            // branch 1 → left (del2-modulated, clouds base 4680)
+            let mod_offset = (4680.0 + 100.0 * lfo2) * s;
+            acc = apout + self.del2.read_mod(mod_offset) * krt;
+            self.lp1 += klp * (acc - self.lp1);
+            let mut b = self.lp1;
+            b = self.dap1a.process(b, -kap);
+            b = self.dap1b.process(b, kap);
+            self.del1.write(b);
+            let wet = b * 2.0;
+            io[i * 2] += (wet - io[i * 2]) * amount;
+
+            // branch 2 → right (del1 tail)
+            acc = apout + self.del1.read_tail() * krt;
+            self.lp2 += klp * (acc - self.lp2);
+            let mut b = self.lp2;
+            b = self.dap2a.process(b, kap);
+            b = self.dap2b.process(b, -kap);
+            self.del2.write(b);
+            let wet = b * 2.0;
+            io[i * 2 + 1] += (wet - io[i * 2 + 1]) * amount;
+        }
+    }
+}
+
+// ── the granular diffuser (fx/diffuser.h) ────────────────────────────────────
+
+/// Stereo 4-allpass diffuser (k = 0.625), one chain per channel.
+pub struct Diffuser {
+    apl: [Ap; 4],
+    apr: [Ap; 4],
+    pub amount: f32,
+}
+
+impl Diffuser {
+    pub fn new(sample_rate: f32) -> Self {
+        let s = sample_rate / NATIVE_SR;
+        let sz = |n: f32| ((n * s) as usize).max(8);
+        Diffuser {
+            apl: [
+                Ap::new(sz(126.0)),
+                Ap::new(sz(180.0)),
+                Ap::new(sz(269.0)),
+                Ap::new(sz(444.0)),
+            ],
+            apr: [
+                Ap::new(sz(151.0)),
+                Ap::new(sz(205.0)),
+                Ap::new(sz(245.0)),
+                Ap::new(sz(405.0)),
+            ],
+            amount: 0.0,
+        }
+    }
+
+    pub fn process(&mut self, io: &mut [f32], size: usize) {
+        const K: f32 = 0.625;
+        let amount = self.amount;
+        for i in 0..size {
+            let mut l = io[i * 2];
+            let mut r = io[i * 2 + 1];
+            let dry_l = l;
+            let dry_r = r;
+            for ap in self.apl.iter_mut() {
+                l = ap.process(l, -K);
+            }
+            for ap in self.apr.iter_mut() {
+                r = ap.process(r, -K);
+            }
+            io[i * 2] = dry_l + (l - dry_l) * amount;
+            io[i * 2 + 1] = dry_r + (r - dry_r) * amount;
+        }
+    }
+}
+
+// ── the granular processor (top level) ───────────────────────────────────────
+
+/// Full clouds parameters (the panel).
+#[derive(Debug, Clone, Copy)]
+pub struct CloudsParams {
+    pub position: f32,
+    pub size: f32,
+    pub pitch: f32, // semitones
+    pub density: f32,
+    pub texture: f32,
+    pub dry_wet: f32,
+    pub stereo_spread: f32,
+    pub feedback: f32,
+    pub reverb: f32,
+    pub freeze: bool,
+    pub trigger: bool,
+}
+
+impl Default for CloudsParams {
+    fn default() -> Self {
+        Self {
+            position: 0.5,
+            size: 0.5,
+            pitch: 0.0,
+            density: 0.5,
+            texture: 0.5,
+            dry_wet: 0.5,
+            stereo_spread: 0.0,
+            feedback: 0.0,
+            reverb: 0.0,
+            freeze: false,
+            trigger: false,
+        }
+    }
+}
+
+#[inline]
+fn soft_convert(x: f32) -> f32 {
+    // stmlib SoftLimit-style soft clip
+    let x = x.clamp(-3.0, 3.0);
+    x * (27.0 + x * x) / (27.0 + 9.0 * x * x)
+}
+
+/// Records the input into a circular buffer and granulates it, then
+/// diffuses and reverberates, with a feedback path and a dry/wet mix.
+pub struct GranularProcessor {
+    buf_l: AudioBuffer,
+    buf_r: AudioBuffer,
+    player: GranularSamplePlayer,
+    diffuser: Diffuser,
+    reverb: Reverb,
+    rng: Rng,
+    sample_rate: f32,
+    fb: Vec<f32>,
+    fb_hp_l: f32,
+    fb_hp_r: f32,
+    dry_wet: f32,
+    scratch: Vec<f32>,
+}
+
+impl GranularProcessor {
+    pub fn new(sample_rate: f32, buffer_seconds: f32, seed: u32) -> Self {
+        let n = (sample_rate * buffer_seconds) as usize;
+        Self {
+            buf_l: AudioBuffer::new(n),
+            buf_r: AudioBuffer::new(n),
+            player: GranularSamplePlayer::new(48),
+            diffuser: Diffuser::new(sample_rate),
+            reverb: Reverb::new(sample_rate),
+            rng: Rng::new(seed),
+            sample_rate,
+            fb: vec![0.0; MAX_BLOCK * 2],
+            fb_hp_l: 0.0,
+            fb_hp_r: 0.0,
+            dry_wet: 0.5,
+            scratch: vec![0.0; MAX_BLOCK * 2],
+        }
+    }
+
+    /// Process a block of interleaved stereo audio in place.
+    pub fn process(&mut self, io: &mut [f32], params: &CloudsParams, size: usize) {
+        // 1. feedback into the input (HP-filtered), then record
+        let cutoff = (20.0 + 100.0 * params.feedback * params.feedback) / self.sample_rate;
+        let hp_a = (cutoff * std::f32::consts::TAU).min(0.9);
+        let fb_gain = params.feedback;
+        let mut rec_l = vec![0.0_f32; size];
+        let mut rec_r = vec![0.0_f32; size];
+        for i in 0..size {
+            // high-pass the fed-back signal (one-pole HP)
+            self.fb_hp_l += hp_a * (self.fb[i * 2] - self.fb_hp_l);
+            self.fb_hp_r += hp_a * (self.fb[i * 2 + 1] - self.fb_hp_r);
+            let hp_l = self.fb[i * 2] - self.fb_hp_l;
+            let hp_r = self.fb[i * 2 + 1] - self.fb_hp_r;
+            rec_l[i] = io[i * 2] + fb_gain * hp_l;
+            rec_r[i] = io[i * 2 + 1] + fb_gain * hp_r;
+        }
+        if !params.freeze {
+            self.buf_l.write_block(&rec_l);
+            self.buf_r.write_block(&rec_r);
+        }
+
+        // 2. granular: density → overlap, texture → window shape
+        let density = params.density;
+        let overlap = if density >= 0.53 {
+            (density - 0.53) * 2.12
+        } else if density <= 0.47 {
+            (0.47 - density) * 2.12
+        } else {
+            0.0
+        };
+        let window_shape = if params.texture < 0.75 {
+            params.texture * 1.333
+        } else {
+            1.0
+        };
+        let gp = GranularParams {
+            position: params.position,
+            size: params.size,
+            pitch: params.pitch,
+            overlap: overlap.clamp(0.0, 1.0),
+            window_shape,
+            stereo_spread: params.stereo_spread,
+            trigger: params.trigger,
+        };
+        if self.scratch.len() < size * 2 {
+            self.scratch.resize(size * 2, 0.0);
+        }
+        self.player
+            .play(&self.buf_l, &self.buf_r, &gp, &mut self.scratch, size, &mut self.rng);
+
+        // 3. diffuser (granular mode: texture > 0.75 → diffusion)
+        let diffusion = if params.texture > 0.75 {
+            (params.texture - 0.75) * 4.0
+        } else {
+            0.0
+        };
+        self.diffuser.amount = diffusion.clamp(0.0, 1.0);
+        self.diffuser.process(&mut self.scratch, size);
+
+        // 4. the feedback tap is the granular output BEFORE reverb
+        self.fb[..size * 2].copy_from_slice(&self.scratch[..size * 2]);
+
+        // 5. reverb
+        let reverb_amount = (params.reverb * 0.95).clamp(0.0, 1.0);
+        self.reverb.amount = reverb_amount * 0.54;
+        self.reverb.diffusion = 0.7;
+        self.reverb.time = 0.35 + 0.63 * reverb_amount;
+        self.reverb.input_gain = 0.2;
+        self.reverb.lp = 0.6 + 0.37 * params.feedback;
+        self.reverb.process(&mut self.scratch, size);
+
+        // 6. dry/wet (equal power) + soft clip
+        let post_gain = 1.2;
+        for i in 0..size {
+            self.dry_wet += (params.dry_wet - self.dry_wet) * 0.05;
+            let dw = self.dry_wet.clamp(0.0, 1.0);
+            let fade_in = (dw * std::f32::consts::FRAC_PI_2).sin();
+            let fade_out = (dw * std::f32::consts::FRAC_PI_2).cos();
+            let l = io[i * 2] * fade_out + self.scratch[i * 2] * post_gain * fade_in;
+            let r = io[i * 2 + 1] * fade_out + self.scratch[i * 2 + 1] * post_gain * fade_in;
+            io[i * 2] = soft_convert(l);
+            io[i * 2 + 1] = soft_convert(r);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,6 +969,68 @@ mod tests {
         g.overlap_add(&buf, &buf2, &mut out, &mut env, MAX_BLOCK);
         // phase increment 131072 = 2.0 in 16.16 → 64 samples consumed in 32
         assert_eq!(g.phase_increment, 131072);
+    }
+
+    #[test]
+    fn processor_passes_dry_and_adds_wet() {
+        // dry_wet 0 = clean passthrough; dry_wet up brings in the cloud
+        let mut proc = GranularProcessor::new(48_000.0, 1.0, 0x77);
+        let dry: Vec<f32> = (0..MAX_BLOCK)
+            .flat_map(|i| {
+                let v = (i as f32 * 0.2).sin() * 0.5;
+                [v, v]
+            })
+            .collect();
+        // prime the buffer with several blocks of input
+        let mut params = CloudsParams {
+            dry_wet: 1.0,
+            density: 0.9,
+            size: 0.3,
+            reverb: 0.4,
+            ..Default::default()
+        };
+        let mut io = dry.clone();
+        let mut energy = 0.0;
+        for _ in 0..120 {
+            io.copy_from_slice(&dry);
+            proc.process(&mut io, &params, MAX_BLOCK);
+            assert!(io.iter().all(|v| v.is_finite()), "stays finite");
+            energy += io.iter().map(|v| v * v).sum::<f32>();
+        }
+        assert!(energy > 0.1, "the wet cloud produces sound: {energy}");
+
+        // dry_wet 0 → output ≈ input
+        params.dry_wet = 0.0;
+        for _ in 0..40 {
+            io.copy_from_slice(&dry);
+            proc.process(&mut io, &params, MAX_BLOCK);
+        }
+        let diff: f32 = io
+            .iter()
+            .zip(dry.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum();
+        assert!(diff < 1.0, "dry_wet 0 passes the input through: {diff}");
+    }
+
+    #[test]
+    fn reverb_rings_out() {
+        // an impulse through the reverb produces a decaying tail
+        let mut rev = Reverb::new(48_000.0);
+        rev.amount = 1.0;
+        rev.time = 0.7;
+        let mut io = vec![0.0_f32; MAX_BLOCK * 2];
+        io[0] = 1.0;
+        io[1] = 1.0;
+        rev.process(&mut io, MAX_BLOCK);
+        let mut tail_energy = 0.0;
+        for _ in 0..50 {
+            io.iter_mut().for_each(|v| *v = 0.0);
+            rev.process(&mut io, MAX_BLOCK);
+            tail_energy += io.iter().map(|v| v * v).sum::<f32>();
+            assert!(io.iter().all(|v| v.is_finite()));
+        }
+        assert!(tail_energy > 0.0, "the reverb rings: {tail_energy}");
     }
 
     #[test]
