@@ -909,10 +909,11 @@ pub enum MacroModel {
     DigitalFilterHp,
     Vosim,
     Vowel,
+    VowelFof,
 }
 
 /// All macro models in panel order — parallel to [`MODEL_NAMES`].
-pub const MODELS: [MacroModel; 23] = [
+pub const MODELS: [MacroModel; 24] = [
     MacroModel::CSaw,
     MacroModel::Morph,
     MacroModel::SawSquare,
@@ -936,9 +937,10 @@ pub const MODELS: [MacroModel; 23] = [
     MacroModel::DigitalFilterHp,
     MacroModel::Vosim,
     MacroModel::Vowel,
+    MacroModel::VowelFof,
 ];
 
-pub const MODEL_NAMES: [&str; 23] = [
+pub const MODEL_NAMES: [&str; 24] = [
     "csaw",
     "morph",
     "saw_square",
@@ -962,6 +964,7 @@ pub const MODEL_NAMES: [&str; 23] = [
     "digital_filter_hp",
     "vosim",
     "vowel",
+    "vowel_fof",
 ];
 
 pub struct MacroOscillator {
@@ -1050,6 +1053,9 @@ impl MacroOscillator {
             }
             MacroModel::Vosim => self.render_digital(DigitalShape::Vosim, sync, buffer, size),
             MacroModel::Vowel => self.render_digital(DigitalShape::Vowel, sync, buffer, size),
+            MacroModel::VowelFof => {
+                self.render_digital(DigitalShape::VowelFof, sync, buffer, size)
+            }
         }
     }
 
@@ -1293,6 +1299,26 @@ pub enum DigitalShape {
     DigitalFilterHp,
     Vosim,
     Vowel,
+    VowelFof,
+}
+
+const NUM_FORMANTS: usize = 5;
+
+/// braids' `InterpolateFormantParameter`: bilinear lookup into a 5×5×5
+/// formant table (x = parameter_1, y = parameter_0).
+fn interpolate_formant(table: &[i16], x: i16, y: i16, formant: usize) -> i16 {
+    let x_index = (x >> 13) as usize;
+    let x_mix = ((x as u32) << 3) as u16 as i64;
+    let y_index = (y >> 13) as usize;
+    let y_mix = ((y as u32) << 3) as u16 as i64;
+    let at = |xi: usize, yi: usize| table[xi * 25 + yi * 5 + formant] as i64;
+    let a0 = at(x_index, y_index);
+    let b = at(x_index + 1, y_index);
+    let c0 = at(x_index, y_index + 1);
+    let d = at(x_index + 1, y_index + 1);
+    let a = a0 + ((b - a0) * x_mix >> 16);
+    let c = c0 + ((d - c0) * x_mix >> 16);
+    (a + ((c - a) * y_mix >> 16)) as i16
 }
 
 const FIR4_COEFFICIENTS: [u32; 4] = [10530, 14751, 16384, 14751];
@@ -1336,6 +1362,12 @@ pub struct DigitalOscillator {
     vow_formant_amplitude: [u32; 3],
     vow_consonant_frames: u16,
     vow_noise: u16,
+    // vowel-FOF (fof) state
+    digital_init: bool,
+    fof_svf_lp: [i32; NUM_FORMANTS],
+    fof_svf_bp: [i32; NUM_FORMANTS],
+    fof_previous_sample: i32,
+    fof_next_saw_sample: i32,
 }
 
 impl Default for DigitalOscillator {
@@ -1366,6 +1398,11 @@ impl Default for DigitalOscillator {
             vow_formant_amplitude: [0; 3],
             vow_consonant_frames: 0,
             vow_noise: 0,
+            digital_init: true,
+            fof_svf_lp: [0; NUM_FORMANTS],
+            fof_svf_bp: [0; NUM_FORMANTS],
+            fof_previous_sample: 0,
+            fof_next_saw_sample: 0,
         }
     }
 }
@@ -1411,6 +1448,11 @@ impl DigitalOscillator {
         self.vow_formant_amplitude = [0; 3];
         self.vow_consonant_frames = 0;
         self.vow_noise = 0;
+        self.digital_init = true;
+        self.fof_svf_lp = [0; NUM_FORMANTS];
+        self.fof_svf_bp = [0; NUM_FORMANTS];
+        self.fof_previous_sample = 0;
+        self.fof_next_saw_sample = 0;
         self.phase = 0;
         self.strike = true;
     }
@@ -1444,7 +1486,75 @@ impl DigitalOscillator {
             DigitalShape::DigitalFilterHp => self.render_digital_filter(3, sync, buffer, size),
             DigitalShape::Vosim => self.render_vosim(sync, buffer, size),
             DigitalShape::Vowel => self.render_vowel(buffer, size),
+            DigitalShape::VowelFof => self.render_vowel_fof(buffer, size),
         }
+    }
+
+    /// VOWEL_FOF — the firmware renders the FOF vowel as a bank of five
+    /// state-variable band-pass formants over a half-rate polyblep saw,
+    /// upsampled 2×.
+    fn render_vowel_fof(&mut self, buffer: &mut [i16], size: usize) {
+        let t = tables();
+        let mut amplitudes = [0i16; NUM_FORMANTS];
+        let mut svf_f = [0i16; NUM_FORMANTS];
+        for i in 0..NUM_FORMANTS {
+            let frequency =
+                interpolate_formant(&t.formant_f_data, self.parameter[1], self.parameter[0], i)
+                    as i32
+                    + (12 << 7);
+            svf_f[i] = interpolate824_u16(&t.svf_cutoff, (frequency as u32) << 17) as i16;
+            amplitudes[i] =
+                interpolate_formant(&t.formant_a_data, self.parameter[1], self.parameter[0], i);
+            if self.digital_init {
+                self.fof_svf_lp[i] = 0;
+                self.fof_svf_bp[i] = 0;
+            }
+        }
+        self.digital_init = false;
+
+        let mut phase = self.phase;
+        let mut previous_sample = self.fof_previous_sample;
+        let mut next_saw_sample = self.fof_next_saw_sample;
+        let increment = self.phase_increment << 1;
+        let mut j = 0;
+        while j < size {
+            let mut this_saw_sample = next_saw_sample;
+            next_saw_sample = 0;
+            phase = phase.wrapping_add(increment);
+            if phase < increment {
+                let mut tt = phase.checked_div(increment >> 16).unwrap_or(0);
+                if tt > 65535 {
+                    tt = 65535;
+                }
+                this_saw_sample -= ((tt as u64 * tt as u64) >> 18) as i32;
+                tt = 65535 - tt;
+                next_saw_sample += ((tt as u64 * tt as u64) >> 18) as i32;
+            }
+            next_saw_sample += (phase >> 17) as i32;
+            let input = this_saw_sample;
+            let mut out = 0i32;
+            #[allow(clippy::needless_range_loop)] // parallel svf_f / fof_svf_* arrays
+            for i in 0..NUM_FORMANTS {
+                let notch = input - (self.fof_svf_bp[i] >> 6);
+                self.fof_svf_lp[i] += (svf_f[i] as i64 * self.fof_svf_bp[i] as i64 >> 15) as i32;
+                self.fof_svf_lp[i] = clip16(self.fof_svf_lp[i]);
+                let hp = notch - self.fof_svf_lp[i];
+                self.fof_svf_bp[i] += (svf_f[i] as i64 * hp as i64 >> 15) as i32;
+                self.fof_svf_bp[i] = clip16(self.fof_svf_bp[i]);
+                // firmware multiplies by amplitudes[0] for every formant
+                out += (self.fof_svf_bp[i] as i64 * amplitudes[0] as i64 >> 17) as i32;
+            }
+            out = clip16(out);
+            buffer[j] = ((out + previous_sample) >> 1) as i16;
+            if j + 1 < size {
+                buffer[j + 1] = out as i16;
+            }
+            previous_sample = out;
+            j += 2;
+        }
+        self.phase = phase;
+        self.fof_next_saw_sample = next_saw_sample;
+        self.fof_previous_sample = previous_sample;
     }
 
     /// VOSIM — two sine formants windowed by a bell, retriggered each
@@ -1983,6 +2093,7 @@ mod tests {
             MacroModel::DigitalFilterHp,
             MacroModel::Vosim,
             MacroModel::Vowel,
+            MacroModel::VowelFof,
         ] {
             let mut m = MacroOscillator::new();
             m.set_model(model);
