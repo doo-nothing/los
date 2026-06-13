@@ -910,10 +910,14 @@ pub enum MacroModel {
     Vosim,
     Vowel,
     VowelFof,
+    Harmonics,
+    Fm,
+    FeedbackFm,
+    ChaoticFeedbackFm,
 }
 
 /// All macro models in panel order — parallel to [`MODEL_NAMES`].
-pub const MODELS: [MacroModel; 24] = [
+pub const MODELS: [MacroModel; 28] = [
     MacroModel::CSaw,
     MacroModel::Morph,
     MacroModel::SawSquare,
@@ -938,9 +942,13 @@ pub const MODELS: [MacroModel; 24] = [
     MacroModel::Vosim,
     MacroModel::Vowel,
     MacroModel::VowelFof,
+    MacroModel::Harmonics,
+    MacroModel::Fm,
+    MacroModel::FeedbackFm,
+    MacroModel::ChaoticFeedbackFm,
 ];
 
-pub const MODEL_NAMES: [&str; 24] = [
+pub const MODEL_NAMES: [&str; 28] = [
     "csaw",
     "morph",
     "saw_square",
@@ -965,6 +973,10 @@ pub const MODEL_NAMES: [&str; 24] = [
     "vosim",
     "vowel",
     "vowel_fof",
+    "harmonics",
+    "fm",
+    "feedback_fm",
+    "chaotic_feedback_fm",
 ];
 
 pub struct MacroOscillator {
@@ -1055,6 +1067,16 @@ impl MacroOscillator {
             MacroModel::Vowel => self.render_digital(DigitalShape::Vowel, sync, buffer, size),
             MacroModel::VowelFof => {
                 self.render_digital(DigitalShape::VowelFof, sync, buffer, size)
+            }
+            MacroModel::Harmonics => {
+                self.render_digital(DigitalShape::Harmonics, sync, buffer, size)
+            }
+            MacroModel::Fm => self.render_digital(DigitalShape::Fm, sync, buffer, size),
+            MacroModel::FeedbackFm => {
+                self.render_digital(DigitalShape::FeedbackFm, sync, buffer, size)
+            }
+            MacroModel::ChaoticFeedbackFm => {
+                self.render_digital(DigitalShape::ChaoticFeedbackFm, sync, buffer, size)
             }
         }
     }
@@ -1300,9 +1322,14 @@ pub enum DigitalShape {
     Vosim,
     Vowel,
     VowelFof,
+    Harmonics,
+    Fm,
+    FeedbackFm,
+    ChaoticFeedbackFm,
 }
 
 const NUM_FORMANTS: usize = 5;
+const NUM_ADDITIVE_HARMONICS: usize = 12;
 
 /// braids' `InterpolateFormantParameter`: bilinear lookup into a 5×5×5
 /// formant table (x = parameter_1, y = parameter_0).
@@ -1368,6 +1395,12 @@ pub struct DigitalOscillator {
     fof_svf_bp: [i32; NUM_FORMANTS],
     fof_previous_sample: i32,
     fof_next_saw_sample: i32,
+    // harmonics (hrm/add) + FM-family (fm) state, and param interpolation
+    previous_parameter: [i16; 2],
+    hrm_amplitude: [i32; NUM_ADDITIVE_HARMONICS],
+    add_previous_sample: i16,
+    fm_modulator_phase: u32,
+    fm_previous_sample: i16,
 }
 
 impl Default for DigitalOscillator {
@@ -1403,6 +1436,11 @@ impl Default for DigitalOscillator {
             fof_svf_bp: [0; NUM_FORMANTS],
             fof_previous_sample: 0,
             fof_next_saw_sample: 0,
+            previous_parameter: [0; 2],
+            hrm_amplitude: [0; NUM_ADDITIVE_HARMONICS],
+            add_previous_sample: 0,
+            fm_modulator_phase: 0,
+            fm_previous_sample: 0,
         }
     }
 }
@@ -1453,6 +1491,11 @@ impl DigitalOscillator {
         self.fof_svf_bp = [0; NUM_FORMANTS];
         self.fof_previous_sample = 0;
         self.fof_next_saw_sample = 0;
+        self.hrm_amplitude = [0; NUM_ADDITIVE_HARMONICS];
+        self.add_previous_sample = 0;
+        self.fm_modulator_phase = 0;
+        self.fm_previous_sample = 0;
+        // previous_parameter is NOT reset by Init in the firmware
         self.phase = 0;
         self.strike = true;
     }
@@ -1465,6 +1508,19 @@ impl DigitalOscillator {
     }
 
     pub fn render(&mut self, sync: &[u8], buffer: &mut [i16], size: usize) {
+        // Quantize parameter_1 to a musical FM ratio for the FM family.
+        if matches!(
+            self.shape,
+            DigitalShape::Fm | DigitalShape::FeedbackFm | DigitalShape::ChaoticFeedbackFm
+        ) {
+            let t = tables();
+            let integral = (self.parameter[1] >> 8) as usize;
+            let fractional = (self.parameter[1] & 255) as i32;
+            let a = t.fm_frequency_quantizer[integral.min(t.fm_frequency_quantizer.len() - 2)] as i32;
+            let b = t.fm_frequency_quantizer
+                [(integral + 1).min(t.fm_frequency_quantizer.len() - 1)] as i32;
+            self.parameter[1] = (a + ((b - a) * fractional >> 8)) as i16;
+        }
         if self.shape != self.previous_shape {
             self.init();
             self.previous_shape = self.shape;
@@ -1487,6 +1543,10 @@ impl DigitalOscillator {
             DigitalShape::Vosim => self.render_vosim(sync, buffer, size),
             DigitalShape::Vowel => self.render_vowel(buffer, size),
             DigitalShape::VowelFof => self.render_vowel_fof(buffer, size),
+            DigitalShape::Harmonics => self.render_harmonics(sync, buffer, size),
+            DigitalShape::Fm => self.render_fm(sync, buffer, size),
+            DigitalShape::FeedbackFm => self.render_feedback_fm(sync, buffer, size),
+            DigitalShape::ChaoticFeedbackFm => self.render_chaotic_feedback_fm(sync, buffer, size),
         }
     }
 
@@ -1555,6 +1615,169 @@ impl DigitalOscillator {
         self.phase = phase;
         self.fof_next_saw_sample = next_saw_sample;
         self.fof_previous_sample = previous_sample;
+    }
+
+    /// HARMONICS — an additive bank of 12 sine partials with two movable
+    /// Lorentzian formant peaks (parameter_0 position, parameter_1 width +
+    /// second-peak amount). Rendered half-rate and upsampled 2×.
+    fn render_harmonics(&mut self, sync: &[u8], buffer: &mut [i16], size: usize) {
+        let t = tables();
+        let n = NUM_ADDITIVE_HARMONICS as i32;
+        let phase_increment = self.phase_increment << 1;
+        let mut target_amplitude = [0i32; NUM_ADDITIVE_HARMONICS];
+
+        let peak = (n * self.parameter[0] as i32) >> 7;
+        let second_peak = (peak >> 1) + n * 128;
+        let second_peak_amount = (self.parameter[1] as i32 * self.parameter[1] as i32) >> 15;
+        let sqrtsqrt_width = if self.parameter[1] < 16384 {
+            self.parameter[1] as i32 >> 6
+        } else {
+            511 - (self.parameter[1] as i32 >> 6)
+        };
+        let sqrt_width = sqrtsqrt_width * sqrtsqrt_width >> 10;
+        let width = sqrt_width * sqrt_width + 4;
+        let mut total = 0i32;
+        for (i, ta) in target_amplitude.iter_mut().enumerate() {
+            let x = (i as i32) << 8;
+            let mut d = x - peak;
+            let mut g = 32768 * 128 / (128 + d * d / width);
+            d = x - second_peak;
+            g += second_peak_amount * 128 / (128 + d * d / width);
+            total += g;
+            *ta = g;
+        }
+        let attenuation = 2_147_483_647 / total.max(1);
+        for (i, ta) in target_amplitude.iter_mut().enumerate() {
+            if (phase_increment >> 16) * (i as u32 + 1) > 0x4000 {
+                *ta = 0;
+            } else {
+                *ta = (*ta as i64 * attenuation as i64 >> 16) as i32;
+            }
+        }
+
+        let mut phase = self.phase;
+        let mut previous_sample = self.add_previous_sample as i32;
+        let mut j = 0;
+        while j < size {
+            phase = phase.wrapping_add(phase_increment);
+            if sync[j] != 0 || (j + 1 < size && sync[j + 1] != 0) {
+                phase = 0;
+            }
+            let mut out = 0i32;
+            for (i, amp) in self.hrm_amplitude.iter_mut().enumerate() {
+                out += interpolate824(&t.wav_sine, phase.wrapping_mul(i as u32 + 1)) * *amp >> 15;
+                *amp += (target_amplitude[i] - *amp) >> 8;
+            }
+            out = clip16(out);
+            buffer[j] = ((out + previous_sample) >> 1) as i16;
+            if j + 1 < size {
+                buffer[j + 1] = out as i16;
+            }
+            previous_sample = out;
+            j += 2;
+        }
+        self.add_previous_sample = previous_sample as i16;
+        self.phase = phase;
+    }
+
+    /// FM — a 2-operator FM voice (sine carrier + sine modulator at a
+    /// quantized ratio; parameter_0 = index, parameter_1 = ratio).
+    fn render_fm(&mut self, sync: &[u8], buffer: &mut [i16], size: usize) {
+        let t = tables();
+        let mut modulator_phase = self.fm_modulator_phase;
+        let modulator_phase_increment = compute_phase_increment(
+            ((12 << 7) + self.pitch as i32 + ((self.parameter[1] as i32 - 16384) >> 1)) as i16,
+        ) >> 1;
+        let p0_start = self.previous_parameter[0] as i32;
+        let p0_delta = self.parameter[0] as i32 - self.previous_parameter[0] as i32;
+        let p_inc = 32767 / size.max(1) as i32;
+        let mut p_xfade = 0i32;
+        for (n, b) in buffer.iter_mut().take(size).enumerate() {
+            p_xfade += p_inc;
+            let parameter_0 = p0_start + (p0_delta * p_xfade >> 15);
+            self.phase = self.phase.wrapping_add(self.phase_increment);
+            if sync[n] != 0 {
+                self.phase = 0;
+                modulator_phase = 0;
+            }
+            modulator_phase = modulator_phase.wrapping_add(modulator_phase_increment);
+            let pm = ((interpolate824(&t.wav_sine, modulator_phase) * parameter_0) as u32) << 2;
+            *b = interpolate824(&t.wav_sine, self.phase.wrapping_add(pm)) as i16;
+        }
+        self.previous_parameter[0] = self.parameter[0];
+        self.fm_modulator_phase = modulator_phase;
+    }
+
+    /// FEEDBACK_FM — FM with the carrier feeding back into the modulator,
+    /// scaled down at high pitches to keep it stable.
+    fn render_feedback_fm(&mut self, sync: &[u8], buffer: &mut [i16], size: usize) {
+        let t = tables();
+        let mut previous_sample = self.fm_previous_sample;
+        let mut modulator_phase = self.fm_modulator_phase;
+        let mut attenuation =
+            self.pitch as i32 - (72 << 7) + ((self.parameter[1] as i32 - 16384) >> 1);
+        attenuation = (32767 - attenuation * 4).clamp(0, 32767);
+        let modulator_phase_increment = compute_phase_increment(
+            ((12 << 7) + self.pitch as i32 + ((self.parameter[1] as i32 - 16384) >> 1)) as i16,
+        ) >> 1;
+        let p0_start = self.previous_parameter[0] as i32;
+        let p0_delta = self.parameter[0] as i32 - self.previous_parameter[0] as i32;
+        let p_inc = 32767 / size.max(1) as i32;
+        let mut p_xfade = 0i32;
+        for (n, b) in buffer.iter_mut().take(size).enumerate() {
+            p_xfade += p_inc;
+            let parameter_0 = p0_start + (p0_delta * p_xfade >> 15);
+            self.phase = self.phase.wrapping_add(self.phase_increment);
+            if sync[n] != 0 {
+                self.phase = 0;
+                modulator_phase = 0;
+            }
+            modulator_phase = modulator_phase.wrapping_add(modulator_phase_increment);
+            let p = parameter_0 * attenuation >> 15;
+            let fb_pm = (previous_sample as i32) << 14;
+            let pm = (interpolate824(&t.wav_sine, modulator_phase.wrapping_add(fb_pm as u32)) * p)
+                << 1;
+            previous_sample =
+                interpolate824(&t.wav_sine, self.phase.wrapping_add(pm as u32)) as i16;
+            *b = previous_sample;
+        }
+        self.previous_parameter[0] = self.parameter[0];
+        self.fm_previous_sample = previous_sample;
+        self.fm_modulator_phase = modulator_phase;
+    }
+
+    /// CHAOTIC_FEEDBACK_FM — the modulator's increment is itself modulated
+    /// by the carrier output, driving the voice into chaos.
+    fn render_chaotic_feedback_fm(&mut self, sync: &[u8], buffer: &mut [i16], size: usize) {
+        let t = tables();
+        let modulator_phase_increment = compute_phase_increment(
+            ((12 << 7) + self.pitch as i32 + ((self.parameter[1] as i32 - 16384) >> 1)) as i16,
+        ) >> 1;
+        let mut previous_sample = self.fm_previous_sample;
+        let mut modulator_phase = self.fm_modulator_phase;
+        let p0_start = self.previous_parameter[0] as i32;
+        let p0_delta = self.parameter[0] as i32 - self.previous_parameter[0] as i32;
+        let p_inc = 32767 / size.max(1) as i32;
+        let mut p_xfade = 0i32;
+        for (n, b) in buffer.iter_mut().take(size).enumerate() {
+            p_xfade += p_inc;
+            let parameter_0 = p0_start + (p0_delta * p_xfade >> 15);
+            self.phase = self.phase.wrapping_add(self.phase_increment);
+            if sync[n] != 0 {
+                self.phase = 0;
+                modulator_phase = 0;
+            }
+            let pm = (interpolate824(&t.wav_sine, modulator_phase) * parameter_0) << 1;
+            previous_sample =
+                interpolate824(&t.wav_sine, self.phase.wrapping_add(pm as u32)) as i16;
+            *b = previous_sample;
+            modulator_phase = modulator_phase.wrapping_add(
+                (modulator_phase_increment >> 8).wrapping_mul((129 + (previous_sample >> 9)) as u32),
+            );
+        }
+        self.previous_parameter[0] = self.parameter[0];
+        self.fm_previous_sample = previous_sample;
+        self.fm_modulator_phase = modulator_phase;
     }
 
     /// VOSIM — two sine formants windowed by a bell, retriggered each
@@ -2094,6 +2317,10 @@ mod tests {
             MacroModel::Vosim,
             MacroModel::Vowel,
             MacroModel::VowelFof,
+            MacroModel::Harmonics,
+            MacroModel::Fm,
+            MacroModel::FeedbackFm,
+            MacroModel::ChaoticFeedbackFm,
         ] {
             let mut m = MacroOscillator::new();
             m.set_model(model);
