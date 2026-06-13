@@ -36,7 +36,8 @@ use ratatui::{
 
 use super::dsp::{
     AdditiveEngine, ChordEngine, Engine, EngineParameters, FmEngine, GrainEngine, NoiseEngine,
-    SwarmEngine, VirtualAnalogEngine, WaveshapingEngine, TRIGGER_HIGH, TRIGGER_RISING_EDGE,
+    SwarmEngine, VirtualAnalogEngine, WaveshapingEngine, WavetableEngine, TRIGGER_HIGH,
+    TRIGGER_RISING_EDGE,
 };
 use crate::ipc::routing::{self, SourceAddr};
 use crate::shm::{AudioRingbuf, EventRingbuf, Manifest, ModulationBus, ShmTransport};
@@ -45,8 +46,10 @@ use crate::state;
 const FALLBACK_RATE: f32 = 48_000.0;
 const BLOCK: usize = 24;
 
-pub const ENGINE_NAMES: [&str; 8] =
-    ["noise", "fm", "virtual_analog", "chord", "waveshaping", "additive", "swarm", "grain"];
+pub const ENGINE_NAMES: [&str; 9] = [
+    "noise", "fm", "virtual_analog", "chord", "waveshaping", "additive", "swarm", "grain",
+    "wavetable",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Row {
@@ -268,6 +271,7 @@ fn audio_thread(shared: Arc<Mutex<PlaitsState>>, instance: usize) -> Result<()> 
     let mut additive = AdditiveEngine::new();
     let mut swarm = SwarmEngine::new();
     let mut grain = GrainEngine::new();
+    let mut wavetable = WavetableEngine::new();
     let mut out_buf = vec![0.0_f32; slot_frames + BLOCK];
     let mut aux_buf = vec![0.0_f32; slot_frames + BLOCK];
 
@@ -386,6 +390,7 @@ fn audio_thread(shared: Arc<Mutex<PlaitsState>>, instance: usize) -> Result<()> 
                 5 => &mut additive,
                 6 => &mut swarm,
                 7 => &mut grain,
+                8 => &mut wavetable,
                 _ => &mut noise,
             };
             eng.render(
@@ -433,6 +438,7 @@ fn audio_thread(shared: Arc<Mutex<PlaitsState>>, instance: usize) -> Result<()> 
             additive = AdditiveEngine::new();
             swarm = SwarmEngine::new();
             grain = GrainEngine::new();
+            wavetable = WavetableEngine::new();
             resample_pos = 0.0;
         }
         if let (Some(base), Some(bus)) = (mod_base, modbus.as_mut()) {
