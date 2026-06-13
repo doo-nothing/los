@@ -548,13 +548,20 @@ impl Exciter {
 
 #[inline]
 pub fn bow_table(x: f32, velocity: f32) -> f32 {
+    // sanitize the fed-back input: a stray NaN here would self-perpetuate
+    // through the bowed-waveguide loop forever
+    let x = if x.is_finite() { x } else { 0.0 };
     let x = 0.13 * velocity - x;
     let mut bow = x * 6.0;
     bow = bow.abs() + 0.75;
     bow *= bow;
     bow *= bow;
     bow = 0.25 / bow;
-    bow = bow.clamp(0.0025, 0.245);
+    // max/min (not clamp) so a NaN collapses to the floor instead of surviving
+    #[allow(clippy::manual_clamp)]
+    {
+        bow = bow.max(0.0025).min(0.245);
+    }
     x * bow
 }
 

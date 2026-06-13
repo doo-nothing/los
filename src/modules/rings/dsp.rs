@@ -569,7 +569,13 @@ impl Limiter {
             let l_pre = *l * pre_gain;
             let r_pre = *r * pre_gain;
             let peak = l_pre.abs().max(r_pre.abs()).max((r_pre - l_pre).abs());
+            // kill a stray NaN before it poisons the peak follower for the
+            // rest of the session (NaN comparisons would make gain stick at NaN)
+            let peak = if peak.is_finite() { peak } else { 0.0 };
             slope(&mut self.peak, peak, 0.05, 0.00002);
+            if !self.peak.is_finite() {
+                self.peak = 0.5;
+            }
             let gain = if self.peak <= 1.0 { 1.0 } else { 1.0 / self.peak };
             *l = soft_limit(l_pre * gain * 0.8);
             *r = soft_limit(r_pre * gain * 0.8);
