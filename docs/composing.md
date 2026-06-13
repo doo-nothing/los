@@ -413,6 +413,21 @@ with `*_src` twins. Both sides publish gain and frequency CVs as
 wasp's `freq_src` to close the vactrol-filter loop the hardware
 implies.
 
+**stages** (the Mutable Instruments segment generator, full port):
+six segments, each `type` ∈ ramp, step, hold, alt with a `loop`
+flag and two knobs (`p`/`s`). The hardware's grouping is the whole
+trick — a segment with a `gate{n}_src` binding (a note track) starts
+a new group, and the group's configuration decides what it becomes:
+ramps in a gated group are a **multi-stage envelope**, one looping
+ramp alone is an **LFO** (shape morphs triangle→sine→saw via `s`),
+hold-then-steps is the **sequencer** (seven directions via `s` of
+the first step), a single step is **sample-and-hold**, a single hold
+is a **pulse/delay**, a single alt is an **audio oscillator**. Every
+knob has a `p{n}_src`/`s{n}_src` twin. CV-only — publishes
+`stages/N/o1`–`o6` (the leader's envelope plus each slave segment's
+gate); patch `o1` into a voice's `amp_src` for a hand-drawn
+envelope, or into a `level_src` to shape a whole strip.
+
 **mixer**: per-track `level` (0–1), `pan` (−1–1), `drive` (0–1), 3-band
 EQ (±15 dB, `eq_freq` 0–1), `mute`/`solo`; a master strip with the
 same console plus `master_width` (0–2).
@@ -448,6 +463,7 @@ Sources:
 | `grids/N/` | `bd`, `sd`, `hh` (triggers; also note sources), `acc` |
 | `frames/N/` | `ch1`–`ch4` (keyframed levels / poly LFOs) |
 | `streams/N/` | `g1`, `f1`, `g2`, `f2` (gain + frequency CV per side) |
+| `stages/N/` | `o1`–`o6` (segment outputs: envelopes, LFOs, sequencer steps) |
 | `template/N/` | `lfo` |
 
 Audio `input` fields are 2-segment: a producing module (`voice`,
