@@ -4695,6 +4695,68 @@ fn delay_text(step: &Step) -> String {
     }
 }
 
+/// Load a Standard MIDI File into the sequencer's tracks. Notes are
+/// quantized to a 16-step-per-bar grid (sixteenth notes), one
+/// sequencer track per MIDI channel (up to the available tracks); the
+/// last note in a step wins. The file's tempo sets the BPM.
+fn import_midi(s: &mut SequencerState, path: &str) -> String {
+    let mf = match crate::midi::load(path) {
+        Ok(m) => m,
+        Err(e) => return e,
+    };
+    if mf.notes.is_empty() {
+        return format!("{path}: no notes found");
+    }
+    // sixteenth-note grid
+    let step_ticks = (mf.ticks_per_quarter as f64 / 4.0).max(1.0);
+    let last_tick = mf.notes.iter().map(|n| n.start_tick).max().unwrap_or(0);
+    let total_steps = ((last_tick as f64 / step_ticks).round() as usize + 1)
+        .clamp(1, NUM_STEPS);
+
+    // distinct channels → tracks (in order of appearance)
+    let mut channels: Vec<u8> = Vec::new();
+    for n in &mf.notes {
+        if !channels.contains(&n.channel) {
+            channels.push(n.channel);
+        }
+    }
+    let num_tracks = channels.len().min(s.tracks.len()).max(1);
+
+    // clear and resize the target tracks to the song length
+    for (ti, ch) in channels.iter().take(num_tracks).enumerate() {
+        let trk = &mut s.tracks[ti];
+        trk.scale = None;
+        trk.mode = state::TrackMode::Note;
+        trk.length = total_steps;
+        trk.pulses = 0;
+        for st in trk.steps.iter_mut() {
+            *st = Step::default();
+            st.active = false;
+        }
+        for n in mf.notes.iter().filter(|n| n.channel == *ch) {
+            let step = (n.start_tick as f64 / step_ticks).round() as usize;
+            if step >= total_steps {
+                continue;
+            }
+            let st = &mut trk.steps[step];
+            st.active = true;
+            st.note = n.note;
+            st.velocity = n.velocity.max(1);
+        }
+        s.selected = s.selected.min(trk.length - 1);
+    }
+    s.bpm = mf.bpm().clamp(20.0, 300.0);
+    format!(
+        "Loaded {} ({} notes → {} steps, {} track{}, {:.0} BPM)",
+        path,
+        mf.notes.len(),
+        total_steps,
+        num_tracks,
+        if num_tracks == 1 { "" } else { "s" },
+        s.bpm,
+    )
+}
+
 fn step_to_param(step: &Step) -> state::StepParam {
     state::StepParam {
         active: step.active,
@@ -5601,6 +5663,9 @@ pub fn run(instance: usize) -> Result<()> {
                                         }
                                         None => undo_msg = Some(format!("Invalid root: {}", v)),
                                     },
+                                    "midi" => {
+                                        undo_msg = Some(import_midi(&mut s, &v));
+                                    }
                                     _ => undo_msg = Some(format!("Unknown setting: {}", k)),
                                 }
                             }

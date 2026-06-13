@@ -111,6 +111,7 @@ The full feature tour lives in [sequencer.md](sequencer.md).
 | `>>` / `<<` | rotate the actual step pattern right / left (counts: `3>>`); preserves hand-edits, unlike Euclid `R` | ✅ |
 | `#P` / `#L` / `#R` | Euclidean pulses / length / rotation | ✅ |
 | `P`/`L`/`R` (insert, bare) | re-apply / clamp / rotate+1 | ✅ |
+| `:set midi <file.mid>` | load a Standard MIDI File into the tracks — notes quantized to sixteenths, one track per MIDI channel, tempo sets BPM | ✅ |
 
 ### Editing power ✅
 
