@@ -1660,11 +1660,23 @@ impl OnePole {
         self.g = (std::f32::consts::PI * f).tan();
         self.gi = 1.0 / (1.0 + self.g);
     }
+    /// `set_f` with the FAST tangent approximation.
+    #[inline]
+    fn set_f_fast(&mut self, f: f32) {
+        self.g = tan_fast(f);
+        self.gi = 1.0 / (1.0 + self.g);
+    }
     #[inline]
     fn process_high_pass(&mut self, input: f32) -> f32 {
         let lp = (self.g * input + self.state) * self.gi;
         self.state = self.g * (input - lp) + lp;
         input - lp
+    }
+    #[inline]
+    fn process_low_pass(&mut self, input: f32) -> f32 {
+        let lp = (self.g * input + self.state) * self.gi;
+        self.state = self.g * (input - lp) + lp;
+        lp
     }
 }
 
@@ -3029,6 +3041,16 @@ impl SineOscillator {
             amplitude * ws_sine(self.phase + 0.25),
         )
     }
+
+    #[inline]
+    fn next_mono(&mut self, frequency: f32) -> f32 {
+        let f = frequency.min(0.5);
+        self.phase += f;
+        if self.phase >= 1.0 {
+            self.phase -= 1.0;
+        }
+        ws_sine(self.phase)
+    }
 }
 
 /// The 808 bass drum model, revisited (plaits `AnalogBassDrum`).
@@ -3413,6 +3435,326 @@ impl Engine for BassDrumEngine {
     }
 }
 
+// ── the snare drum engine ────────────────────────────────────────────────────
+
+const SNARE_NUM_MODES: usize = 5;
+
+/// The 808 snare drum model, revisited (plaits `AnalogSnareDrum`): five
+/// band-pass resonator modes plus a band-pass-filtered noise burst.
+struct AnalogSnareDrum {
+    pulse_remaining_samples: i32,
+    pulse: f32,
+    pulse_height: f32,
+    pulse_lp: f32,
+    noise_envelope: f32,
+    sustain_gain: f32,
+    resonator: [Svf; SNARE_NUM_MODES],
+    noise_filter: Svf,
+    oscillator: [SineOscillator; SNARE_NUM_MODES],
+}
+
+impl AnalogSnareDrum {
+    fn new() -> Self {
+        Self {
+            pulse_remaining_samples: 0,
+            pulse: 0.0,
+            pulse_height: 0.0,
+            pulse_lp: 0.0,
+            noise_envelope: 0.0,
+            sustain_gain: 0.0,
+            resonator: std::array::from_fn(|_| Svf::new()),
+            noise_filter: Svf::new(),
+            oscillator: std::array::from_fn(|_| SineOscillator::new()),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render(
+        &mut self,
+        sustain: bool,
+        trigger: bool,
+        accent: f32,
+        f0: f32,
+        mut tone: f32,
+        decay: f32,
+        mut snappy: f32,
+        out: &mut [f32],
+        rng: &mut Rng,
+    ) {
+        let decay_xt = decay * (1.0 + decay * (decay - 1.0));
+        let trigger_pulse_duration = (1.0e-3 * SAMPLE_RATE) as i32;
+        let pulse_decay_time = 0.1e-3 * SAMPLE_RATE;
+        let q = 2000.0 * semitones_to_ratio(decay_xt * 84.0);
+        let noise_envelope_decay =
+            1.0 - 0.0017 * semitones_to_ratio(-decay * (50.0 + snappy * 10.0));
+        let exciter_leak = snappy * (2.0 - snappy) * 0.1;
+        snappy = (snappy * 1.1 - 0.05).clamp(0.0, 1.0);
+
+        if trigger {
+            self.pulse_remaining_samples = trigger_pulse_duration;
+            self.pulse_height = 3.0 + 7.0 * accent;
+            self.noise_envelope = 2.0;
+        }
+
+        const MODE_FREQUENCIES: [f32; SNARE_NUM_MODES] = [1.00, 2.00, 3.18, 4.16, 5.62];
+        let mut f = [0.0f32; SNARE_NUM_MODES];
+        let mut gain = [0.0f32; SNARE_NUM_MODES];
+        for i in 0..SNARE_NUM_MODES {
+            f[i] = (f0 * MODE_FREQUENCIES[i]).min(0.499);
+            let mode_q = if i == 0 { q } else { q * 0.25 };
+            self.resonator[i].set_g_q(tan_fast(f[i]), 1.0 + f[i] * mode_q);
+        }
+        if tone < 0.666667 {
+            tone *= 1.5;
+            gain[0] = 1.5 + (1.0 - tone) * (1.0 - tone) * 4.5;
+            gain[1] = 2.0 * tone + 0.15;
+        } else {
+            tone = (tone - 0.666667) * 3.0;
+            gain[0] = 1.5 - tone * 0.5;
+            gain[1] = 2.15 - tone * 0.7;
+            for g in gain.iter_mut().take(SNARE_NUM_MODES).skip(2) {
+                *g = tone;
+                tone *= tone;
+            }
+        }
+
+        let f_noise = (f0 * 16.0).clamp(0.0, 0.499);
+        self.noise_filter.set_g_q(tan_fast(f_noise), 1.0 + f_noise * 1.5);
+
+        let size = out.len();
+        let mut sustain_gain = ParamInterp::new(self.sustain_gain, accent * decay, size);
+
+        for o in out.iter_mut() {
+            let pulse = if self.pulse_remaining_samples != 0 {
+                self.pulse_remaining_samples -= 1;
+                self.pulse = if self.pulse_remaining_samples != 0 {
+                    self.pulse_height
+                } else {
+                    self.pulse_height - 1.0
+                };
+                self.pulse
+            } else {
+                self.pulse *= 1.0 - 1.0 / pulse_decay_time;
+                self.pulse
+            };
+            let sustain_gain_value = sustain_gain.next();
+            self.pulse_lp += (pulse - self.pulse_lp) * 0.75;
+
+            let mut shell = 0.0;
+            for i in 0..SNARE_NUM_MODES {
+                let excitation = if i == 0 {
+                    (pulse - self.pulse_lp) + 0.006 * pulse
+                } else {
+                    0.026 * pulse
+                };
+                shell += gain[i]
+                    * if sustain {
+                        self.oscillator[i].next_mono(f[i]) * sustain_gain_value * 0.25
+                    } else {
+                        self.resonator[i].process(excitation, SvfMode::BandPass)
+                            + excitation * exciter_leak
+                    };
+            }
+            shell = soft_clip(shell);
+
+            let mut noise = 2.0 * rng.get_float() - 1.0;
+            if noise < 0.0 {
+                noise = 0.0;
+            }
+            self.noise_envelope *= noise_envelope_decay;
+            noise *= (if sustain {
+                sustain_gain_value
+            } else {
+                self.noise_envelope
+            }) * snappy
+                * 2.0;
+            noise = self.noise_filter.process(noise, SvfMode::BandPass);
+            *o = noise + shell * (1.0 - snappy);
+        }
+        self.sustain_gain = accent * decay;
+    }
+}
+
+/// A naive 909-ish snare (plaits `SyntheticSnareDrum`): two coupled
+/// distorted oscillators plus band-passed noise with a hold envelope.
+struct SyntheticSnareDrum {
+    phase: [f32; 2],
+    drum_amplitude: f32,
+    snare_amplitude: f32,
+    fm: f32,
+    sustain_gain: f32,
+    hold_counter: i32,
+    drum_lp: OnePole,
+    snare_hp: OnePole,
+    snare_lp: Svf,
+    rng: Rng,
+}
+
+impl SyntheticSnareDrum {
+    fn new() -> Self {
+        Self {
+            phase: [0.0; 2],
+            drum_amplitude: 0.0,
+            snare_amplitude: 0.0,
+            fm: 0.0,
+            sustain_gain: 0.0,
+            hold_counter: 0,
+            drum_lp: OnePole::new(),
+            snare_hp: OnePole::new(),
+            snare_lp: Svf::new(),
+            rng: Rng::new(0xa_77c1),
+        }
+    }
+
+    #[inline]
+    fn distorted_sine(phase: f32) -> f32 {
+        let triangle = (if phase < 0.5 { phase } else { 1.0 - phase }) * 4.0 - 1.3;
+        2.0 * triangle / (1.0 + triangle.abs())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render(
+        &mut self,
+        sustain: bool,
+        trigger: bool,
+        accent: f32,
+        f0: f32,
+        mut fm_amount: f32,
+        decay: f32,
+        mut snappy: f32,
+        out: &mut [f32],
+    ) {
+        let decay_xt = decay * (1.0 + decay * (decay - 1.0));
+        fm_amount *= fm_amount;
+        let drum_decay = 1.0
+            - 1.0 / (0.015 * SAMPLE_RATE)
+                * semitones_to_ratio(-decay_xt * 72.0 - fm_amount * 12.0 + snappy * 7.0);
+        let snare_decay =
+            1.0 - 1.0 / (0.01 * SAMPLE_RATE) * semitones_to_ratio(-decay * 60.0 - snappy * 7.0);
+        let fm_decay = 1.0 - 1.0 / (0.007 * SAMPLE_RATE);
+        snappy = (snappy * 1.1 - 0.05).clamp(0.0, 1.0);
+        let drum_level = (1.0 - snappy).sqrt();
+        let snare_level = snappy.sqrt();
+        let snare_f_min = (10.0 * f0).min(0.5);
+        let snare_f_max = (35.0 * f0).min(0.5);
+
+        self.snare_hp.set_f_fast(snare_f_min);
+        self.snare_lp.set_g_q(tan_fast(snare_f_max), 0.5 + 2.0 * snappy);
+        self.drum_lp.set_f_fast(3.0 * f0);
+
+        if trigger {
+            self.snare_amplitude = 0.3 + 0.7 * accent;
+            self.drum_amplitude = self.snare_amplitude;
+            self.fm = 1.0;
+            self.phase = [0.0; 2];
+            self.hold_counter = ((0.04 + decay * 0.03) * SAMPLE_RATE) as i32;
+        }
+
+        let size = out.len();
+        let mut sustain_gain = ParamInterp::new(self.sustain_gain, accent * decay, size);
+        for (n, o) in out.iter_mut().enumerate() {
+            let remaining = size - n;
+            if sustain {
+                self.snare_amplitude = sustain_gain.next();
+                self.drum_amplitude = self.snare_amplitude;
+                self.fm = 0.0;
+            } else {
+                self.drum_amplitude *= if self.drum_amplitude > 0.03 || (remaining & 1) == 0 {
+                    drum_decay
+                } else {
+                    1.0
+                };
+                if self.hold_counter != 0 {
+                    self.hold_counter -= 1;
+                } else {
+                    self.snare_amplitude *= snare_decay;
+                }
+                self.fm *= fm_decay;
+            }
+
+            let mut reset_noise = 0.0;
+            let mut reset_noise_amount = ((0.125 - f0) * 8.0).clamp(0.0, 1.0);
+            reset_noise_amount *= reset_noise_amount;
+            reset_noise_amount *= fm_amount;
+            reset_noise += if self.phase[0] > 0.5 { -1.0 } else { 1.0 };
+            reset_noise += if self.phase[1] > 0.5 { -1.0 } else { 1.0 };
+            reset_noise *= reset_noise_amount * 0.025;
+
+            let f = f0 * (1.0 + fm_amount * (4.0 * self.fm));
+            self.phase[0] += f;
+            self.phase[1] += f * 1.47;
+            if reset_noise_amount > 0.1 {
+                if self.phase[0] >= 1.0 + reset_noise {
+                    self.phase[0] = 1.0 - self.phase[0];
+                }
+                if self.phase[1] >= 1.0 + reset_noise {
+                    self.phase[1] = 1.0 - self.phase[1];
+                }
+            } else {
+                if self.phase[0] >= 1.0 {
+                    self.phase[0] -= 1.0;
+                }
+                if self.phase[1] >= 1.0 {
+                    self.phase[1] -= 1.0;
+                }
+            }
+
+            let mut drum = -0.1;
+            drum += Self::distorted_sine(self.phase[0]) * 0.60;
+            drum += Self::distorted_sine(self.phase[1]) * 0.25;
+            drum *= self.drum_amplitude * drum_level;
+            drum = self.drum_lp.process_low_pass(drum);
+
+            let noise = self.rng.get_float();
+            let mut snare = self.snare_lp.process(noise, SvfMode::LowPass);
+            snare = self.snare_hp.process_high_pass(snare);
+            snare = (snare + 0.1) * (self.snare_amplitude + self.fm) * snare_level;
+
+            *o = snare + drum;
+        }
+        self.sustain_gain = accent * decay;
+    }
+}
+
+/// The snare drum engine: an analog 808 model (main out) and a synthetic
+/// 909-ish model (aux). timbre → tone/FM, morph → decay, harmonics →
+/// snappy (noise vs shell balance).
+pub struct SnareDrumEngine {
+    analog: AnalogSnareDrum,
+    synthetic: SyntheticSnareDrum,
+    rng: Rng,
+}
+
+impl Default for SnareDrumEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SnareDrumEngine {
+    pub fn new() -> Self {
+        Self {
+            analog: AnalogSnareDrum::new(),
+            synthetic: SyntheticSnareDrum::new(),
+            rng: Rng::new(0xb_2e44),
+        }
+    }
+}
+
+impl Engine for SnareDrumEngine {
+    fn render(&mut self, p: &EngineParameters, out: &mut [f32], aux: &mut [f32]) -> bool {
+        let f0 = note_to_frequency(p.note);
+        let sustain = (p.trigger & TRIGGER_UNPATCHED) != 0;
+        let trigger = (p.trigger & TRIGGER_RISING_EDGE) != 0;
+        self.analog.render(
+            sustain, trigger, p.accent, f0, p.timbre, p.morph, p.harmonics, out, &mut self.rng,
+        );
+        self.synthetic
+            .render(sustain, trigger, p.accent, f0, p.timbre, p.morph, p.harmonics, aux);
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3482,6 +3824,24 @@ mod tests {
             energy += out.iter().map(|v| v * v).sum::<f32>();
         }
         assert!(energy > 0.0, "the noise engine sings: {energy}");
+    }
+
+    #[test]
+    fn snare_drum_engine_cracks() {
+        let mut eng = SnareDrumEngine::new();
+        let mut out = vec![0.0_f32; 64];
+        let mut aux = vec![0.0_f32; 64];
+        for (h, tb, mo) in [(0.2, 0.4, 0.4), (0.6, 0.5, 0.6), (0.9, 0.7, 0.5)] {
+            let mut energy = 0.0;
+            for blk in 0..120 {
+                let trig = if blk == 0 { TRIGGER_RISING_EDGE } else { 0 };
+                let p = EngineParameters { trigger: trig, note: 48.0, harmonics: h, timbre: tb, morph: mo, ..Default::default() };
+                eng.render(&p, &mut out, &mut aux);
+                assert!(out.iter().chain(aux.iter()).all(|v| v.is_finite() && v.abs() <= 8.0), "h={h} bounded");
+                energy += out.iter().chain(aux.iter()).map(|v| v * v).sum::<f32>();
+            }
+            assert!(energy > 1e-5, "snare cracks at h={h}: {energy}");
+        }
     }
 
     #[test]
