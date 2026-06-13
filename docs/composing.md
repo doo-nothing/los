@@ -495,21 +495,26 @@ looping-delay and spectral modes are follow-ups.)
 
 **plaits** (the Mutable Instruments macro-oscillator, the engine
 bank): a monophonic synth voice driven by a note track. `engine`
-selects the synthesis model — `noise` (two clocked-noise
-sources through a multimode filter and two band-passes — wind,
-percussion, texture) and `fm` (2-operator FM with feedback and a
-sub-oscillator), and `virtual_analog` (two band-limited
-variable-shape oscillators, the second detuned by harmonics, with a
-hard-synced voice on the aux — the classic two-oscillator synth). `harmonics`, `timbre` and `morph` are the three
-macro knobs, meaning something different per engine (the FM
-ratio/index/feedback, the noise formants/clock/resonance).
-`notes_src` sets the pitch and retriggers the engine on each note;
-`amp_src` (an envelope channel) shapes the level — the voice/braids
-wiring. Every knob has a `*_src` twin; the secondary output publishes
-on `plaits/N/aux`. Engines render at 48 kHz, resampled to the
-session. (The remaining ~18 engines — virtual-analog, waveshaping,
-chord, wavetable, physical models, drums, speech — arrive in later
-releases.)
+selects the synthesis model — the full firmware bank of 16 is ported:
+`noise` (clocked-noise sources through a multimode filter and band-passes),
+`fm` (2-operator FM with feedback and a sub-oscillator), `virtual_analog`
+(two detuned variable-shape oscillators with hard sync on the aux),
+`chord` (a four-note chord of detuned string-synth voices), `waveshaping`
+(a slope oscillator through a waveshaper + wavefolder), `additive`
+(36 sine partials with a movable slope-shaped spectrum), `swarm` (eight
+grain-windowed detuned saw+sine voices), `grain` (windowed sine
+segments — grainlet + Z oscillators), `wavetable` (an 8×8×4 integrated
+wave terrain), `modal` (24 band-pass resonator modes, struck or
+sustained), `string` (extended Karplus-Strong with curved-bridge and
+dispersion non-linearities), `bass_drum`, `snare_drum`, `hi_hat` (each an
+analog-808 + synthetic-909 pair), `particle` (resonant-filtered random
+impulses + granular diffuser), and `speech` (naive/SAM/LPC10 vocal models
+with TI-ROM word banks). `harmonics`, `timbre` and `morph` are the three
+macro knobs, meaning something different per engine. `notes_src` sets the
+pitch and retriggers the engine on each note; `amp_src` (an envelope
+channel) shapes the level — the voice/braids wiring. Every knob has a
+`*_src` twin; the secondary output publishes on `plaits/N/aux`. Engines
+render at 48 kHz, resampled to the session.
 
 **mixer**: per-track `level` (0–1), `pan` (−1–1), `drive` (0–1), 3-band
 EQ (±15 dB, `eq_freq` 0–1), `mute`/`solo`; a master strip with the
