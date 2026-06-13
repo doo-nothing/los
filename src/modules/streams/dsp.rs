@@ -136,7 +136,7 @@ fn build_tables() -> Tables {
             let mut t = i as f64 / 256.0;
             t /= 20.0 / 100.0 / 3.3;
             let f = 2.0_f64.powf(t);
-            let fmax = 2.0_f64.powf((256.0 / 256.0) / (20.0 / 100.0 / 3.3));
+            let fmax = 2.0_f64.powf(1.0 / (20.0 / 100.0 / 3.3));
             (f / fmax * 0.02 * (1 << 24) as f64) as u32
         })
         .collect();
@@ -473,7 +473,7 @@ impl Processor for Vactrol {
             let strength = error.abs();
             let coefficient = (coefficient >> 1) + (coefficient * strength >> 31);
             self.state[3] += error * coefficient >> 31;
-            let vcf_amount = (self.state[2] >> 16).clamp(0, 65535) as i64;
+            let vcf_amount = (self.state[2] >> 16).clamp(0, 65535);
             let g_phase = ((self.state[3] >> 2) * 3).clamp(0, u32::MAX as i64) as u32;
             let vca_amount = interp1022_i16(&t.gompertz, g_phase).max(0) as i64;
             let gain = (ABOVE_UNITY_GAIN as i64 * vca_amount >> 15).clamp(0, 65535) as u16;
@@ -659,6 +659,7 @@ impl Processor for Follower {
         let mut envelope: i64 = 0;
         let mut centroid_numerator: i64 = 0;
         let mut centroid_denominator: i64 = 0;
+        #[allow(clippy::needless_range_loop)] // i strides five parallel arrays
         for i in 0..3 {
             let energy = channel[i] * channel[i];
             if self.energy[i][0] < self.energy[i][1]
@@ -750,7 +751,7 @@ impl Compressor {
             value <<= 1;
             log_value -= 65536;
         }
-        log_value + t.log2[(value - 256) as usize] as i32 - t.log2[0] as i32 + 0
+        log_value + t.log2[(value - 256) as usize] as i32 - t.log2[0] as i32
     }
 
     fn compress(squared_level: i64, threshold: i32, ratio: i32, soft: bool) -> i32 {
@@ -1040,10 +1041,9 @@ mod tests {
         let mut min = u16::MAX;
         let mut max = 0u16;
         for _ in 0..62_500 {
-            let (g, f) = l.process(0, 0);
+            let (g, _f) = l.process(0, 0);
             min = min.min(g);
             max = max.max(g);
-            assert!(f <= 65535);
         }
         assert!(max > min, "the attractor moves: {min}..{max}");
     }

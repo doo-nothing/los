@@ -30,6 +30,7 @@ use crate::state::{
     BranchesParams, EdgesParams, FramesParams, GridsParams, LfoParams, MacroCmd, MixerParams,
     PeaksParams, RingsParams, SamplerParams, ScopeParams, SequencerParams, SessionState,
     StepParam,
+    StreamsParams,
     SwarmParams,
     TapeParams, TemplateParams, TidesParams, TrackMode, VoiceParams, WaspParams, STATE_FORMAT,
 };
@@ -318,6 +319,11 @@ fn validate_session(st: &SessionState, r: &mut Report) {
             "frames" => {
                 if let Some(p) = decode::<FramesParams>(value, &loc, r) {
                     check_frames(&p, &loc, &declared, r);
+                }
+            }
+            "streams" => {
+                if let Some(p) = decode::<StreamsParams>(value, &loc, r) {
+                    check_streams(&p, &loc, &declared, r, &mut pending);
                 }
             }
             // No params structs: state is ephemeral or none.
@@ -1714,6 +1720,53 @@ fn check_frames(
     }
 }
 
+/// Streams (modules/streams): function names, knob ranges, srcs,
+/// the audio input claim, dual note tracks.
+fn check_streams(
+    p: &StreamsParams,
+    loc: &str,
+    declared: &BTreeSet<(String, usize)>,
+    r: &mut Report,
+    pending: &mut Vec<PendingTrackRef>,
+) {
+    const FNS: [&str; 6] = [
+        "envelope", "vactrol", "follower", "compressor", "filter", "lorenz",
+    ];
+    for (name, f) in [("fn1", &p.fn1), ("fn2", &p.fn2)] {
+        if let Some(f) = f.as_deref() {
+            if !FNS.contains(&f) {
+                r.error(loc, format!("{name} {f:?} — one of {}", FNS.join(" ")));
+            }
+        }
+    }
+    for (name, knobs) in [("p1", &p.p1), ("p2", &p.p2)] {
+        if knobs.len() > 2 {
+            r.error(loc, format!("{name}: {} knobs — channels have 2", knobs.len()));
+        }
+        for (i, v) in knobs.iter().enumerate() {
+            if !(0.0..=1.0).contains(v) {
+                r.error(loc, format!("{name}[{i}] {v} is out of range 0–1"));
+            }
+        }
+    }
+    for (name, v) in [("excite1", p.excite1), ("excite2", p.excite2)] {
+        range01(v, name, loc, r);
+    }
+    check_input(&p.input, "input", loc, declared, r);
+    for (field, src) in [
+        ("p1a_src", &p.p1a_src),
+        ("p1b_src", &p.p1b_src),
+        ("excite1_src", &p.excite1_src),
+        ("p2a_src", &p.p2a_src),
+        ("p2b_src", &p.p2b_src),
+        ("excite2_src", &p.excite2_src),
+    ] {
+        check_src(src, field, loc, declared, r);
+    }
+    check_notes_src(&p.notes1_src, loc, declared, r, pending);
+    check_notes_src(&p.notes2_src, loc, declared, r, pending);
+}
+
 /// Template (template.rs SHAPES): shape by name.
 fn check_template(
     p: &TemplateParams,
@@ -1761,12 +1814,12 @@ const SOURCE_MODULES: [&str; 6] = [
 ];
 
 /// Modules that publish audio rings an fx/tape input can claim.
-const AUDIO_MODULES: [&str; 15] =
-    ["voice", "swarm", "tone", "template", "delay", "filterbank", "dld", "sampler", "wasp", "dpo", "elements", "rings", "tides", "peaks", "edges"];
+const AUDIO_MODULES: [&str; 16] =
+    ["voice", "swarm", "tone", "template", "delay", "filterbank", "dld", "sampler", "wasp", "dpo", "elements", "rings", "tides", "peaks", "edges", "streams"];
 
 /// Canonical module names, for misspelled-pane suggestions.
-const MODULE_NAMES: [&str; 26] =
-    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements", "rings", "tides", "peaks", "branches", "grids", "edges", "frames"];
+const MODULE_NAMES: [&str; 27] =
+    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements", "rings", "tides", "peaks", "branches", "grids", "edges", "frames", "streams"];
 
 /// An optional `*_src` field: grammar, known output, declared instance.
 /// Returns the parsed address so callers can queue cross-module checks.
@@ -2025,6 +2078,7 @@ const KNOWN_KEYS: &[&str] = &[
     "muted", "mute", "name", "offset_src",
     "note", "notes_src", "notes1_src", "notes2_src", "offset", "or_enabled", "output", "pan",
     "pan_src", "panes", "patch", "fn1", "fn2", "p1", "p2", "p1a_src", "p1b_src", "p1c_src",
+    "alt1", "alt2", "excite1", "excite2", "excite1_src", "excite2_src",
     "p1d_src", "p2a_src", "p2b_src", "p2c_src", "p2d_src",
     "patch_inline", "phase", "phase_src", "ping_ms", "ping_src", "pitch", "pitch_src", "playing",
     "pluck", "pluck_src", "prob", "pulses", "quant",

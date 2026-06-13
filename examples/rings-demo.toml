@@ -1,0 +1,166 @@
+# rings-demo.toml — three Rings instances: a modal glockenspiel, a
+# sympathetic-string drone, and the FM voice, with the LFO stirring
+# structure on the strings. Uncommitted example (house rule).
+
+[meta]
+name = "rings-demo"
+created = ""
+format = 2
+
+[[windows]]
+name = "modules"
+
+[[windows.panes]]
+module = "sequencer"
+instance = 0
+
+[windows.panes.patch_inline]
+bpm = 110.0
+playing = false
+
+[[windows.panes.patch_inline.tracks]]
+length = 16
+scale = "gong"
+root = 72
+steps = [
+  { active = true, note = 72, velocity = 96 },
+  { active = false, note = 72, velocity = 80 },
+  { active = true, note = 76, velocity = 70 },
+  { active = false, note = 72, velocity = 80 },
+  { active = true, note = 79, velocity = 84 },
+  { active = false, note = 72, velocity = 80 },
+  { active = true, note = 74, velocity = 64, prob = 70 },
+  { active = false, note = 72, velocity = 80 },
+  { active = true, note = 72, velocity = 90 },
+  { active = false, note = 72, velocity = 80 },
+  { active = true, note = 81, velocity = 60, prob = 60 },
+  { active = false, note = 72, velocity = 80 },
+  { active = true, note = 79, velocity = 76 },
+  { active = false, note = 72, velocity = 80 },
+  { active = true, note = 76, velocity = 58, prob = 50 },
+  { active = false, note = 72, velocity = 80 },
+]
+
+[[windows.panes.patch_inline.tracks]]
+length = 32
+scale = "gong"
+root = 48
+steps = [
+  { active = true, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = true, note = 55, velocity = 72 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+]
+
+[[windows.panes.patch_inline.tracks]]
+length = 8
+scale = "gong"
+root = 60
+steps = [
+  { active = true, note = 60, velocity = 70 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = true, note = 64, velocity = 56, prob = 60 },
+  { active = false, note = 60, velocity = 80 },
+  { active = true, note = 67, velocity = 62 },
+  { active = false, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+]
+
+[[windows.panes]]
+module = "rings"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+mode = "resonator"
+model = "modal"
+poly = 2
+structure = 0.32
+brightness = 0.62
+damping = 0.42
+position = 0.3
+level = 0.8
+notes_src = "sequencer/0/t1"
+
+[[windows.panes]]
+module = "rings"
+instance = 1
+
+[windows.panes.patch_inline]
+format = 2
+mode = "resonator"
+model = "sympathetic"
+poly = 1
+structure = 0.4
+brightness = 0.45
+damping = 0.85
+position = 0.4
+level = 0.6
+structure_src = "lfo/0/s1"
+notes_src = "sequencer/0/t2"
+
+[[windows.panes]]
+module = "rings"
+instance = 2
+
+[windows.panes.patch_inline]
+format = 2
+mode = "resonator"
+model = "fm"
+poly = 1
+structure = 0.55
+brightness = 0.5
+damping = 0.6
+position = 0.35
+level = 0.55
+notes_src = "sequencer/0/t3"
+
+[[windows.panes]]
+module = "lfo"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+mode = "free"
+
+[[windows.panes.patch_inline.channels]]
+freq = 0.18
+shape = "sine"
+phase = 0.0
+
+[[windows.panes]]
+module = "mixer"
+instance = 0
+
+[[windows.panes]]
+module = "scope"
+instance = 0

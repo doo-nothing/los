@@ -1,0 +1,106 @@
+# frames-demo.toml — frames morphing a four-voice scene: an LFO scans
+# the frame knob, keyframes fade voices in and out. Uncommitted.
+
+[meta]
+name = "frames-demo"
+created = ""
+format = 2
+
+[[windows]]
+name = "modules"
+
+[[windows.panes]]
+module = "sequencer"
+instance = 0
+
+[windows.panes.patch_inline]
+bpm = 100.0
+playing = false
+
+[[windows.panes.patch_inline.tracks]]
+length = 8
+scale = "dorian"
+root = 57
+steps = [
+  { active = true, note = 57, velocity = 80 },
+  { active = false, note = 57, velocity = 80 },
+  { active = true, note = 60, velocity = 70 },
+  { active = false, note = 57, velocity = 80 },
+  { active = true, note = 64, velocity = 76 },
+  { active = false, note = 57, velocity = 80 },
+  { active = true, note = 62, velocity = 66 },
+  { active = false, note = 57, velocity = 80 },
+]
+
+[[windows.panes]]
+module = "frames"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+mode = "keyframer"
+frame = 0.0
+ch = [1.0, 0.0, 0.5, 0.0]
+easing = ["sine", "sine", "out4", "linear"]
+response = [0.3, 0.3, 0.3, 0.3]
+frame_src = "lfo/0/s1"
+
+[[windows.panes.patch_inline.keyframes]]
+t = 0.0
+values = [1.0, 0.0, 0.2, 0.0]
+
+[[windows.panes.patch_inline.keyframes]]
+t = 0.5
+values = [0.2, 0.9, 0.6, 0.3]
+
+[[windows.panes.patch_inline.keyframes]]
+t = 1.0
+values = [0.0, 0.2, 1.0, 0.9]
+
+[[windows.panes]]
+module = "lfo"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+mode = "free"
+
+[[windows.panes.patch_inline.channels]]
+freq = 0.1
+shape = "sine"
+phase = 0.0
+
+[[windows.panes]]
+module = "elements"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+strike = 0.9
+strike_meta = 0.45
+geometry = 0.6
+space = 0.6
+level = 0.8
+notes_src = "sequencer/0/t1"
+amp_src = "frames/0/ch1"
+
+[[windows.panes]]
+module = "rings"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+model = "sympathetic"
+structure = 0.4
+damping = 0.8
+level = 0.7
+notes_src = "sequencer/0/t1"
+amp_src = "frames/0/ch2"
+
+[[windows.panes]]
+module = "mixer"
+instance = 0
+
+[[windows.panes]]
+module = "scope"
+instance = 0

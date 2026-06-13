@@ -1,0 +1,99 @@
+# tides-demo.toml — tides as a transport-locked LFO sweeping the
+# wasp, plus a second instance as an audio-rate chord oscillator.
+# Uncommitted example (house rule).
+
+[meta]
+name = "tides-demo"
+created = ""
+format = 2
+
+[[windows]]
+name = "modules"
+
+[[windows.panes]]
+module = "sequencer"
+instance = 0
+
+[windows.panes.patch_inline]
+bpm = 120.0
+playing = false
+
+[[windows.panes.patch_inline.tracks]]
+length = 16
+scale = "gong"
+root = 48
+steps = [
+  { active = true, note = 48, velocity = 100 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = true, note = 53, velocity = 90 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+  { active = false, note = 48, velocity = 80 },
+]
+
+[[windows.panes]]
+module = "tides"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+mode = "loop"
+output = "phase"
+range = "control"
+freq = 0.35
+shape = 0.6
+slope = 0.4
+smooth = 0.5
+shift = 0.6
+sync = true
+level = 0.0
+
+[[windows.panes]]
+module = "tides"
+instance = 1
+
+[windows.panes.patch_inline]
+format = 2
+mode = "loop"
+output = "frequency"
+range = "audio"
+freq = 0.5
+shape = 0.45
+slope = 0.5
+smooth = 0.55
+shift = 0.85
+level = 0.6
+notes_src = "sequencer/0/t1"
+
+[[windows.panes]]
+module = "wasp"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+input = "tides/1"
+freq = 0.5
+res = 0.45
+mix = 0.0
+dirt = 0.25
+bp = 0.0
+dry = 0.0
+freq_src = "tides/0/o1"
+
+[[windows.panes]]
+module = "mixer"
+instance = 0
+
+[[windows.panes]]
+module = "scope"
+instance = 0

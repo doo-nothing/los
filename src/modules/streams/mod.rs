@@ -8,3 +8,6 @@
 //! gain + frequency published as streams/N/{g1,f1,g2,f2}).
 
 pub mod dsp;
+pub mod ui;
+
+pub use ui::run;
