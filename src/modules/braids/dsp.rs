@@ -950,10 +950,12 @@ pub enum MacroModel {
     TwinPeaksNoise,
     ClockedNoise,
     Plucked,
+    StruckBell,
+    StruckDrum,
 }
 
 /// All macro models in panel order — parallel to [`MODEL_NAMES`].
-pub const MODELS: [MacroModel; 32] = [
+pub const MODELS: [MacroModel; 34] = [
     MacroModel::CSaw,
     MacroModel::Morph,
     MacroModel::SawSquare,
@@ -986,9 +988,11 @@ pub const MODELS: [MacroModel; 32] = [
     MacroModel::TwinPeaksNoise,
     MacroModel::ClockedNoise,
     MacroModel::Plucked,
+    MacroModel::StruckBell,
+    MacroModel::StruckDrum,
 ];
 
-pub const MODEL_NAMES: [&str; 32] = [
+pub const MODEL_NAMES: [&str; 34] = [
     "csaw",
     "morph",
     "saw_square",
@@ -1021,6 +1025,8 @@ pub const MODEL_NAMES: [&str; 32] = [
     "twin_peaks_noise",
     "clocked_noise",
     "plucked",
+    "struck_bell",
+    "struck_drum",
 ];
 
 pub struct MacroOscillator {
@@ -1132,6 +1138,12 @@ impl MacroOscillator {
                 self.render_digital(DigitalShape::ClockedNoise, sync, buffer, size)
             }
             MacroModel::Plucked => self.render_digital(DigitalShape::Plucked, sync, buffer, size),
+            MacroModel::StruckBell => {
+                self.render_digital(DigitalShape::StruckBell, sync, buffer, size)
+            }
+            MacroModel::StruckDrum => {
+                self.render_digital(DigitalShape::StruckDrum, sync, buffer, size)
+            }
         }
     }
 
@@ -1384,12 +1396,35 @@ pub enum DigitalShape {
     TwinPeaksNoise,
     ClockedNoise,
     Plucked,
+    StruckBell,
+    StruckDrum,
 }
 
 const NUM_FORMANTS: usize = 5;
 const NUM_ADDITIVE_HARMONICS: usize = 12;
 const NUM_PLUCK_VOICES: usize = 3;
 const KS_VOICE_STRIDE: usize = 1025;
+const NUM_BELL_PARTIALS: usize = 11;
+const NUM_DRUM_PARTIALS: usize = 6;
+
+#[rustfmt::skip]
+const BELL_PARTIALS: [i16; NUM_BELL_PARTIALS] =
+    [-1284, -1283, -184, -183, 385, 1175, 1536, 2233, 2434, 2934, 3110];
+#[rustfmt::skip]
+const BELL_PARTIAL_AMPLITUDES: [i32; NUM_BELL_PARTIALS] =
+    [8192, 5488, 8192, 14745, 21872, 13680, 11960, 10895, 10895, 6144, 10895];
+#[rustfmt::skip]
+const BELL_PARTIAL_DECAY_LONG: [i32; NUM_BELL_PARTIALS] =
+    [65533, 65533, 65533, 65532, 65531, 65531, 65530, 65529, 65527, 65523, 65519];
+#[rustfmt::skip]
+const BELL_PARTIAL_DECAY_SHORT: [i32; NUM_BELL_PARTIALS] =
+    [65308, 65283, 65186, 65123, 64839, 64889, 64632, 64409, 64038, 63302, 62575];
+const DRUM_PARTIALS: [i16; NUM_DRUM_PARTIALS] = [0, 0, 1041, 1747, 1846, 3072];
+const DRUM_PARTIAL_AMPLITUDE: [i32; NUM_DRUM_PARTIALS] = [16986, 2654, 3981, 5308, 3981, 2985];
+const DRUM_PARTIAL_DECAY_LONG: [i32; NUM_DRUM_PARTIALS] =
+    [65533, 65531, 65531, 65531, 65531, 65516];
+const DRUM_PARTIAL_DECAY_SHORT: [i32; NUM_DRUM_PARTIALS] =
+    [65083, 64715, 64715, 64715, 64715, 62312];
 
 /// One Karplus-Strong voice of the PLUCKED model.
 #[derive(Debug, Clone, Copy, Default)]
@@ -1488,6 +1523,13 @@ pub struct DigitalOscillator {
     pluck_active_voice: usize,
     pluck_previous_sample: i16,
     ks_delay: Vec<i16>,
+    // struck bell/drum (additive) state
+    add_partial_phase: [u32; NUM_BELL_PARTIALS],
+    add_partial_phase_increment: [u32; NUM_BELL_PARTIALS],
+    add_partial_amplitude: [i32; NUM_BELL_PARTIALS],
+    add_target_partial_amplitude: [i32; NUM_BELL_PARTIALS],
+    add_current_partial: usize,
+    add_lp_noise: [i32; 3],
 }
 
 impl Default for DigitalOscillator {
@@ -1540,6 +1582,12 @@ impl Default for DigitalOscillator {
             pluck_active_voice: 0,
             pluck_previous_sample: 0,
             ks_delay: vec![0; NUM_PLUCK_VOICES * KS_VOICE_STRIDE],
+            add_partial_phase: [0; NUM_BELL_PARTIALS],
+            add_partial_phase_increment: [0; NUM_BELL_PARTIALS],
+            add_partial_amplitude: [0; NUM_BELL_PARTIALS],
+            add_target_partial_amplitude: [0; NUM_BELL_PARTIALS],
+            add_current_partial: 0,
+            add_lp_noise: [0; 3],
         }
     }
 }
@@ -1606,6 +1654,12 @@ impl DigitalOscillator {
         self.pluck_active_voice = 0;
         self.pluck_previous_sample = 0;
         self.ks_delay.iter_mut().for_each(|s| *s = 0);
+        self.add_partial_phase = [0; NUM_BELL_PARTIALS];
+        self.add_partial_phase_increment = [0; NUM_BELL_PARTIALS];
+        self.add_partial_amplitude = [0; NUM_BELL_PARTIALS];
+        self.add_target_partial_amplitude = [0; NUM_BELL_PARTIALS];
+        self.add_current_partial = 0;
+        self.add_lp_noise = [0; 3];
         // previous_parameter is NOT reset by Init in the firmware
         self.phase = 0;
         self.strike = true;
@@ -1668,6 +1722,165 @@ impl DigitalOscillator {
             DigitalShape::TwinPeaksNoise => self.render_twin_peaks_noise(buffer, size),
             DigitalShape::ClockedNoise => self.render_clocked_noise(sync, buffer, size),
             DigitalShape::Plucked => self.render_plucked(buffer, size),
+            DigitalShape::StruckBell => self.render_struck_bell(buffer, size),
+            DigitalShape::StruckDrum => self.render_struck_drum(buffer, size),
+        }
+    }
+
+    /// STRUCK_BELL — an 11-partial inharmonic additive bell. parameter_0
+    /// sets decay (max = droning), parameter_1 detunes odd/even partials.
+    /// Rendered half-rate, upsampled 2×.
+    #[allow(clippy::needless_range_loop)] // parallel add_* / partial-table arrays
+    fn render_struck_bell(&mut self, buffer: &mut [i16], size: usize) {
+        let t = tables();
+        // Stagger partial-frequency refresh (the firmware's CPU-saving arp).
+        let mut first_partial = self.add_current_partial;
+        let mut last_partial = (self.add_current_partial + 3).min(NUM_BELL_PARTIALS);
+        self.add_current_partial = (first_partial + 3) % NUM_BELL_PARTIALS;
+
+        if self.strike {
+            for i in 0..NUM_BELL_PARTIALS {
+                self.add_partial_amplitude[i] = BELL_PARTIAL_AMPLITUDES[i];
+                self.add_partial_phase[i] = 1 << 30;
+            }
+            self.strike = false;
+            first_partial = 0;
+            last_partial = NUM_BELL_PARTIALS;
+        }
+
+        for i in first_partial..last_partial {
+            let detune = (self.parameter[1] >> 7) as i32;
+            let partial_pitch =
+                (self.pitch as i32 + BELL_PARTIALS[i] as i32 + if i & 1 != 0 { detune } else { -detune })
+                    as i16;
+            self.add_partial_phase_increment[i] = compute_phase_increment(partial_pitch) << 1;
+        }
+
+        if self.parameter[0] < 32000 {
+            for i in 0..NUM_BELL_PARTIALS {
+                let decay_long = BELL_PARTIAL_DECAY_LONG[i];
+                let decay_short = BELL_PARTIAL_DECAY_SHORT[i];
+                let mut balance = (32767 - self.parameter[0] as i32) >> 8;
+                balance = balance * balance >> 7;
+                let decay = decay_long - ((decay_long - decay_short) * balance >> 7);
+                self.add_partial_amplitude[i] =
+                    (self.add_partial_amplitude[i] as i64 * decay as i64 >> 16) as i32;
+            }
+        }
+
+        let mut previous_sample = self.add_previous_sample as i32;
+        let mut j = 0;
+        while j < size {
+            let mut out = 0i32;
+            for i in 0..NUM_BELL_PARTIALS {
+                self.add_partial_phase[i] =
+                    self.add_partial_phase[i].wrapping_add(self.add_partial_phase_increment[i]);
+                let partial = interpolate824(&t.wav_sine, self.add_partial_phase[i]);
+                out += (partial as i64 * self.add_partial_amplitude[i] as i64 >> 17) as i32;
+            }
+            out = clip16(out);
+            buffer[j] = ((out + previous_sample) >> 1) as i16;
+            if j + 1 < size {
+                buffer[j + 1] = out as i16;
+            }
+            previous_sample = out;
+            j += 2;
+        }
+        self.add_previous_sample = previous_sample as i16;
+    }
+
+    /// STRUCK_DRUM — 6 inharmonic partials plus filtered-noise modes for
+    /// the body and snares. parameter_0 = decay, parameter_1 = brightness /
+    /// noise-mode balance. Rendered half-rate, upsampled 2×.
+    #[allow(clippy::needless_range_loop)] // parallel add_* / partial-table arrays
+    fn render_struck_drum(&mut self, buffer: &mut [i16], size: usize) {
+        let t = tables();
+        if self.strike {
+            let reset_phase = self.add_partial_amplitude[0] < 1024;
+            for i in 0..NUM_DRUM_PARTIALS {
+                self.add_target_partial_amplitude[i] = DRUM_PARTIAL_AMPLITUDE[i];
+                if reset_phase {
+                    self.add_partial_phase[i] = 1 << 30;
+                }
+            }
+            self.strike = false;
+        } else if self.parameter[0] < 32000 {
+            for i in 0..NUM_DRUM_PARTIALS {
+                let decay_long = DRUM_PARTIAL_DECAY_LONG[i];
+                let decay_short = DRUM_PARTIAL_DECAY_SHORT[i];
+                let mut balance = (32767 - self.parameter[0] as i32) >> 8;
+                balance = balance * balance >> 7;
+                let decay = decay_long - ((decay_long - decay_short) * balance >> 7);
+                self.add_target_partial_amplitude[i] =
+                    (self.add_partial_amplitude[i] as i64 * decay as i64 >> 16) as i32;
+            }
+        }
+        for i in 0..NUM_DRUM_PARTIALS {
+            let partial_pitch = (self.pitch as i32 + DRUM_PARTIALS[i] as i32) as i16;
+            self.add_partial_phase_increment[i] = compute_phase_increment(partial_pitch) << 1;
+        }
+
+        let mut previous_sample = self.add_previous_sample as i32;
+        let cutoff = ((self.pitch as i32 - 12 * 128) + (self.parameter[1] as i32 >> 2)).clamp(0, 32767);
+        let f = interpolate824_u16(&t.svf_cutoff, (cutoff as u32) << 16) as i64;
+        let mut lp0 = self.add_lp_noise[0];
+        let mut lp1 = self.add_lp_noise[1];
+        let mut lp2 = self.add_lp_noise[2];
+        let harmonics_gain = if self.parameter[1] < 12888 {
+            self.parameter[1] as i32 + 4096
+        } else {
+            16384
+        };
+        let noise_mode_gain = if self.parameter[1] < 16384 {
+            0
+        } else {
+            self.parameter[1] as i32 - 16384
+        };
+        let noise_mode_gain = noise_mode_gain * 12888 >> 14;
+        let fade_increment = 65536 / size.max(1) as i32;
+        let mut fade = 0i32;
+        let mut partials = [0i32; NUM_DRUM_PARTIALS];
+        let mut j = 0;
+        while j < size {
+            fade += fade_increment;
+            let mut noise = self.next_sample() as i32;
+            noise = noise.clamp(-16384, 16384);
+            lp0 += ((noise - lp0) as i64 * f >> 15) as i32;
+            lp1 += ((lp0 - lp1) as i64 * f >> 15) as i32;
+            lp2 += ((lp1 - lp2) as i64 * f >> 15) as i32;
+
+            let mut harmonics = 0i32;
+            for i in 0..NUM_DRUM_PARTIALS {
+                self.add_partial_phase[i] =
+                    self.add_partial_phase[i].wrapping_add(self.add_partial_phase_increment[i]);
+                let partial = interpolate824(&t.wav_sine, self.add_partial_phase[i]);
+                let amplitude = self.add_partial_amplitude[i]
+                    + (((self.add_target_partial_amplitude[i] - self.add_partial_amplitude[i])
+                        * fade)
+                        >> 15);
+                let partial = (partial as i64 * amplitude as i64 >> 16) as i32;
+                harmonics += partial;
+                partials[i] = partial;
+            }
+            let mut sample = partials[0];
+            let noise_mode_1 = (partials[1] as i64 * lp2 as i64 >> 8) as i32;
+            let noise_mode_2 = (partials[3] as i64 * lp2 as i64 >> 9) as i32;
+            sample += (noise_mode_1 as i64 * (12288 - noise_mode_gain) as i64 >> 14) as i32;
+            sample += (noise_mode_2 as i64 * noise_mode_gain as i64 >> 14) as i32;
+            sample += (harmonics as i64 * harmonics_gain as i64 >> 14) as i32;
+            sample = clip16(sample);
+            buffer[j] = ((sample + previous_sample) >> 1) as i16;
+            if j + 1 < size {
+                buffer[j + 1] = sample as i16;
+            }
+            previous_sample = sample;
+            j += 2;
+        }
+        self.add_previous_sample = previous_sample as i16;
+        self.add_lp_noise = [lp0, lp1, lp2];
+        // firmware copies all 11 (kNumBellPartials) amplitudes from target
+        for i in 0..NUM_BELL_PARTIALS {
+            self.add_partial_amplitude[i] = self.add_target_partial_amplitude[i];
         }
     }
 
@@ -2696,6 +2909,8 @@ mod tests {
             MacroModel::TwinPeaksNoise,
             MacroModel::ClockedNoise,
             MacroModel::Plucked,
+            MacroModel::StruckBell,
+            MacroModel::StruckDrum,
         ] {
             let mut m = MacroOscillator::new();
             m.set_model(model);
