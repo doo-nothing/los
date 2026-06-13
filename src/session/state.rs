@@ -1011,6 +1011,29 @@ pub struct WarpsParams {
     pub note_src: Option<String>,
 }
 
+/// Braids (modules/braids) — the MI macro-oscillator voice: a model
+/// (analog macro-oscillator), two parameters (timbre/color), pitch
+/// from a note source, level from an amp envelope.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BraidsParams {
+    #[serde(default)]
+    pub format: u32,
+    pub model: Option<String>,
+    pub timbre: Option<f32>,
+    pub color: Option<f32>,
+    pub level: Option<f32>,
+    #[serde(default)]
+    pub timbre_src: Option<String>,
+    #[serde(default)]
+    pub color_src: Option<String>,
+    #[serde(default)]
+    pub level_src: Option<String>,
+    #[serde(default)]
+    pub amp_src: Option<String>,
+    #[serde(default)]
+    pub notes_src: Option<String>,
+}
+
 /// Marbles (modules/marbles) — the MI random sampler: a t-section
 /// (rhythm model, bias, jitter) and an x/y section (spread, bias,
 /// steps, déjà-vu loop length, scale). CV+gate generator.
