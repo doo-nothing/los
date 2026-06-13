@@ -52,10 +52,14 @@ pub struct Tables {
     pub svf_scale: Vec<u16>,               // 257
     pub resonator_coefficient: Vec<u16>,   // 129
     pub resonator_scale: Vec<u16>,         // 129
+    // bowing tables (braids_bowing_tables.bin)
+    pub bowing_envelope: Vec<u16>,         // 752
+    pub bowing_friction: Vec<u16>,         // 257
 }
 
 const BRAIDS_FORMANT_TABLES_BIN: &[u8] = include_bytes!("braids_formant_tables.bin");
 const BRAIDS_NOISE_TABLES_BIN: &[u8] = include_bytes!("braids_noise_tables.bin");
+const BRAIDS_BOWING_TABLES_BIN: &[u8] = include_bytes!("braids_bowing_tables.bin");
 
 const BRAIDS_DIGITAL_TABLES_BIN: &[u8] = include_bytes!("braids_digital_tables.bin");
 
@@ -167,6 +171,15 @@ pub fn tables() -> &'static Tables {
         let svf_scale = take_u16(nd, &mut no, n_sc);
         let resonator_coefficient = take_u16(nd, &mut no, n_rc);
         let resonator_scale = take_u16(nd, &mut no, n_rs);
+        // bowing tables: header of 2 u32 lengths, then envelope, friction (u16)
+        let bd = BRAIDS_BOWING_TABLES_BIN;
+        let blen = |i: usize| {
+            u32::from_le_bytes([bd[i * 4], bd[i * 4 + 1], bd[i * 4 + 2], bd[i * 4 + 3]]) as usize
+        };
+        let (n_env, n_fric) = (blen(0), blen(1));
+        let mut bo = 8;
+        let bowing_envelope = take_u16(bd, &mut bo, n_env);
+        let bowing_friction = take_u16(bd, &mut bo, n_fric);
         Tables {
             wav_sine,
             increments,
@@ -187,6 +200,8 @@ pub fn tables() -> &'static Tables {
             svf_scale,
             resonator_coefficient,
             resonator_scale,
+            bowing_envelope,
+            bowing_friction,
         }
     })
 }
@@ -955,10 +970,11 @@ pub enum MacroModel {
     Kick,
     Snare,
     Cymbal,
+    Bowed,
 }
 
 /// All macro models in panel order — parallel to [`MODEL_NAMES`].
-pub const MODELS: [MacroModel; 37] = [
+pub const MODELS: [MacroModel; 38] = [
     MacroModel::CSaw,
     MacroModel::Morph,
     MacroModel::SawSquare,
@@ -996,9 +1012,10 @@ pub const MODELS: [MacroModel; 37] = [
     MacroModel::Kick,
     MacroModel::Snare,
     MacroModel::Cymbal,
+    MacroModel::Bowed,
 ];
 
-pub const MODEL_NAMES: [&str; 37] = [
+pub const MODEL_NAMES: [&str; 38] = [
     "csaw",
     "morph",
     "saw_square",
@@ -1036,6 +1053,7 @@ pub const MODEL_NAMES: [&str; 37] = [
     "kick",
     "snare",
     "cymbal",
+    "bowed",
 ];
 
 pub struct MacroOscillator {
@@ -1156,6 +1174,7 @@ impl MacroOscillator {
             MacroModel::Kick => self.render_digital(DigitalShape::Kick, sync, buffer, size),
             MacroModel::Snare => self.render_digital(DigitalShape::Snare, sync, buffer, size),
             MacroModel::Cymbal => self.render_digital(DigitalShape::Cymbal, sync, buffer, size),
+            MacroModel::Bowed => self.render_digital(DigitalShape::Bowed, sync, buffer, size),
         }
     }
 
@@ -1413,6 +1432,7 @@ pub enum DigitalShape {
     Kick,
     Snare,
     Cymbal,
+    Bowed,
 }
 
 const NUM_FORMANTS: usize = 5;
@@ -1604,6 +1624,16 @@ const FIR4_COEFFICIENTS: [u32; 4] = [10530, 14751, 16384, 14751];
 const FIR4_DC_OFFSET: i32 = 28208;
 const PHASE_RESET: [u32; 4] = [0, 0x8000_0000, 0x4000_0000, 0x8000_0000];
 
+// waveguide string (bowed) lengths + filter coefficients
+const WG_BRIDGE_LENGTH: usize = 1024;
+const WG_NECK_LENGTH: usize = 4096;
+const BRIDGE_LP_GAIN: i64 = 14008;
+const BRIDGE_LP_POLE1: i64 = 18022;
+const BIQUAD_GAIN: i64 = 6553;
+const BIQUAD_POLE1: i64 = 6948;
+const BIQUAD_POLE2: i64 = -2959;
+const LUT_BOWING_ENVELOPE_SIZE: usize = 752;
+
 #[inline]
 fn clip16(x: i32) -> i32 {
     x.clamp(-32768, 32767)
@@ -1679,6 +1709,15 @@ pub struct DigitalOscillator {
     bsvf: [DrumSvf; 3],
     hat_phase: [u32; 6],
     hat_rng_state: u32,
+    // waveguide (bowed/blown/fluted) state
+    digital_delay: u32,
+    phy_delay_ptr: u16,
+    phy_excitation_ptr: u16,
+    phy_lp_state: i32,
+    phy_filter_state: [i32; 2],
+    phy_previous_sample: i16,
+    wg_bridge: Vec<i8>,
+    wg_neck: Vec<i8>,
 }
 
 impl Default for DigitalOscillator {
@@ -1741,6 +1780,14 @@ impl Default for DigitalOscillator {
             bsvf: [DrumSvf::default(); 3],
             hat_phase: [0; 6],
             hat_rng_state: 0,
+            digital_delay: 0,
+            phy_delay_ptr: 0,
+            phy_excitation_ptr: 0,
+            phy_lp_state: 0,
+            phy_filter_state: [0; 2],
+            phy_previous_sample: 0,
+            wg_bridge: vec![0; WG_BRIDGE_LENGTH],
+            wg_neck: vec![0; WG_NECK_LENGTH],
         }
     }
 }
@@ -1817,6 +1864,13 @@ impl DigitalOscillator {
         self.bsvf = [DrumSvf::default(); 3];
         self.hat_phase = [0; 6];
         self.hat_rng_state = 0;
+        self.phy_delay_ptr = 0;
+        self.phy_excitation_ptr = 0;
+        self.phy_lp_state = 0;
+        self.phy_filter_state = [0; 2];
+        self.phy_previous_sample = 0;
+        self.wg_bridge.iter_mut().for_each(|s| *s = 0);
+        self.wg_neck.iter_mut().for_each(|s| *s = 0);
         // previous_parameter is NOT reset by Init in the firmware
         self.phase = 0;
         self.strike = true;
@@ -1854,6 +1908,7 @@ impl DigitalOscillator {
             self.previous_shape = self.shape;
         }
         self.phase_increment = compute_phase_increment(self.pitch);
+        self.digital_delay = compute_delay(self.pitch);
         if self.pitch > DIGITAL_HIGHEST_NOTE as i16 {
             self.pitch = DIGITAL_HIGHEST_NOTE as i16;
         } else if self.pitch < 0 {
@@ -1884,7 +1939,116 @@ impl DigitalOscillator {
             DigitalShape::Kick => self.render_kick(buffer, size),
             DigitalShape::Snare => self.render_snare(buffer, size),
             DigitalShape::Cymbal => self.render_cymbal(buffer, size),
+            DigitalShape::Bowed => self.render_bowed(buffer, size),
         }
+    }
+
+    /// BOWED — a bowed-string waveguide: a bridge + neck delay-line pair
+    /// with a non-linear bow-friction excitation and a body resonator
+    /// biquad. parameter_0 = bow force, parameter_1 = string length.
+    /// Rendered half-rate, upsampled 2×.
+    fn render_bowed(&mut self, buffer: &mut [i16], size: usize) {
+        let t = tables();
+        if self.strike {
+            self.wg_bridge.iter_mut().for_each(|s| *s = 0);
+            self.wg_neck.iter_mut().for_each(|s| *s = 0);
+            self.phy_delay_ptr = 0;
+            self.phy_excitation_ptr = 0;
+            self.phy_lp_state = 0;
+            self.phy_filter_state = [0; 2];
+            self.phy_previous_sample = 0;
+            self.strike = false;
+        }
+        let parameter_0 = 172 - (self.parameter[0] >> 8);
+        let parameter_1 = 6 + (self.parameter[1] >> 9);
+
+        let mut delay_ptr = self.phy_delay_ptr;
+        let mut excitation_ptr = self.phy_excitation_ptr;
+        let mut lp_state = self.phy_lp_state;
+        let mut biquad_y0 = self.phy_filter_state[0];
+        let mut biquad_y1 = self.phy_filter_state[1];
+
+        let mut delay = (self.digital_delay >> 1).wrapping_sub(2 << 16);
+        let mut bridge_delay = (delay >> 8) * parameter_1 as u32;
+        while (delay.wrapping_sub(bridge_delay)) > ((WG_NECK_LENGTH as u32 - 1) << 16)
+            || bridge_delay > ((WG_BRIDGE_LENGTH as u32 - 1) << 16)
+        {
+            delay >>= 1;
+            bridge_delay >>= 1;
+        }
+        let bridge_delay_integral = (bridge_delay >> 16) as u16;
+        let bridge_delay_fractional = (bridge_delay & 0xffff) as u16;
+        let neck_delay = delay.wrapping_sub(bridge_delay);
+        let neck_delay_integral = (neck_delay >> 16) as u16;
+        let neck_delay_fractional = (neck_delay & 0xffff) as u16;
+        let mut previous_sample = self.phy_previous_sample as i32;
+
+        let mut j = 0;
+        while j < size {
+            self.phase = self.phase.wrapping_add(self.phase_increment);
+            let bridge_delay_ptr =
+                delay_ptr.wrapping_add(2 * WG_BRIDGE_LENGTH as u16).wrapping_sub(bridge_delay_integral);
+            let neck_delay_ptr =
+                delay_ptr.wrapping_add(2 * WG_NECK_LENGTH as u16).wrapping_sub(neck_delay_integral);
+            let bridge_dl_a = self.wg_bridge[bridge_delay_ptr as usize % WG_BRIDGE_LENGTH] as i16;
+            let bridge_dl_b =
+                self.wg_bridge[(bridge_delay_ptr.wrapping_sub(1)) as usize % WG_BRIDGE_LENGTH] as i16;
+            let nut_dl_a = self.wg_neck[neck_delay_ptr as usize % WG_NECK_LENGTH] as i16;
+            let nut_dl_b =
+                self.wg_neck[(neck_delay_ptr.wrapping_sub(1)) as usize % WG_NECK_LENGTH] as i16;
+            let bridge_value = (mix(bridge_dl_a, bridge_dl_b, bridge_delay_fractional) as i32) << 8;
+            let nut_value = (mix(nut_dl_a, nut_dl_b, neck_delay_fractional) as i32) << 8;
+            lp_state = ((bridge_value as i64 * BRIDGE_LP_GAIN
+                + lp_state as i64 * BRIDGE_LP_POLE1)
+                >> 15) as i32;
+            let bridge_reflection = -lp_state;
+            let nut_reflection = -nut_value;
+            let string_velocity = bridge_reflection + nut_reflection;
+            // clamp the envelope index (the firmware can run one past the
+            // LUT within a block before its end-of-block clamp)
+            let last = LUT_BOWING_ENVELOPE_SIZE - 1;
+            let mut bow_velocity =
+                t.bowing_envelope[((excitation_ptr >> 1) as usize).min(last)] as i32;
+            bow_velocity +=
+                t.bowing_envelope[(((excitation_ptr + 1) >> 1) as usize).min(last)] as i32;
+            bow_velocity >>= 1;
+            let velocity_delta = bow_velocity - string_velocity;
+            let mut friction = velocity_delta * parameter_0 as i32 >> 5;
+            friction = friction.abs();
+            if friction >= (1 << 17) {
+                friction = (1 << 17) - 1;
+            }
+            friction = t.bowing_friction[(friction >> 9) as usize] as i32;
+            let new_velocity = (friction as i64 * velocity_delta as i64 >> 15) as i32;
+            self.wg_neck[delay_ptr as usize % WG_NECK_LENGTH] =
+                ((bridge_reflection + new_velocity) >> 8) as i8;
+            self.wg_bridge[delay_ptr as usize % WG_BRIDGE_LENGTH] =
+                ((nut_reflection + new_velocity) >> 8) as i8;
+            delay_ptr = delay_ptr.wrapping_add(1);
+
+            let mut temp = (bridge_value as i64 * BIQUAD_GAIN >> 15) as i32;
+            temp += (biquad_y0 as i64 * BIQUAD_POLE1 >> 12) as i32;
+            temp += (biquad_y1 as i64 * BIQUAD_POLE2 >> 12) as i32;
+            let out = clip16(temp - biquad_y1);
+            biquad_y1 = biquad_y0;
+            biquad_y0 = temp;
+
+            buffer[j] = ((out + previous_sample) >> 1) as i16;
+            if j + 1 < size {
+                buffer[j + 1] = out as i16;
+            }
+            previous_sample = out;
+            excitation_ptr = excitation_ptr.wrapping_add(1);
+            j += 2;
+        }
+        if (excitation_ptr >> 1) as usize >= LUT_BOWING_ENVELOPE_SIZE - 32 {
+            excitation_ptr = ((LUT_BOWING_ENVELOPE_SIZE - 32) << 1) as u16;
+        }
+        self.phy_delay_ptr = delay_ptr % WG_NECK_LENGTH as u16;
+        self.phy_excitation_ptr = excitation_ptr;
+        self.phy_lp_state = lp_state;
+        self.phy_filter_state = [biquad_y0, biquad_y1];
+        self.phy_previous_sample = previous_sample as i16;
     }
 
     /// KICK — an 808-ish bridged-T kick: a triple-pulse exciter into a
@@ -3253,6 +3417,7 @@ mod tests {
             MacroModel::Kick,
             MacroModel::Snare,
             MacroModel::Cymbal,
+            MacroModel::Bowed,
         ] {
             let mut m = MacroOscillator::new();
             m.set_model(model);
