@@ -1839,6 +1839,15 @@ pub fn render(song_path: &str, out_path: &str, secs: Option<f32>, tail: f32) -> 
     };
     let abs = abs.to_string_lossy().to_string();
     let done = format!("{abs}.done");
+    // The mixer's tape writer creates the WAV here; if its parent
+    // directory is missing, `WavWriter::create` fails silently and the
+    // render only ever reports "mixer never started recording". Make
+    // the directory up front so a missing `tmp/` (or any out path) is
+    // not mistaken for a dead audio device.
+    if let Some(parent) = std::path::Path::new(&abs).parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating render output directory {}", parent.display()))?;
+    }
     let _ = std::fs::remove_file(&abs);
     let _ = std::fs::remove_file(&done);
 
