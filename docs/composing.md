@@ -493,10 +493,12 @@ looping-delay and spectral modes are follow-ups.)
 
 **plaits** (the Mutable Instruments macro-oscillator, the engine
 bank): a monophonic synth voice driven by a note track. `engine`
-selects the synthesis model — v1 ships `noise` (two clocked-noise
+selects the synthesis model — `noise` (two clocked-noise
 sources through a multimode filter and two band-passes — wind,
 percussion, texture) and `fm` (2-operator FM with feedback and a
-sub-oscillator). `harmonics`, `timbre` and `morph` are the three
+sub-oscillator), and `virtual_analog` (two band-limited
+variable-shape oscillators, the second detuned by harmonics, with a
+hard-synced voice on the aux — the classic two-oscillator synth). `harmonics`, `timbre` and `morph` are the three
 macro knobs, meaning something different per engine (the FM
 ratio/index/feedback, the noise formants/clock/resonance).
 `notes_src` sets the pitch and retriggers the engine on each note;

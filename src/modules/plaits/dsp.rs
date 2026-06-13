@@ -497,6 +497,312 @@ impl Engine for FmEngine {
     }
 }
 
+// ── variable-shape oscillator (polyblep) + the virtual-analog engine ─────────
+
+pub const MAX_FREQUENCY: f32 = 0.25;
+
+#[inline]
+fn pb_this(t: f32) -> f32 {
+    0.5 * t * t
+}
+#[inline]
+fn pb_next(t: f32) -> f32 {
+    let t = 1.0 - t;
+    -0.5 * t * t
+}
+#[inline]
+fn pb_next_int(t: f32) -> f32 {
+    let t1 = 0.5 * t;
+    let t2 = t1 * t1;
+    let t4 = t2 * t2;
+    0.1875 - t1 + 1.5 * t2 - t4
+}
+#[inline]
+fn pb_this_int(t: f32) -> f32 {
+    pb_next_int(1.0 - t)
+}
+
+#[inline]
+fn compute_naive_sample(
+    phase: f32,
+    pw: f32,
+    slope_up: f32,
+    slope_down: f32,
+    triangle_amount: f32,
+    square_amount: f32,
+) -> f32 {
+    let mut saw = phase;
+    let square = if phase < pw { 0.0 } else { 1.0 };
+    let triangle = if phase < pw {
+        phase * slope_up
+    } else {
+        1.0 - (phase - pw) * slope_down
+    };
+    saw += (square - saw) * square_amount;
+    saw += (triangle - saw) * triangle_amount;
+    saw
+}
+
+/// plaits variable_shape_oscillator.h — a band-limited oscillator that
+/// morphs saw → triangle → square by `waveshape`, with pulse width and
+/// optional hard sync from a master phase.
+#[derive(Debug, Clone)]
+pub struct VariableShapeOscillator {
+    master_phase: f32,
+    slave_phase: f32,
+    next_sample: f32,
+    previous_pw: f32,
+    high: bool,
+    master_frequency: f32,
+    slave_frequency: f32,
+    pw: f32,
+    waveshape: f32,
+}
+
+impl Default for VariableShapeOscillator {
+    fn default() -> Self {
+        Self {
+            master_phase: 0.0,
+            slave_phase: 0.0,
+            next_sample: 0.0,
+            previous_pw: 0.5,
+            high: false,
+            master_frequency: 0.0,
+            slave_frequency: 0.01,
+            pw: 0.5,
+            waveshape: 0.0,
+        }
+    }
+}
+
+impl VariableShapeOscillator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_master_phase(&mut self, p: f32) {
+        self.master_phase = p;
+    }
+
+    /// Render without sync.
+    pub fn render(&mut self, frequency: f32, pw: f32, waveshape: f32, out: &mut [f32]) {
+        self.render_inner(false, 0.0, frequency, pw, waveshape, out);
+    }
+
+    /// Render with hard sync to `master_frequency`.
+    pub fn render_sync(
+        &mut self,
+        master_frequency: f32,
+        frequency: f32,
+        pw: f32,
+        waveshape: f32,
+        out: &mut [f32],
+    ) {
+        self.render_inner(true, master_frequency, frequency, pw, waveshape, out);
+    }
+
+    fn render_inner(
+        &mut self,
+        enable_sync: bool,
+        master_frequency: f32,
+        mut frequency: f32,
+        mut pw: f32,
+        waveshape: f32,
+        out: &mut [f32],
+    ) {
+        let master_frequency = master_frequency.min(MAX_FREQUENCY);
+        frequency = frequency.min(MAX_FREQUENCY);
+        if frequency >= 0.25 {
+            pw = 0.5;
+        } else {
+            pw = pw.clamp(frequency * 2.0, 1.0 - 2.0 * frequency);
+        }
+        let size = out.len();
+        let mf_step = (master_frequency - self.master_frequency) / size.max(1) as f32;
+        let sf_step = (frequency - self.slave_frequency) / size.max(1) as f32;
+        let pw_step = (pw - self.pw) / size.max(1) as f32;
+        let ws_step = (waveshape - self.waveshape) / size.max(1) as f32;
+        let mut next_sample = self.next_sample;
+
+        for o in out.iter_mut() {
+            let mut reset = false;
+            let mut transition_during_reset = false;
+            let mut reset_time = 0.0;
+            let mut this_sample = next_sample;
+            next_sample = 0.0;
+
+            self.master_frequency += mf_step;
+            self.slave_frequency += sf_step;
+            self.pw += pw_step;
+            self.waveshape += ws_step;
+            let mf = self.master_frequency;
+            let sf = self.slave_frequency;
+            let pw = self.pw;
+            let ws = self.waveshape;
+
+            let square_amount = (ws - 0.5).max(0.0) * 2.0;
+            let triangle_amount = (1.0 - ws * 2.0).max(0.0);
+            let slope_up = 1.0 / pw;
+            let slope_down = 1.0 / (1.0 - pw);
+
+            if enable_sync {
+                self.master_phase += mf;
+                if self.master_phase >= 1.0 {
+                    self.master_phase -= 1.0;
+                    reset_time = self.master_phase / mf.max(1e-9);
+                    let mut slave_phase_at_reset = self.slave_phase + (1.0 - reset_time) * sf;
+                    reset = true;
+                    if slave_phase_at_reset >= 1.0 {
+                        slave_phase_at_reset -= 1.0;
+                        transition_during_reset = true;
+                    }
+                    if !self.high && slave_phase_at_reset >= pw {
+                        transition_during_reset = true;
+                    }
+                    let value = compute_naive_sample(
+                        slave_phase_at_reset,
+                        pw,
+                        slope_up,
+                        slope_down,
+                        triangle_amount,
+                        square_amount,
+                    );
+                    this_sample -= value * pb_this(reset_time);
+                    next_sample -= value * pb_next(reset_time);
+                }
+            }
+
+            self.slave_phase += sf;
+            loop {
+                if !transition_during_reset && reset {
+                    break;
+                }
+                if !self.high {
+                    if self.slave_phase < pw {
+                        break;
+                    }
+                    let t = (self.slave_phase - pw) / (self.previous_pw - pw + sf).max(1e-9);
+                    let triangle_step = (slope_up + slope_down) * sf * triangle_amount;
+                    this_sample += square_amount * pb_this(t);
+                    next_sample += square_amount * pb_next(t);
+                    this_sample -= triangle_step * pb_this_int(t);
+                    next_sample -= triangle_step * pb_next_int(t);
+                    self.high = true;
+                }
+                if self.high {
+                    if self.slave_phase < 1.0 {
+                        break;
+                    }
+                    self.slave_phase -= 1.0;
+                    let t = self.slave_phase / sf.max(1e-9);
+                    let triangle_step = (slope_up + slope_down) * sf * triangle_amount;
+                    this_sample -= (1.0 - triangle_amount) * pb_this(t);
+                    next_sample -= (1.0 - triangle_amount) * pb_next(t);
+                    this_sample += triangle_step * pb_this_int(t);
+                    next_sample += triangle_step * pb_next_int(t);
+                    self.high = false;
+                }
+            }
+
+            if enable_sync && reset {
+                self.slave_phase = reset_time * sf;
+                self.high = false;
+            }
+
+            next_sample += compute_naive_sample(
+                self.slave_phase,
+                pw,
+                slope_up,
+                slope_down,
+                triangle_amount,
+                square_amount,
+            );
+            self.previous_pw = pw;
+            *o = 2.0 * this_sample - 1.0;
+        }
+        self.next_sample = next_sample;
+        self.master_frequency = master_frequency;
+        self.slave_frequency = frequency;
+        self.pw = pw;
+        self.waveshape = waveshape;
+    }
+}
+
+/// The virtual-analog engine (VA_VARIANT 0): two variable-shape
+/// oscillators (the second detuned by harmonics) summed on the main
+/// output; the aux mixes the first with a hard-synced second.
+pub struct VirtualAnalogEngine {
+    primary: VariableShapeOscillator,
+    auxiliary: VariableShapeOscillator,
+    sync: VariableShapeOscillator,
+    temp: Vec<f32>,
+}
+
+const VA_INTERVALS: [f32; 5] = [0.0, 7.01, 12.01, 19.01, 24.01];
+
+#[inline]
+fn squash(x: f32) -> f32 {
+    x * x * (3.0 - 2.0 * x)
+}
+
+impl VirtualAnalogEngine {
+    pub fn new() -> Self {
+        let mut auxiliary = VariableShapeOscillator::new();
+        auxiliary.set_master_phase(0.25);
+        Self {
+            primary: VariableShapeOscillator::new(),
+            auxiliary,
+            sync: VariableShapeOscillator::new(),
+            temp: Vec::new(),
+        }
+    }
+
+    fn compute_detuning(detune: f32) -> f32 {
+        let mut detune = (2.05 * detune - 1.025).clamp(-1.0, 1.0);
+        let sign = if detune < 0.0 { -1.0 } else { 1.0 };
+        detune = detune * sign * 3.9999;
+        let i = detune as usize;
+        let frac = detune - i as f32;
+        let a = VA_INTERVALS[i.min(4)];
+        let b = VA_INTERVALS[(i + 1).min(4)];
+        (a + (b - a) * squash(squash(frac))) * sign
+    }
+}
+
+impl Default for VirtualAnalogEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Engine for VirtualAnalogEngine {
+    fn render(&mut self, p: &EngineParameters, out: &mut [f32], aux: &mut [f32]) -> bool {
+        let size = out.len();
+        if self.temp.len() < size {
+            self.temp.resize(size, 0.0);
+        }
+        let auxiliary_detune = Self::compute_detuning(p.harmonics);
+        let primary_f = note_to_frequency(p.note);
+        let auxiliary_f = note_to_frequency(p.note + auxiliary_detune);
+        let sync_f = note_to_frequency(p.note + p.harmonics * 48.0);
+        let shape_1 = (p.timbre * 1.5).clamp(0.0, 1.0);
+        let pw_1 = (0.5 + (p.timbre - 0.66) * 1.4).clamp(0.5, 0.99);
+        let shape_2 = (p.morph * 1.5).clamp(0.0, 1.0);
+        let pw_2 = (0.5 + (p.morph - 0.66) * 1.4).clamp(0.5, 0.99);
+
+        self.primary.render(primary_f, pw_1, shape_1, &mut self.temp[..size]);
+        self.auxiliary.render(auxiliary_f, pw_2, shape_2, aux);
+        for (o, (a, &tmp)) in out.iter_mut().zip(aux.iter().zip(self.temp.iter())).take(size) {
+            *o = (a + tmp) * 0.5;
+        }
+        self.sync.render_sync(primary_f, sync_f, pw_2, shape_2, aux);
+        for (a, &tmp) in aux.iter_mut().zip(self.temp.iter()).take(size) {
+            *a = (*a + tmp) * 0.5;
+        }
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,6 +872,44 @@ mod tests {
             energy += out.iter().map(|v| v * v).sum::<f32>();
         }
         assert!(energy > 0.0, "the noise engine sings: {energy}");
+    }
+
+    #[test]
+    fn virtual_analog_makes_a_detuned_pair() {
+        let mut eng = VirtualAnalogEngine::new();
+        let mut out = vec![0.0_f32; 64];
+        let mut aux = vec![0.0_f32; 64];
+        let p = EngineParameters {
+            note: 48.0,
+            harmonics: 0.6, // detune the second oscillator
+            timbre: 0.4,
+            morph: 0.6,
+            ..Default::default()
+        };
+        let mut energy = 0.0;
+        for _ in 0..60 {
+            let enveloped = eng.render(&p, &mut out, &mut aux);
+            assert!(!enveloped);
+            assert!(
+                out.iter().chain(aux.iter()).all(|v| v.is_finite() && v.abs() <= 2.0),
+                "bounded"
+            );
+            energy += out.iter().map(|v| v * v).sum::<f32>();
+        }
+        assert!(energy > 0.1, "the analog pair sounds: {energy}");
+    }
+
+    #[test]
+    fn variable_shape_oscillator_is_periodic() {
+        let mut osc = VariableShapeOscillator::new();
+        let mut out = vec![0.0_f32; 1024];
+        // ~262 Hz at 48k → normalized 0.00545
+        osc.render(0.00545, 0.5, 0.0, &mut out); // saw
+        // warm up then measure crossings
+        osc.render(0.00545, 0.5, 0.0, &mut out);
+        let zc = out.windows(2).filter(|w| (w[0] >= 0.0) != (w[1] >= 0.0)).count();
+        assert!(zc >= 2 && zc <= 12, "saw has a few crossings: {zc}");
+        assert!(out.iter().all(|v| v.is_finite() && v.abs() <= 2.0));
     }
 
     #[test]

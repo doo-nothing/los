@@ -1,0 +1,95 @@
+# plaits-demo.toml — the FM engine playing a bass riff, an envelope
+# shaping each note, an LFO sweeping the FM index (timbre) for movement.
+# Uncommitted example.
+
+[meta]
+name = "plaits-demo"
+created = ""
+format = 2
+
+[[windows]]
+name = "modules"
+
+[[windows.panes]]
+module = "sequencer"
+instance = 0
+
+[windows.panes.patch_inline]
+bpm = 104.0
+playing = false
+
+[[windows.panes.patch_inline.tracks]]
+length = 16
+steps = [
+  { active = true, note = 36, velocity = 112 },
+  { active = false, note = 36, velocity = 80 },
+  { active = true, note = 48, velocity = 88 },
+  { active = false, note = 36, velocity = 80 },
+  { active = true, note = 43, velocity = 96 },
+  { active = true, note = 36, velocity = 70, prob = 70 },
+  { active = true, note = 39, velocity = 90 },
+  { active = false, note = 36, velocity = 80 },
+  { active = true, note = 41, velocity = 100 },
+  { active = false, note = 36, velocity = 80 },
+  { active = true, note = 48, velocity = 76 },
+  { active = true, note = 50, velocity = 64, prob = 50 },
+  { active = true, note = 43, velocity = 92 },
+  { active = false, note = 36, velocity = 80 },
+  { active = true, note = 46, velocity = 84 },
+  { active = false, note = 36, velocity = 80 },
+]
+
+[[windows.panes]]
+module = "envelope"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+
+[[windows.panes.patch_inline.channels]]
+rise = 0.2
+fall = 0.45
+shape = 0.5
+attenuverter = 1.0
+offset = 0.0
+pluck = 0.25
+gate_mode = false
+loop_mode = false
+trigger_src = "sequencer/0/t1"
+
+[[windows.panes.patch_inline.channels]]
+rise = 0.7
+fall = 0.7
+shape = 0.5
+attenuverter = 1.0
+offset = 0.0
+pluck = 0.0
+gate_mode = false
+loop_mode = true
+trigger_src = "off"
+
+[[windows.panes]]
+module = "plaits"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+engine = "fm"
+harmonics = 0.55
+timbre = 0.4
+morph = 0.45
+level = 0.9
+notes_src = "sequencer/0/t1"
+amp_src = "envelope/0/ch1"
+timbre_src = "envelope/0/ch2"
+
+[[windows.panes]]
+module = "mixer"
+instance = 0
+
+[windows.panes.patch_inline]
+master = 0.9
+
+[[windows.panes]]
+module = "scope"
+instance = 0
