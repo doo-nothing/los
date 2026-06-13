@@ -59,12 +59,16 @@ pub struct Tables {
     pub flute_body_filter: Vec<u16>,       // 128
     pub blowing_envelope: Vec<u16>,        // 392
     pub blowing_jet: Vec<i16>,             // 257
+    // wavetable data (braids_wavetable.bin)
+    pub wt_waves: Vec<u8>,                 // 33024 (256 waves × 129)
+    pub wt_map: Vec<u8>,                   // 256
 }
 
 const BRAIDS_FORMANT_TABLES_BIN: &[u8] = include_bytes!("braids_formant_tables.bin");
 const BRAIDS_NOISE_TABLES_BIN: &[u8] = include_bytes!("braids_noise_tables.bin");
 const BRAIDS_BOWING_TABLES_BIN: &[u8] = include_bytes!("braids_bowing_tables.bin");
 const BRAIDS_WIND_TABLES_BIN: &[u8] = include_bytes!("braids_wind_tables.bin");
+const BRAIDS_WAVETABLE_BIN: &[u8] = include_bytes!("braids_wavetable.bin");
 
 const BRAIDS_DIGITAL_TABLES_BIN: &[u8] = include_bytes!("braids_digital_tables.bin");
 
@@ -196,6 +200,13 @@ pub fn tables() -> &'static Tables {
         let flute_body_filter = take_u16(wd, &mut wo, n_flute);
         let blowing_envelope = take_u16(wd, &mut wo, n_benv);
         let blowing_jet = take_i16(wd, &mut wo, n_jet);
+        // wavetable data: header of 2 u32 lengths, then wt_waves(u8), wt_map(u8)
+        let wt = BRAIDS_WAVETABLE_BIN;
+        let n_wtw =
+            u32::from_le_bytes([wt[0], wt[1], wt[2], wt[3]]) as usize;
+        let n_wtm = u32::from_le_bytes([wt[4], wt[5], wt[6], wt[7]]) as usize;
+        let wt_waves = wt[8..8 + n_wtw].to_vec();
+        let wt_map = wt[8 + n_wtw..8 + n_wtw + n_wtm].to_vec();
         Tables {
             wav_sine,
             increments,
@@ -221,6 +232,8 @@ pub fn tables() -> &'static Tables {
             flute_body_filter,
             blowing_envelope,
             blowing_jet,
+            wt_waves,
+            wt_map,
         }
     })
 }
@@ -992,10 +1005,14 @@ pub enum MacroModel {
     Bowed,
     Blown,
     Fluted,
+    Wavetables,
+    WaveMap,
+    WaveLine,
+    WaveParaphonic,
 }
 
 /// All macro models in panel order — parallel to [`MODEL_NAMES`].
-pub const MODELS: [MacroModel; 40] = [
+pub const MODELS: [MacroModel; 44] = [
     MacroModel::CSaw,
     MacroModel::Morph,
     MacroModel::SawSquare,
@@ -1036,9 +1053,13 @@ pub const MODELS: [MacroModel; 40] = [
     MacroModel::Bowed,
     MacroModel::Blown,
     MacroModel::Fluted,
+    MacroModel::Wavetables,
+    MacroModel::WaveMap,
+    MacroModel::WaveLine,
+    MacroModel::WaveParaphonic,
 ];
 
-pub const MODEL_NAMES: [&str; 40] = [
+pub const MODEL_NAMES: [&str; 44] = [
     "csaw",
     "morph",
     "saw_square",
@@ -1079,6 +1100,10 @@ pub const MODEL_NAMES: [&str; 40] = [
     "bowed",
     "blown",
     "fluted",
+    "wavetables",
+    "wave_map",
+    "wave_line",
+    "wave_paraphonic",
 ];
 
 pub struct MacroOscillator {
@@ -1202,6 +1227,14 @@ impl MacroOscillator {
             MacroModel::Bowed => self.render_digital(DigitalShape::Bowed, sync, buffer, size),
             MacroModel::Blown => self.render_digital(DigitalShape::Blown, sync, buffer, size),
             MacroModel::Fluted => self.render_digital(DigitalShape::Fluted, sync, buffer, size),
+            MacroModel::Wavetables => {
+                self.render_digital(DigitalShape::Wavetables, sync, buffer, size)
+            }
+            MacroModel::WaveMap => self.render_digital(DigitalShape::WaveMap, sync, buffer, size),
+            MacroModel::WaveLine => self.render_digital(DigitalShape::WaveLine, sync, buffer, size),
+            MacroModel::WaveParaphonic => {
+                self.render_digital(DigitalShape::WaveParaphonic, sync, buffer, size)
+            }
         }
     }
 
@@ -1462,6 +1495,10 @@ pub enum DigitalShape {
     Bowed,
     Blown,
     Fluted,
+    Wavetables,
+    WaveMap,
+    WaveLine,
+    WaveParaphonic,
 }
 
 const NUM_FORMANTS: usize = 5;
@@ -1489,6 +1526,81 @@ const DRUM_PARTIAL_DECAY_LONG: [i32; NUM_DRUM_PARTIALS] =
     [65533, 65531, 65531, 65531, 65531, 65516];
 const DRUM_PARTIAL_DECAY_SHORT: [i32; NUM_DRUM_PARTIALS] =
     [65083, 64715, 64715, 64715, 64715, 62312];
+
+// ── wavetable models ─────────────────────────────────────────────────────────
+
+const WAVE_STRIDE: usize = 129;
+
+#[rustfmt::skip]
+const WAVE_LINE: [u8; 64] = [
+    187, 179, 154, 155, 135, 134, 137, 19, 24, 3, 8, 66, 79, 25, 180, 174, 64,
+    127, 198, 15, 10, 7, 11, 0, 191, 192, 115, 238, 237, 236, 241, 47, 70, 76,
+    235, 26, 133, 208, 34, 175, 183, 146, 147, 148, 150, 151, 152, 153, 117,
+    138, 32, 33, 35, 125, 199, 201, 30, 31, 193, 27, 29, 21, 18, 182,
+];
+#[rustfmt::skip]
+const MINI_WAVE_LINE: [u8; 33] = [
+    157, 161, 171, 188, 189, 191, 192, 193, 196, 198, 201, 234, 232,
+    229, 226, 224, 1, 2, 3, 4, 5, 8, 12, 32, 36, 42, 47, 252, 254, 141, 139,
+    135, 174,
+];
+
+const CHORDS: [[u16; 3]; 17] = [
+    [2, 4, 6],
+    [16, 32, 48],
+    [256, 896, 1536],
+    [384, 896, 1280],
+    [384, 896, 1536],
+    [384, 896, 1792],
+    [384, 896, 2176],
+    [896, 1536, 2432],
+    [896, 1539, 2437],
+    [512, 896, 2176],
+    [512, 896, 1792],
+    [512, 896, 1536],
+    [512, 896, 1408],
+    [640, 896, 1536],
+    [4, 896, 1536],
+    [4, 1540, 1536],
+    [4, 1540, 1536],
+];
+
+const WAVETABLE_DEFS: [(u8, [u8; 17]); 20] = [
+    (16, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 15]),
+    (16, [16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 31]),
+    (16, [32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 47]),
+    (16, [48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 63]),
+    (16, [64, 65, 66, 67, 68, 68, 69, 70, 71, 72, 73, 73, 74, 75, 75, 76, 76]),
+    (16, [77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 92]),
+    (16, [93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 108]),
+    (16, [109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 124]),
+    (16, [125, 126, 127, 128, 129, 130, 131, 132, 132, 132, 132, 132, 132, 132, 132, 132, 132]),
+    (16, [133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 144, 144, 145, 145, 145]),
+    (16, [146, 147, 148, 149, 150, 151, 151, 151, 152, 152, 152, 152, 153, 153, 153, 153, 153]),
+    (8, [154, 154, 154, 154, 154, 154, 155, 156, 156, 0, 0, 0, 0, 0, 0, 0, 0]),
+    (16, [176, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 171]),
+    (16, [172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 187]),
+    (16, [176, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 202]),
+    (16, [203, 205, 204, 205, 212, 206, 207, 208, 208, 209, 210, 210, 211, 211, 212, 212, 212]),
+    (8, [213, 213, 213, 214, 215, 216, 217, 218, 219, 0, 0, 0, 0, 0, 0, 0, 0]),
+    (16, [220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 235]),
+    (16, [236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 251]),
+    (4, [252, 253, 254, 255, 254, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+];
+
+/// stmlib `Crossfade` over two unsigned-8 wavetables: interpolate within
+/// each 129-byte wave at `phase` (824 layout — the caller passes `phase>>1`
+/// so the 128-sample wave spans the full cycle), crossfade by `balance`,
+/// and centre the uint8 (−128) into an i16-range sample.
+#[inline]
+fn crossfade_u8(a: &[u8], b: &[u8], phase: u32, balance: u16) -> i32 {
+    let i = (phase >> 24) as usize;
+    let frac = ((phase >> 8) & 0xffff) as i32;
+    let a_v = a[i] as i32 + ((a[i + 1] as i32 - a[i] as i32) * frac >> 16);
+    let b_v = b[i] as i32 + ((b[i + 1] as i32 - b[i] as i32) * frac >> 16);
+    let x = a_v + ((b_v - a_v) * balance as i32 >> 16);
+    (x - 128) << 8
+}
 
 /// braids' `Excitation` — an exponential-decay pulse with an optional
 /// delay before it fires.
@@ -1758,6 +1870,8 @@ pub struct DigitalOscillator {
     wg_bridge: Vec<i8>,
     wg_neck: Vec<i8>,
     wg_bore: Vec<i16>,
+    // wavetable state (paraphonic reuses saw_phase[0..4])
+    smoothed_parameter: i32,
 }
 
 impl Default for DigitalOscillator {
@@ -1829,6 +1943,7 @@ impl Default for DigitalOscillator {
             wg_bridge: vec![0; WG_BRIDGE_LENGTH],
             wg_neck: vec![0; WG_NECK_LENGTH],
             wg_bore: vec![0; WG_BORE_LENGTH],
+            smoothed_parameter: 0,
         }
     }
 }
@@ -1913,6 +2028,7 @@ impl DigitalOscillator {
         self.wg_bridge.iter_mut().for_each(|s| *s = 0);
         self.wg_neck.iter_mut().for_each(|s| *s = 0);
         self.wg_bore.iter_mut().for_each(|s| *s = 0);
+        self.smoothed_parameter = 0;
         // previous_parameter is NOT reset by Init in the firmware
         self.phase = 0;
         self.strike = true;
@@ -1984,6 +2100,179 @@ impl DigitalOscillator {
             DigitalShape::Bowed => self.render_bowed(buffer, size),
             DigitalShape::Blown => self.render_blown(buffer, size),
             DigitalShape::Fluted => self.render_fluted(buffer, size),
+            DigitalShape::Wavetables => self.render_wavetables(sync, buffer, size),
+            DigitalShape::WaveMap => self.render_wave_map(sync, buffer, size),
+            DigitalShape::WaveLine => self.render_wave_line(sync, buffer, size),
+            DigitalShape::WaveParaphonic => self.render_wave_paraphonic(buffer, size),
+        }
+    }
+
+    /// WAVETABLES — scan one of 20 wavetables (parameter_1 selects, with
+    /// hysteresis) by sweeping parameter_0 through its waves, 2× oversampled.
+    fn render_wavetables(&mut self, sync: &[u8], buffer: &mut [i16], size: usize) {
+        let t = tables();
+        let (p1, pp1) = (self.parameter[1] as i32, self.previous_parameter[1] as i32);
+        if p1 > pp1 + 64 || p1 < pp1 - 64 {
+            self.previous_parameter[1] = self.parameter[1];
+        }
+        let wavetable_index =
+            ((self.previous_parameter[1] as u32 * 20) >> 15) as usize % WAVETABLE_DEFS.len();
+        let (num_steps, wave_index) = WAVETABLE_DEFS[wavetable_index];
+        let wave_pointer = ((self.parameter[0] as u32) << 1).wrapping_mul(num_steps as u32);
+        let wp = (wave_pointer >> 16) as usize;
+        let w0 = wave_index[wp.min(16)] as usize * WAVE_STRIDE;
+        let w1 = wave_index[(wp + 1).min(16)] as usize * WAVE_STRIDE;
+        let wave0 = &t.wt_waves[w0..w0 + WAVE_STRIDE];
+        let wave1 = &t.wt_waves[w1..w1 + WAVE_STRIDE];
+        let balance = wave_pointer as u16;
+        let phase_increment = self.phase_increment >> 1;
+        for (n, b) in buffer.iter_mut().take(size).enumerate() {
+            self.phase = self.phase.wrapping_add(phase_increment);
+            if sync[n] != 0 {
+                self.phase = 0;
+            }
+            let mut sample = crossfade_u8(wave0, wave1, self.phase >> 1, balance) >> 1;
+            self.phase = self.phase.wrapping_add(phase_increment);
+            sample += crossfade_u8(wave0, wave1, self.phase >> 1, balance) >> 1;
+            *b = sample as i16;
+        }
+    }
+
+    /// WAVE_MAP — a 16×16 terrain of waves; parameter_0/1 are the X/Y
+    /// coordinate, bilinearly blended. 2× oversampled.
+    fn render_wave_map(&mut self, sync: &[u8], buffer: &mut [i16], size: usize) {
+        let t = tables();
+        let p0 = self.parameter[0] as i32 * 15 >> 4;
+        let p1 = self.parameter[1] as i32 * 15 >> 4;
+        let wave_xfade0 = (p0 << 5) as u16;
+        let wave_xfade1 = (p1 << 5) as u16;
+        let coord0 = (p0 >> 11) as usize;
+        let coord1 = (p1 >> 11) as usize;
+        let slice = |i: usize, j: usize| -> &[u8] {
+            let idx = ((coord0 + i) * 16 + (coord1 + j)).min(255);
+            let w = t.wt_map[idx] as usize * WAVE_STRIDE;
+            &t.wt_waves[w..w + WAVE_STRIDE]
+        };
+        let (w00, w01) = (slice(0, 0), slice(0, 1));
+        let (w10, w11) = (slice(1, 0), slice(1, 1));
+        let cf = |a: &[u8], bb: &[u8], ph: u32| crossfade_u8(a, bb, ph, wave_xfade1) as i16;
+        let phase_increment = self.phase_increment >> 1;
+        for (n, b) in buffer.iter_mut().take(size).enumerate() {
+            self.phase = self.phase.wrapping_add(phase_increment);
+            if sync[n] != 0 {
+                self.phase = 0;
+            }
+            let ph = self.phase >> 1;
+            let mut sample =
+                mix(cf(w00, w01, ph), cf(w10, w11, ph), wave_xfade0) as i32 >> 1;
+            self.phase = self.phase.wrapping_add(phase_increment);
+            let ph = self.phase >> 1;
+            sample += mix(cf(w00, w01, ph), cf(w10, w11, ph), wave_xfade0) as i32 >> 1;
+            *b = sample as i16;
+        }
+    }
+
+    /// WAVE_LINE — scan a 64-step wave path (parameter_0), morphing between
+    /// "rough" (bit-reduced phase) and "smooth" reads by parameter_1. Each
+    /// output sums two 2× oversamples.
+    fn render_wave_line(&mut self, sync: &[u8], buffer: &mut [i16], size: usize) {
+        let t = tables();
+        self.smoothed_parameter =
+            (3 * self.smoothed_parameter + ((self.parameter[0] as i32) << 1)) >> 2;
+        let scan = self.smoothed_parameter as u32 & 0xffff;
+        let wl = |i: usize| -> &[u8] {
+            let w = WAVE_LINE[i.min(63)] as usize * WAVE_STRIDE;
+            &t.wt_waves[w..w + WAVE_STRIDE]
+        };
+        let wave_0 = wl((self.previous_parameter[0] as u32 >> 9) as usize);
+        let wave_1 = wl((scan >> 10) as usize);
+        let wave_2 = wl((scan >> 10) as usize + 1);
+        let smooth_xfade = (scan << 6) as u16;
+        let mut rough_xfade = 0u16;
+        let rough_xfade_increment = (32768 / size.max(1) as u32) as u16;
+        let balance = ((self.parameter[1] as u32) << 3) as u16;
+        let p1 = self.parameter[1];
+        let phase_increment = self.phase_increment >> 1;
+        for (n, b) in buffer.iter_mut().take(size).enumerate() {
+            if sync[n] != 0 {
+                self.phase = 0;
+            }
+            let mut sample = 0i32;
+            for _ in 0..2 {
+                let ph = self.phase >> 1;
+                sample += if p1 < 8192 {
+                    let rough = crossfade_u8(wave_0, wave_1, ph & 0xfe00_0000, rough_xfade);
+                    let smooth = crossfade_u8(wave_0, wave_1, ph, rough_xfade);
+                    mix(rough as i16, smooth as i16, balance) as i32
+                } else if p1 < 16384 {
+                    let rough = crossfade_u8(wave_0, wave_1, ph, rough_xfade);
+                    let smooth = crossfade_u8(wave_1, wave_2, ph, smooth_xfade);
+                    mix(rough as i16, smooth as i16, balance) as i32
+                } else if p1 < 24576 {
+                    let smooth = crossfade_u8(wave_1, wave_2, ph, smooth_xfade);
+                    let rough = crossfade_u8(wave_1, wave_2, ph & 0xfe00_0000, smooth_xfade);
+                    mix(smooth as i16, rough as i16, balance) as i32
+                } else {
+                    let smooth = crossfade_u8(wave_1, wave_2, ph & 0xfe00_0000, smooth_xfade);
+                    let rough = crossfade_u8(wave_1, wave_2, ph & 0xf800_0000, smooth_xfade);
+                    mix(smooth as i16, rough as i16, balance) as i32
+                };
+                self.phase = self.phase.wrapping_add(phase_increment);
+                if p1 < 16384 {
+                    rough_xfade = rough_xfade.wrapping_add(rough_xfade_increment);
+                }
+            }
+            *b = (sample >> 1) as i16;
+        }
+        self.previous_parameter[0] = (self.smoothed_parameter >> 1) as i16;
+    }
+
+    /// WAVE_PARAPHONIC — four detuned wavetable voices forming a chord
+    /// (parameter_1 selects the chord, parameter_0 the wave).
+    fn render_wave_paraphonic(&mut self, buffer: &mut [i16], size: usize) {
+        let t = tables();
+        if self.strike {
+            for k in 0..4 {
+                self.saw_phase[k] = self.next_word();
+            }
+            self.strike = false;
+        }
+        let chord_integral = (self.parameter[1] as usize >> 11).min(15);
+        let mut chord_fractional = ((self.parameter[1] as u32) << 5) & 0xffff;
+        if chord_fractional < 30720 {
+            chord_fractional = 0;
+        } else if chord_fractional >= 34816 {
+            chord_fractional = 65535;
+        } else {
+            chord_fractional = (chord_fractional - 30720) * 16;
+        }
+        let mut phase_increment = [0u32; 3];
+        for (i, pi) in phase_increment.iter_mut().enumerate() {
+            let d1 = CHORDS[chord_integral][i] as i32;
+            let d2 = CHORDS[chord_integral + 1][i] as i32;
+            let detune = d1 + ((d2 - d1) * chord_fractional as i32 >> 16);
+            *pi = compute_phase_increment((self.pitch as i32 + detune) as i16);
+        }
+        let w1 = MINI_WAVE_LINE[(self.parameter[0] as usize >> 10).min(32)] as usize * WAVE_STRIDE;
+        let w2 =
+            MINI_WAVE_LINE[((self.parameter[0] as usize >> 10) + 1).min(32)] as usize * WAVE_STRIDE;
+        let wave_1 = &t.wt_waves[w1..w1 + WAVE_STRIDE];
+        let wave_2 = &t.wt_waves[w2..w2 + WAVE_STRIDE];
+        let wave_xfade = ((self.parameter[0] as u32) << 6) as u16;
+        let incs = [
+            self.phase_increment,
+            phase_increment[0],
+            phase_increment[1],
+            phase_increment[2],
+        ];
+        for b in buffer.iter_mut().take(size) {
+            let mut sample = 0i32;
+            #[allow(clippy::needless_range_loop)] // parallel saw_phase / incs
+            for k in 0..4 {
+                self.saw_phase[k] = self.saw_phase[k].wrapping_add(incs[k]);
+                sample += crossfade_u8(wave_1, wave_2, self.saw_phase[k] >> 1, wave_xfade);
+            }
+            *b = (sample >> 2) as i16;
         }
     }
 
@@ -3603,6 +3892,10 @@ mod tests {
             MacroModel::Bowed,
             MacroModel::Blown,
             MacroModel::Fluted,
+            MacroModel::Wavetables,
+            MacroModel::WaveMap,
+            MacroModel::WaveLine,
+            MacroModel::WaveParaphonic,
         ] {
             let mut m = MacroOscillator::new();
             m.set_model(model);
