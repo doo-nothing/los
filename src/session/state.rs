@@ -1034,6 +1034,46 @@ pub struct BraidsParams {
     pub notes_src: Option<String>,
 }
 
+/// Clouds (modules/clouds) — the MI granular processor: a stereo FX
+/// that records its input and granulates it. Nine knobs (position,
+/// size, pitch, density, texture, dry/wet, spread, feedback, reverb)
+/// plus a freeze toggle.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CloudsParams {
+    #[serde(default)]
+    pub format: u32,
+    pub position: Option<f32>,
+    pub size: Option<f32>,
+    pub pitch: Option<f32>,
+    pub density: Option<f32>,
+    pub texture: Option<f32>,
+    pub dry_wet: Option<f32>,
+    pub spread: Option<f32>,
+    pub feedback: Option<f32>,
+    pub reverb: Option<f32>,
+    pub freeze: Option<bool>,
+    #[serde(default)]
+    pub input: Option<String>,
+    #[serde(default)]
+    pub position_src: Option<String>,
+    #[serde(default)]
+    pub size_src: Option<String>,
+    #[serde(default)]
+    pub pitch_src: Option<String>,
+    #[serde(default)]
+    pub density_src: Option<String>,
+    #[serde(default)]
+    pub texture_src: Option<String>,
+    #[serde(default)]
+    pub dry_wet_src: Option<String>,
+    #[serde(default)]
+    pub spread_src: Option<String>,
+    #[serde(default)]
+    pub feedback_src: Option<String>,
+    #[serde(default)]
+    pub reverb_src: Option<String>,
+}
+
 /// Marbles (modules/marbles) — the MI random sampler: a t-section
 /// (rhythm model, bias, jitter) and an x/y section (spread, bias,
 /// steps, déjà-vu loop length, scale). CV+gate generator.

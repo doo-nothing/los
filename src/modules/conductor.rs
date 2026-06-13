@@ -372,6 +372,7 @@ pub fn canonical_module(name: &str) -> Option<&'static str> {
         "marbles" | "random" => "marbles",
         "warps" | "meta" => "warps",
         "braids" | "macro" => "braids",
+        "clouds" | "granular" => "clouds",
         "conductor" => "conductor",
         _ => return None,
     })
@@ -408,6 +409,7 @@ pub const ADDABLE_MODULES: &[&str] = &[
     "marbles",
     "warps",
     "braids",
+    "clouds",
 ];
 
 /// Spawn a new module instance in a fresh pane of the modules window.

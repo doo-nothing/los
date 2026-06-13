@@ -6,3 +6,6 @@
 //! the FX shell build on it.
 
 pub mod dsp;
+pub mod ui;
+
+pub use ui::run;
