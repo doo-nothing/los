@@ -1074,6 +1074,32 @@ pub struct CloudsParams {
     pub reverb_src: Option<String>,
 }
 
+/// Plaits (modules/plaits) — the MI macro-oscillator voice: an engine
+/// (synthesis model) behind three macros (harmonics/timbre/morph),
+/// pitch + trigger from a note source, level from an amp envelope.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PlaitsParams {
+    #[serde(default)]
+    pub format: u32,
+    pub engine: Option<String>,
+    pub harmonics: Option<f32>,
+    pub timbre: Option<f32>,
+    pub morph: Option<f32>,
+    pub level: Option<f32>,
+    #[serde(default)]
+    pub harmonics_src: Option<String>,
+    #[serde(default)]
+    pub timbre_src: Option<String>,
+    #[serde(default)]
+    pub morph_src: Option<String>,
+    #[serde(default)]
+    pub level_src: Option<String>,
+    #[serde(default)]
+    pub amp_src: Option<String>,
+    #[serde(default)]
+    pub notes_src: Option<String>,
+}
+
 /// Marbles (modules/marbles) — the MI random sampler: a t-section
 /// (rhythm model, bias, jitter) and an x/y section (spread, bias,
 /// steps, déjà-vu loop length, scale). CV+gate generator.

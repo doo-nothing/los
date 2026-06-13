@@ -32,6 +32,7 @@ pub mod ui;
 
 pub use ipc::{routing, shm};
 pub use modules::{
+    plaits,
     clouds,
     braids,
     warps,

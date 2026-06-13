@@ -35,6 +35,7 @@ pub mod lfo;
 pub mod marbles;
 pub mod mixer;
 pub mod peaks;
+pub mod plaits;
 pub mod rings;
 pub mod sampler;
 pub mod scope;

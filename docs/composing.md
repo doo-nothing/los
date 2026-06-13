@@ -491,6 +491,22 @@ break, or another voice to the input and granulate it; publishes
 `clouds/N/level`. (v1 is the granular playback mode; the stretch,
 looping-delay and spectral modes are follow-ups.)
 
+**plaits** (the Mutable Instruments macro-oscillator, the engine
+bank): a monophonic synth voice driven by a note track. `engine`
+selects the synthesis model — v1 ships `noise` (two clocked-noise
+sources through a multimode filter and two band-passes — wind,
+percussion, texture) and `fm` (2-operator FM with feedback and a
+sub-oscillator). `harmonics`, `timbre` and `morph` are the three
+macro knobs, meaning something different per engine (the FM
+ratio/index/feedback, the noise formants/clock/resonance).
+`notes_src` sets the pitch and retriggers the engine on each note;
+`amp_src` (an envelope channel) shapes the level — the voice/braids
+wiring. Every knob has a `*_src` twin; the secondary output publishes
+on `plaits/N/aux`. Engines render at 48 kHz, resampled to the
+session. (The remaining ~18 engines — virtual-analog, waveshaping,
+chord, wavetable, physical models, drums, speech — arrive in later
+releases.)
+
 **mixer**: per-track `level` (0–1), `pan` (−1–1), `drive` (0–1), 3-band
 EQ (±15 dB, `eq_freq` 0–1), `mute`/`solo`; a master strip with the
 same console plus `master_width` (0–2).
@@ -531,6 +547,7 @@ Sources:
 | `warps/N/` | `aux` (the secondary cross-mod output) |
 | `braids/N/` | `level` (the output follower) |
 | `clouds/N/` | `level` (the output follower) |
+| `plaits/N/` | `aux` (the engine's secondary output) |
 | `template/N/` | `lfo` |
 
 Audio `input` fields are 2-segment: a producing module (`voice`,
