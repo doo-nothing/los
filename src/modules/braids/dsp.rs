@@ -55,11 +55,16 @@ pub struct Tables {
     // bowing tables (braids_bowing_tables.bin)
     pub bowing_envelope: Vec<u16>,         // 752
     pub bowing_friction: Vec<u16>,         // 257
+    // wind tables (braids_wind_tables.bin)
+    pub flute_body_filter: Vec<u16>,       // 128
+    pub blowing_envelope: Vec<u16>,        // 392
+    pub blowing_jet: Vec<i16>,             // 257
 }
 
 const BRAIDS_FORMANT_TABLES_BIN: &[u8] = include_bytes!("braids_formant_tables.bin");
 const BRAIDS_NOISE_TABLES_BIN: &[u8] = include_bytes!("braids_noise_tables.bin");
 const BRAIDS_BOWING_TABLES_BIN: &[u8] = include_bytes!("braids_bowing_tables.bin");
+const BRAIDS_WIND_TABLES_BIN: &[u8] = include_bytes!("braids_wind_tables.bin");
 
 const BRAIDS_DIGITAL_TABLES_BIN: &[u8] = include_bytes!("braids_digital_tables.bin");
 
@@ -180,6 +185,17 @@ pub fn tables() -> &'static Tables {
         let mut bo = 8;
         let bowing_envelope = take_u16(bd, &mut bo, n_env);
         let bowing_friction = take_u16(bd, &mut bo, n_fric);
+        // wind tables: header of 3 u32 lengths, then flute(u16), env(u16),
+        // jet(i16)
+        let wd = BRAIDS_WIND_TABLES_BIN;
+        let wlen = |i: usize| {
+            u32::from_le_bytes([wd[i * 4], wd[i * 4 + 1], wd[i * 4 + 2], wd[i * 4 + 3]]) as usize
+        };
+        let (n_flute, n_benv, n_jet) = (wlen(0), wlen(1), wlen(2));
+        let mut wo = 12;
+        let flute_body_filter = take_u16(wd, &mut wo, n_flute);
+        let blowing_envelope = take_u16(wd, &mut wo, n_benv);
+        let blowing_jet = take_i16(wd, &mut wo, n_jet);
         Tables {
             wav_sine,
             increments,
@@ -202,6 +218,9 @@ pub fn tables() -> &'static Tables {
             resonator_scale,
             bowing_envelope,
             bowing_friction,
+            flute_body_filter,
+            blowing_envelope,
+            blowing_jet,
         }
     })
 }
@@ -971,10 +990,12 @@ pub enum MacroModel {
     Snare,
     Cymbal,
     Bowed,
+    Blown,
+    Fluted,
 }
 
 /// All macro models in panel order — parallel to [`MODEL_NAMES`].
-pub const MODELS: [MacroModel; 38] = [
+pub const MODELS: [MacroModel; 40] = [
     MacroModel::CSaw,
     MacroModel::Morph,
     MacroModel::SawSquare,
@@ -1013,9 +1034,11 @@ pub const MODELS: [MacroModel; 38] = [
     MacroModel::Snare,
     MacroModel::Cymbal,
     MacroModel::Bowed,
+    MacroModel::Blown,
+    MacroModel::Fluted,
 ];
 
-pub const MODEL_NAMES: [&str; 38] = [
+pub const MODEL_NAMES: [&str; 40] = [
     "csaw",
     "morph",
     "saw_square",
@@ -1054,6 +1077,8 @@ pub const MODEL_NAMES: [&str; 38] = [
     "snare",
     "cymbal",
     "bowed",
+    "blown",
+    "fluted",
 ];
 
 pub struct MacroOscillator {
@@ -1175,6 +1200,8 @@ impl MacroOscillator {
             MacroModel::Snare => self.render_digital(DigitalShape::Snare, sync, buffer, size),
             MacroModel::Cymbal => self.render_digital(DigitalShape::Cymbal, sync, buffer, size),
             MacroModel::Bowed => self.render_digital(DigitalShape::Bowed, sync, buffer, size),
+            MacroModel::Blown => self.render_digital(DigitalShape::Blown, sync, buffer, size),
+            MacroModel::Fluted => self.render_digital(DigitalShape::Fluted, sync, buffer, size),
         }
     }
 
@@ -1433,6 +1460,8 @@ pub enum DigitalShape {
     Snare,
     Cymbal,
     Bowed,
+    Blown,
+    Fluted,
 }
 
 const NUM_FORMANTS: usize = 5;
@@ -1633,6 +1662,16 @@ const BIQUAD_GAIN: i64 = 6553;
 const BIQUAD_POLE1: i64 = 6948;
 const BIQUAD_POLE2: i64 = -2959;
 const LUT_BOWING_ENVELOPE_SIZE: usize = 752;
+// wind (blown/fluted) lengths + coefficients
+const WG_BORE_LENGTH: usize = 2048;
+const WG_JET_LENGTH: usize = 1024;
+const WG_FBORE_LENGTH: usize = 4096;
+const BREATH_PRESSURE: i64 = 26214;
+const REFLECTION_COEFFICIENT: i64 = -3891;
+const REED_SLOPE: i64 = -1229;
+const REED_OFFSET: i32 = 22938;
+const DC_BLOCKING_POLE: i64 = 4055; // 0.99 * 4096
+const LUT_BLOWING_ENVELOPE_SIZE: usize = 392;
 
 #[inline]
 fn clip16(x: i32) -> i32 {
@@ -1718,6 +1757,7 @@ pub struct DigitalOscillator {
     phy_previous_sample: i16,
     wg_bridge: Vec<i8>,
     wg_neck: Vec<i8>,
+    wg_bore: Vec<i16>,
 }
 
 impl Default for DigitalOscillator {
@@ -1788,6 +1828,7 @@ impl Default for DigitalOscillator {
             phy_previous_sample: 0,
             wg_bridge: vec![0; WG_BRIDGE_LENGTH],
             wg_neck: vec![0; WG_NECK_LENGTH],
+            wg_bore: vec![0; WG_BORE_LENGTH],
         }
     }
 }
@@ -1871,6 +1912,7 @@ impl DigitalOscillator {
         self.phy_previous_sample = 0;
         self.wg_bridge.iter_mut().for_each(|s| *s = 0);
         self.wg_neck.iter_mut().for_each(|s| *s = 0);
+        self.wg_bore.iter_mut().for_each(|s| *s = 0);
         // previous_parameter is NOT reset by Init in the firmware
         self.phase = 0;
         self.strike = true;
@@ -1940,7 +1982,148 @@ impl DigitalOscillator {
             DigitalShape::Snare => self.render_snare(buffer, size),
             DigitalShape::Cymbal => self.render_cymbal(buffer, size),
             DigitalShape::Bowed => self.render_bowed(buffer, size),
+            DigitalShape::Blown => self.render_blown(buffer, size),
+            DigitalShape::Fluted => self.render_fluted(buffer, size),
         }
+    }
+
+    /// BLOWN — a clarinet-ish bore waveguide driven by a non-linear reed.
+    /// parameter_0 = breath noise, parameter_1 = body tuning. Full rate.
+    fn render_blown(&mut self, buffer: &mut [i16], size: usize) {
+        let t = tables();
+        if self.strike {
+            self.wg_bore.iter_mut().for_each(|s| *s = 0);
+            self.strike = false;
+        }
+        let mut delay = (self.digital_delay >> 1).wrapping_sub(1 << 16);
+        while delay > ((WG_BORE_LENGTH as u32 - 1) << 16) {
+            delay >>= 1;
+        }
+        let bore_delay_integral = (delay >> 16) as u16;
+        let bore_delay_fractional = (delay & 0xffff) as u16;
+        let parameter = 28000 - (self.parameter[0] >> 1);
+        let mut filter_state = self.phy_filter_state[0];
+        let mut normalized_pitch = (self.pitch as i32 - 8192 + (self.parameter[1] as i32 >> 1)) >> 7;
+        normalized_pitch = normalized_pitch.clamp(0, 127);
+        let filter_coefficient = t.flute_body_filter[normalized_pitch as usize] as i32;
+        let mut delay_ptr = self.phy_delay_ptr;
+        let mut lp_state = self.phy_lp_state;
+        for b in buffer.iter_mut().take(size) {
+            self.phase = self.phase.wrapping_add(self.phase_increment);
+            let mut breath_pressure = self.next_sample() as i32 * parameter as i32 >> 15;
+            breath_pressure = (breath_pressure as i64 * BREATH_PRESSURE >> 15) as i32;
+            breath_pressure += BREATH_PRESSURE as i32;
+            let bore_delay_ptr =
+                delay_ptr.wrapping_add(2 * WG_BORE_LENGTH as u16).wrapping_sub(bore_delay_integral);
+            let dl_a = self.wg_bore[bore_delay_ptr as usize % WG_BORE_LENGTH];
+            let dl_b = self.wg_bore[(bore_delay_ptr.wrapping_sub(1)) as usize % WG_BORE_LENGTH];
+            let dl_value = mix(dl_a, dl_b, bore_delay_fractional) as i32;
+            let mut pressure_delta = (dl_value >> 1) + lp_state;
+            lp_state = dl_value >> 1;
+            pressure_delta = (REFLECTION_COEFFICIENT * pressure_delta as i64 >> 12) as i32;
+            pressure_delta -= breath_pressure;
+            let reed = clip16((pressure_delta as i64 * REED_SLOPE >> 12) as i32 + REED_OFFSET);
+            let mut out = (pressure_delta as i64 * reed as i64 >> 15) as i32;
+            out += breath_pressure;
+            out = clip16(out);
+            self.wg_bore[delay_ptr as usize % WG_BORE_LENGTH] = out as i16;
+            delay_ptr = delay_ptr.wrapping_add(1);
+            filter_state = (filter_coefficient * out
+                + (4096 - filter_coefficient) * filter_state)
+                >> 12;
+            *b = filter_state as i16;
+        }
+        self.phy_filter_state[0] = filter_state;
+        self.phy_delay_ptr = delay_ptr % WG_BORE_LENGTH as u16;
+        self.phy_lp_state = lp_state;
+    }
+
+    /// FLUTED — a flute waveguide: a jet delay driving a bore delay through
+    /// the jet non-linearity, a body low-pass and a DC blocker.
+    /// parameter_0 = breath intensity, parameter_1 = jet ratio. Full rate.
+    fn render_fluted(&mut self, buffer: &mut [i16], size: usize) {
+        let t = tables();
+        let mut delay_ptr = self.phy_delay_ptr;
+        let mut excitation_ptr = self.phy_excitation_ptr;
+        let mut lp_state = self.phy_lp_state;
+        let mut dc_x0 = self.phy_filter_state[0];
+        let mut dc_y0 = self.phy_filter_state[1];
+        if self.strike {
+            excitation_ptr = 0;
+            self.wg_neck.iter_mut().for_each(|s| *s = 0); // fbore
+            self.wg_bridge.iter_mut().for_each(|s| *s = 0); // jet
+            lp_state = 0;
+            self.strike = false;
+        }
+        let mut bore_delay = (self.digital_delay << 1).wrapping_sub(2 << 16);
+        let mut jet_delay = (bore_delay >> 8) * (48 + (self.parameter[1] as u32 >> 10));
+        bore_delay = bore_delay.wrapping_sub(jet_delay);
+        while bore_delay > ((WG_FBORE_LENGTH as u32 - 1) << 16)
+            || jet_delay > ((WG_JET_LENGTH as u32 - 1) << 16)
+        {
+            bore_delay >>= 1;
+            jet_delay >>= 1;
+        }
+        let bore_delay_integral = (bore_delay >> 16) as u16;
+        let bore_delay_fractional = (bore_delay & 0xffff) as u16;
+        let jet_delay_integral = (jet_delay >> 16) as u16;
+        let jet_delay_fractional = (jet_delay & 0xffff) as u16;
+        let breath_intensity = 2100 - (self.parameter[0] >> 4);
+        let filter_coefficient =
+            t.flute_body_filter[((self.pitch >> 7) as usize).min(127)] as i32;
+        let mut size_left = size;
+        let mut j = 0;
+        while size_left > 0 {
+            size_left -= 1; // mirror the firmware's `while (size--)`
+            self.phase = self.phase.wrapping_add(self.phase_increment);
+            let bore_delay_ptr =
+                delay_ptr.wrapping_add(2 * WG_FBORE_LENGTH as u16).wrapping_sub(bore_delay_integral);
+            let jet_delay_ptr =
+                delay_ptr.wrapping_add(2 * WG_JET_LENGTH as u16).wrapping_sub(jet_delay_integral);
+            let bore_dl_a = self.wg_neck[bore_delay_ptr as usize % WG_FBORE_LENGTH] as i16;
+            let bore_dl_b =
+                self.wg_neck[(bore_delay_ptr.wrapping_sub(1)) as usize % WG_FBORE_LENGTH] as i16;
+            let jet_dl_a = self.wg_bridge[jet_delay_ptr as usize % WG_JET_LENGTH] as i16;
+            let jet_dl_b =
+                self.wg_bridge[(jet_delay_ptr.wrapping_sub(1)) as usize % WG_JET_LENGTH] as i16;
+            let bore_value = (mix(bore_dl_a, bore_dl_b, bore_delay_fractional) as i32) << 9;
+            let jet_value = (mix(jet_dl_a, jet_dl_b, jet_delay_fractional) as i32) << 9;
+            let mut breath_pressure =
+                (t.blowing_envelope[(excitation_ptr as usize).min(LUT_BLOWING_ENVELOPE_SIZE - 1)]
+                    as i32)
+                    << 1;
+            let mut random_pressure = self.next_sample() as i32 * breath_intensity as i32 >> 12;
+            random_pressure = (random_pressure as i64 * breath_pressure as i64 >> 15) as i32;
+            breath_pressure += random_pressure;
+            lp_state = ((-filter_coefficient as i64 * bore_value as i64
+                + (4096 - filter_coefficient) as i64 * lp_state as i64)
+                >> 12) as i32;
+            let mut reflection = lp_state;
+            dc_y0 = (DC_BLOCKING_POLE * dc_y0 as i64 >> 12) as i32;
+            dc_y0 += reflection - dc_x0;
+            dc_x0 = reflection;
+            reflection = dc_y0;
+            let pressure_delta = breath_pressure - (reflection >> 1);
+            self.wg_bridge[delay_ptr as usize % WG_JET_LENGTH] = (pressure_delta >> 9) as i8;
+            let jet_table_index = jet_value.clamp(0, 65535);
+            let pressure_delta =
+                t.blowing_jet[(jet_table_index >> 8) as usize] as i32 + (reflection >> 1);
+            self.wg_neck[delay_ptr as usize % WG_FBORE_LENGTH] = (pressure_delta >> 9) as i8;
+            delay_ptr = delay_ptr.wrapping_add(1);
+            let out = clip16(bore_value >> 1);
+            buffer[j] = out as i16;
+            j += 1;
+            if size_left & 3 != 0 {
+                excitation_ptr = excitation_ptr.wrapping_add(1);
+            }
+        }
+        if excitation_ptr as usize >= LUT_BLOWING_ENVELOPE_SIZE - 32 {
+            excitation_ptr = (LUT_BLOWING_ENVELOPE_SIZE - 32) as u16;
+        }
+        self.phy_delay_ptr = delay_ptr;
+        self.phy_excitation_ptr = excitation_ptr;
+        self.phy_lp_state = lp_state;
+        self.phy_filter_state = [dc_x0, dc_y0];
     }
 
     /// BOWED — a bowed-string waveguide: a bridge + neck delay-line pair
@@ -3418,6 +3601,8 @@ mod tests {
             MacroModel::Snare,
             MacroModel::Cymbal,
             MacroModel::Bowed,
+            MacroModel::Blown,
+            MacroModel::Fluted,
         ] {
             let mut m = MacroOscillator::new();
             m.set_model(model);
