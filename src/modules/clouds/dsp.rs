@@ -9,8 +9,9 @@
 //! firmware's 16-bit store (los has the RAM); linear interpolation is
 //! used for grain playback (the medium-quality path).
 //!
-//! The reverb/diffusion stage and the alternate playback modes
-//! (stretch/looping) build on this core in later passes.
+//! Two playback modes share this core: GRANULAR (the cloud) and
+//! LOOPING_DELAY (a smoothed delay line / crossfaded freeze loop). The
+//! STRETCH (wsola) and SPECTRAL (phase-vocoder) modes are follow-ups.
 
 #![allow(clippy::excessive_precision)]
 
@@ -147,6 +148,25 @@ impl AudioBuffer {
         let x0 = self.data[i];
         let x1 = self.data[if i + 1 >= self.size { 0 } else { i + 1 }];
         x0 + (x1 - x0) * (fractional as f32 / 65536.0)
+    }
+
+    /// 4-point Hermite read at integral sample + 16-bit fractional (the
+    /// firmware's `ReadHermite`, used by the looping/stretch players).
+    #[inline]
+    pub fn read_hermite(&self, integral: i32, fractional: u16) -> f32 {
+        let sz = self.size as i32;
+        let at = |k: i32| self.data[(integral + k).rem_euclid(sz) as usize];
+        let xm1 = at(-1);
+        let x0 = at(0);
+        let x1 = at(1);
+        let x2 = at(2);
+        let t = fractional as f32 / 65536.0;
+        let c = (x1 - xm1) * 0.5;
+        let v = x0 - x1;
+        let w = c + v;
+        let a = w + v + (x2 - x0) * 0.5;
+        let b = w + a;
+        ((a * t - b) * t + c) * t + x0
     }
 }
 
@@ -691,6 +711,16 @@ impl Diffuser {
 // ── the granular processor (top level) ───────────────────────────────────────
 
 /// Full clouds parameters (the panel).
+/// Clouds playback modes (the firmware's `PlaybackMode`). Granular and
+/// looping/delay are implemented; stretch/spectral are follow-ups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackMode {
+    Granular,
+    LoopingDelay,
+}
+
+pub const MODE_NAMES: [&str; 2] = ["granular", "looping_delay"];
+
 #[derive(Debug, Clone, Copy)]
 pub struct CloudsParams {
     pub position: f32,
@@ -704,6 +734,7 @@ pub struct CloudsParams {
     pub reverb: f32,
     pub freeze: bool,
     pub trigger: bool,
+    pub mode: PlaybackMode,
 }
 
 impl Default for CloudsParams {
@@ -720,6 +751,142 @@ impl Default for CloudsParams {
             reverb: 0.0,
             freeze: false,
             trigger: false,
+            mode: PlaybackMode::Granular,
+        }
+    }
+}
+
+const CROSSFADE_DURATION: f32 = 64.0;
+
+/// The looping/delay sample player (clouds `LoopingSamplePlayer`): a
+/// smoothed delay line when running, a crossfaded loop when frozen.
+pub struct LoopingSamplePlayer {
+    phase: f32,
+    current_delay: f32,
+    loop_point: f32,
+    loop_duration: f32,
+    tail_start: f32,
+    tail_duration: f32,
+    loop_reset: f32,
+    synchronized: bool,
+    tap_delay: i32,
+    tap_delay_counter: i32,
+}
+
+impl Default for LoopingSamplePlayer {
+    fn default() -> Self {
+        Self {
+            phase: 0.0,
+            current_delay: 0.0,
+            loop_point: 0.0,
+            loop_duration: 1.0,
+            tail_start: 0.0,
+            tail_duration: 0.0,
+            loop_reset: 0.0,
+            synchronized: false,
+            tap_delay: 0,
+            tap_delay_counter: 0,
+        }
+    }
+}
+
+impl LoopingSamplePlayer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Render `size` stereo frames into `out` (interleaved).
+    pub fn play(
+        &mut self,
+        buf_l: &AudioBuffer,
+        buf_r: &AudioBuffer,
+        params: &CloudsParams,
+        out: &mut [f32],
+        size: usize,
+    ) {
+        let max_delay = buf_l.size() - CROSSFADE_DURATION as i32;
+        let max_delay_f = max_delay as f32;
+        self.tap_delay_counter += size as i32;
+        if self.tap_delay_counter > max_delay {
+            self.tap_delay = 0;
+            self.tap_delay_counter = 0;
+            self.synchronized = false;
+        }
+        if params.trigger {
+            self.tap_delay = self.tap_delay_counter;
+            self.tap_delay_counter = 0;
+            self.synchronized = self.tap_delay > 128;
+            self.loop_reset = self.phase;
+            self.phase = 0.0;
+        }
+
+        if !params.freeze {
+            for n in 0..size {
+                let remaining = size - n;
+                let mut target_delay = params.position * max_delay_f;
+                if self.synchronized {
+                    target_delay = self.tap_delay as f32;
+                }
+                let error = target_delay - self.current_delay;
+                self.current_delay += 0.00005 * error;
+                let mut delay_int = (buf_l.head() - 4 - remaining as i32 + buf_l.size()) << 12;
+                delay_int -= (self.current_delay * 4096.0) as i32;
+                let l = buf_l.read_hermite(delay_int >> 12, (delay_int << 4) as u16);
+                let r = buf_r.read_hermite(delay_int >> 12, (delay_int << 4) as u16);
+                out[n * 2] = l;
+                out[n * 2 + 1] = r;
+            }
+            self.phase = 0.0;
+        } else {
+            let mut loop_point = params.position * max_delay_f * 15.0 / 16.0;
+            loop_point += CROSSFADE_DURATION;
+            let d = params.size;
+            let mut loop_duration = (0.01 + 0.99 * d * d * d) * max_delay_f;
+            if self.synchronized {
+                loop_duration = self.tap_delay as f32;
+            }
+            if loop_point + loop_duration >= max_delay_f {
+                loop_point = max_delay_f - loop_duration;
+            }
+            let phase_increment = if self.synchronized {
+                1.0
+            } else {
+                semitones_to_ratio(params.pitch)
+            };
+            for n in 0..size {
+                let remaining = size - n;
+                if self.phase >= self.loop_duration || self.phase == 0.0 {
+                    if self.phase >= self.loop_duration {
+                        self.loop_reset = self.loop_duration;
+                    }
+                    if self.loop_reset >= self.loop_duration {
+                        self.loop_reset = self.loop_duration;
+                    }
+                    self.tail_start = self.loop_duration - self.loop_reset + self.loop_point;
+                    self.phase = 0.0;
+                    self.tail_duration = CROSSFADE_DURATION.min(CROSSFADE_DURATION * phase_increment);
+                    self.loop_point = loop_point;
+                    self.loop_duration = loop_duration;
+                }
+                self.phase += phase_increment;
+                let mut gain = 1.0;
+                if self.tail_duration != 0.0 {
+                    gain = (self.phase / self.tail_duration).clamp(0.0, 1.0);
+                }
+                let delay_int = (buf_l.head() - 4 - remaining as i32 + buf_l.size()) << 12;
+                let position =
+                    delay_int - ((self.loop_duration - self.phase + self.loop_point) * 4096.0) as i32;
+                let mut l = buf_l.read_hermite(position >> 12, (position << 4) as u16) * gain;
+                let mut r = buf_r.read_hermite(position >> 12, (position << 4) as u16) * gain;
+                if gain != 1.0 {
+                    let g2 = 1.0 - gain;
+                    let position2 = delay_int - ((-self.phase + self.tail_start) * 4096.0) as i32;
+                    l += buf_l.read_hermite(position2 >> 12, (position2 << 4) as u16) * g2;
+                    r += buf_r.read_hermite(position2 >> 12, (position2 << 4) as u16) * g2;
+                }
+                out[n * 2] = l;
+                out[n * 2 + 1] = r;
+            }
         }
     }
 }
@@ -737,6 +904,7 @@ pub struct GranularProcessor {
     buf_l: AudioBuffer,
     buf_r: AudioBuffer,
     player: GranularSamplePlayer,
+    looping: LoopingSamplePlayer,
     diffuser: Diffuser,
     reverb: Reverb,
     rng: Rng,
@@ -755,6 +923,7 @@ impl GranularProcessor {
             buf_l: AudioBuffer::new(n),
             buf_r: AudioBuffer::new(n),
             player: GranularSamplePlayer::new(48),
+            looping: LoopingSamplePlayer::new(),
             diffuser: Diffuser::new(sample_rate),
             reverb: Reverb::new(sample_rate),
             rng: Rng::new(seed),
@@ -789,37 +958,52 @@ impl GranularProcessor {
             self.buf_r.write_block(&rec_r);
         }
 
-        // 2. granular: density → overlap, texture → window shape
-        let density = params.density;
-        let overlap = if density >= 0.53 {
-            (density - 0.53) * 2.12
-        } else if density <= 0.47 {
-            (0.47 - density) * 2.12
-        } else {
-            0.0
-        };
-        let window_shape = if params.texture < 0.75 {
-            params.texture * 1.333
-        } else {
-            1.0
-        };
-        let gp = GranularParams {
-            position: params.position,
-            size: params.size,
-            pitch: params.pitch,
-            overlap: overlap.clamp(0.0, 1.0),
-            window_shape,
-            stereo_spread: params.stereo_spread,
-            trigger: params.trigger,
-        };
         if self.scratch.len() < size * 2 {
             self.scratch.resize(size * 2, 0.0);
         }
-        self.player
-            .play(&self.buf_l, &self.buf_r, &gp, &mut self.scratch, size, &mut self.rng);
+        // 2. the playback engine (granular or looping/delay)
+        match params.mode {
+            PlaybackMode::Granular => {
+                let density = params.density;
+                let overlap = if density >= 0.53 {
+                    (density - 0.53) * 2.12
+                } else if density <= 0.47 {
+                    (0.47 - density) * 2.12
+                } else {
+                    0.0
+                };
+                let window_shape = if params.texture < 0.75 {
+                    params.texture * 1.333
+                } else {
+                    1.0
+                };
+                let gp = GranularParams {
+                    position: params.position,
+                    size: params.size,
+                    pitch: params.pitch,
+                    overlap: overlap.clamp(0.0, 1.0),
+                    window_shape,
+                    stereo_spread: params.stereo_spread,
+                    trigger: params.trigger,
+                };
+                self.player.play(
+                    &self.buf_l,
+                    &self.buf_r,
+                    &gp,
+                    &mut self.scratch,
+                    size,
+                    &mut self.rng,
+                );
+            }
+            PlaybackMode::LoopingDelay => {
+                self.looping
+                    .play(&self.buf_l, &self.buf_r, params, &mut self.scratch, size);
+            }
+        }
 
-        // 3. diffuser (granular mode: texture > 0.75 → diffusion)
-        let diffusion = if params.texture > 0.75 {
+        // 3. diffuser (granular mode: texture > 0.75 → diffusion; the
+        // looping/delay mode does not diffuse)
+        let diffusion = if params.mode == PlaybackMode::Granular && params.texture > 0.75 {
             (params.texture - 0.75) * 4.0
         } else {
             0.0
@@ -862,6 +1046,42 @@ mod tests {
         let n = buf.size() as usize;
         let block: Vec<f32> = (0..n).map(gen).collect();
         buf.write_block(&block);
+    }
+
+    #[test]
+    fn looping_delay_mode_echoes_the_input() {
+        let mut proc = GranularProcessor::new(48000.0, 1.0, 7);
+        let mut params = CloudsParams {
+            mode: PlaybackMode::LoopingDelay,
+            position: 0.3,
+            dry_wet: 1.0,
+            ..Default::default()
+        };
+        // feed a burst of input, then silence; the delayed signal should ring
+        let mut energy_after = 0.0;
+        for blk in 0..400 {
+            let mut io = vec![0.0_f32; 64];
+            if blk < 4 {
+                for (i, s) in io.iter_mut().enumerate() {
+                    *s = if i % 2 == 0 { 0.5 } else { -0.5 };
+                }
+            }
+            proc.process(&mut io, &params, 32);
+            assert!(io.iter().all(|v| v.is_finite() && v.abs() <= 4.0), "bounded");
+            if blk > 4 {
+                energy_after += io.iter().map(|v| v * v).sum::<f32>();
+            }
+        }
+        assert!(energy_after > 1e-4, "looping/delay echoes the burst: {energy_after}");
+        // freeze + loop should keep running cleanly (the loop point depends
+        // on `position`, so it may land on recorded silence — just require
+        // it stays bounded and finite, never NaN/blowup)
+        params.freeze = true;
+        for _ in 0..200 {
+            let mut io = vec![0.0_f32; 64];
+            proc.process(&mut io, &params, 32);
+            assert!(io.iter().all(|v| v.is_finite() && v.abs() <= 4.0), "frozen bounded");
+        }
     }
 
     #[test]

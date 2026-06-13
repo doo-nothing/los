@@ -48,11 +48,12 @@ enum Row {
     Spread,
     Feedback,
     Reverb,
+    Mode,
     Freeze,
     Input,
 }
 
-const ROWS: [Row; 11] = [
+const ROWS: [Row; 12] = [
     Row::Position,
     Row::Size,
     Row::Pitch,
@@ -62,6 +63,7 @@ const ROWS: [Row; 11] = [
     Row::Spread,
     Row::Feedback,
     Row::Reverb,
+    Row::Mode,
     Row::Freeze,
     Row::Input,
 ];
@@ -89,6 +91,7 @@ fn src_index(r: Row) -> Option<usize> {
 struct CloudsState {
     knob: [f32; N_SRC], // position..reverb in BINDABLE order
     freeze: bool,
+    mode: usize,
     input: Option<String>,
     input_live: bool,
     srcs: [Option<SourceAddr>; N_SRC],
@@ -108,6 +111,7 @@ impl CloudsState {
         Self {
             knob: default_knobs(),
             freeze: false,
+            mode: 0,
             input: None,
             input_live: true,
             srcs: Default::default(),
@@ -143,6 +147,7 @@ impl crate::undo::ParamUndo for CloudsState {
         let r = *ROWS.get(slot)?;
         Some(match r {
             Row::Freeze => V::Bool(self.freeze),
+            Row::Mode => V::Usize(self.mode),
             Row::Input => V::Src(self.input.clone()),
             _ => V::F32(self.get(r)),
         })
@@ -162,6 +167,7 @@ impl crate::undo::ParamUndo for CloudsState {
         };
         match (r, value) {
             (Row::Freeze, V::Bool(v)) => self.freeze = v,
+            (Row::Mode, V::Usize(v)) => self.mode = v.min(super::dsp::MODE_NAMES.len() - 1),
             (Row::Input, V::Src(v)) => self.input = v,
             (_, V::F32(v)) => self.set(r, v),
             _ => {}
@@ -183,6 +189,7 @@ fn snapshot_params(s: &CloudsState) -> state::CloudsParams {
         feedback: Some(s.knob[7]),
         reverb: Some(s.knob[8]),
         freeze: Some(s.freeze),
+        mode: Some(super::dsp::MODE_NAMES[s.mode.min(super::dsp::MODE_NAMES.len() - 1)].to_string()),
         input: s.input.clone(),
         position_src: src(0),
         size_src: src(1),
@@ -208,6 +215,11 @@ fn apply_params(s: &mut CloudsState, p: &state::CloudsParams) {
     }
     if let Some(v) = p.freeze {
         s.freeze = v;
+    }
+    if let Some(m) = p.mode.as_deref() {
+        if let Some(i) = super::dsp::MODE_NAMES.iter().position(|n| *n == m) {
+            s.mode = i;
+        }
     }
     if p.input.is_some() {
         s.input = p.input.clone();
@@ -363,6 +375,11 @@ fn audio_thread(shared: Arc<Mutex<CloudsState>>, instance: usize) -> Result<()> 
                     reverb: v[8],
                     freeze,
                     trigger: false,
+                    mode: if s.mode == 1 {
+                        super::dsp::PlaybackMode::LoopingDelay
+                    } else {
+                        super::dsp::PlaybackMode::Granular
+                    },
                 },
                 freeze,
             )
@@ -413,6 +430,7 @@ fn row_label(r: Row) -> &'static str {
         Row::Spread => "spread",
         Row::Feedback => "feedback",
         Row::Reverb => "reverb",
+        Row::Mode => "mode",
         Row::Freeze => "freeze",
         Row::Input => "input",
     }
@@ -421,6 +439,7 @@ fn row_label(r: Row) -> &'static str {
 fn row_text(s: &CloudsState, r: Row) -> String {
     match r {
         Row::Freeze => if s.freeze { "held" } else { "live" }.to_string(),
+        Row::Mode => super::dsp::MODE_NAMES[s.mode.min(super::dsp::MODE_NAMES.len() - 1)].to_string(),
         Row::Pitch => {
             let st = (s.get(r) - 0.5) * 48.0;
             format!("{:+.0} st", st)
@@ -862,6 +881,15 @@ pub fn run(instance: usize) -> Result<()> {
                             history.record(slot, "Toggle", old, new);
                         }
                     }
+                    Row::Mode => {
+                        let old = s.get_param(slot);
+                        let m = super::dsp::MODE_NAMES.len();
+                        s.mode = crate::keys::cycle(s.mode, steps, m);
+                        let new = s.get_param(slot);
+                        if let (Some(old), Some(new)) = (old, new) {
+                            history.record(slot, "Mode", old, new);
+                        }
+                    }
                     Row::Input => {
                         ex_msg = Some("input row: @ patches, x unpatches".into());
                     }
@@ -1067,7 +1095,7 @@ mod tests {
     #[test]
     fn every_knob_takes_a_cable() {
         for r in ROWS {
-            if !matches!(r, Row::Freeze | Row::Input) {
+            if !matches!(r, Row::Freeze | Row::Mode | Row::Input) {
                 assert!(src_index(r).is_some(), "{r:?} must be bindable");
             }
         }
