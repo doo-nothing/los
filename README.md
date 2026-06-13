@@ -66,7 +66,7 @@ First five minutes: [docs/tour.md](docs/tour.md) · every key:
 | **stages** | Mutable Instruments Stages port: 6-segment generator (envelopes, LFOs, sequencer, S&H) |
 | **marbles** | Mutable Instruments Marbles port: stochastic t/x random sampler with déjà-vu loop |
 | **warps** | Mutable Instruments Warps port: meta-modulator (ring-mod, wavefold, XOR, vocoder) |
-| **braids** | Mutable Instruments Braids port: macro-oscillator (analog models; digital models follow) |
+| **braids** | Mutable Instruments Braids port: macro-oscillator (analog models + digital models: ring-mod, saw-swarm, comb, toy, …) |
 | **clouds** | Mutable Instruments Clouds port: granular processor (grains, diffuser, reverb, freeze) |
 | **plaits** | Mutable Instruments Plaits port: the full macro-oscillator engine bank — all 16 firmware engines (noise, FM, virtual-analog, chord, waveshaping, additive, swarm, grain, wavetable, modal, string, bass/snare/hi-hat drums, particle, speech) |
 | **envelope** (`maths`) | 6 function generators: trig/gate/cycle, slew, pluck, SUM/OR/INV, EOR/EOC, audio-rate out |

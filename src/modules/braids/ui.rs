@@ -32,7 +32,7 @@ use ratatui::{
     Terminal,
 };
 
-use super::dsp::{MacroOscillator, ANALOG_MODELS, MODEL_NAMES, NATIVE_SR};
+use super::dsp::{MacroOscillator, MODELS, MODEL_NAMES, NATIVE_SR};
 use crate::ipc::routing::{self, SourceAddr};
 use crate::shm::{AudioRingbuf, EventRingbuf, Manifest, ModulationBus, ShmTransport};
 use crate::state;
@@ -327,7 +327,7 @@ fn audio_thread(shared: Arc<Mutex<BraidsState>>, instance: usize) -> Result<()> 
                 (true, _, _) => 0.0,
             };
             (
-                ANALOG_MODELS[s.model.min(ANALOG_MODELS.len() - 1)],
+                MODELS[s.model.min(MODELS.len() - 1)],
                 freq_to_pitch(s.freq),
                 timbre,
                 color,
