@@ -1917,6 +1917,12 @@ fn check_clouds(
     ] {
         range01(v, name, loc, r);
     }
+    if let Some(m) = p.mode.as_deref() {
+        let modes = crate::modules::clouds::dsp::MODE_NAMES;
+        if !modes.contains(&m) {
+            r.error(loc, format!("mode {m:?} — one of {}", modes.join(" ")));
+        }
+    }
     check_input(&p.input, "input", loc, declared, r);
     for (field, src) in [
         ("position_src", &p.position_src),

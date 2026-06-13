@@ -1053,6 +1053,8 @@ pub struct CloudsParams {
     pub reverb: Option<f32>,
     pub freeze: Option<bool>,
     #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
     pub input: Option<String>,
     #[serde(default)]
     pub position_src: Option<String>,
