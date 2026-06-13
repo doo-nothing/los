@@ -291,6 +291,19 @@ fn interpolate824(table: &[i16], phase: u32) -> i32 {
     a + ((b - a) * ((phase >> 8) & 0xffff) as i32 >> 16)
 }
 
+/// stmlib `Interpolate1022`: 10.22 fixed-point read of a 1024(+1)-entry
+/// table (10-bit index, 16-bit fraction).
+#[inline]
+fn interpolate1022(table: &[i16], phase: u32) -> i32 {
+    // The firmware computes `(b-a)*frac` in int32 and lets it wrap — the
+    // Karplus-Strong delay line has large sample-to-sample deltas, so the
+    // wrap is audible and must be reproduced (wrapping_mul, not an i64 widen).
+    let i = (phase >> 22) as usize;
+    let a = table[i] as i32;
+    let b = table[(i + 1).min(table.len() - 1)] as i32;
+    a + ((b - a).wrapping_mul(((phase >> 6) & 0xffff) as i32) >> 16)
+}
+
 #[inline]
 fn interpolate88(table: &[i16], index: u16) -> i32 {
     let i = (index >> 8) as usize;
@@ -936,10 +949,11 @@ pub enum MacroModel {
     FilteredNoise,
     TwinPeaksNoise,
     ClockedNoise,
+    Plucked,
 }
 
 /// All macro models in panel order — parallel to [`MODEL_NAMES`].
-pub const MODELS: [MacroModel; 31] = [
+pub const MODELS: [MacroModel; 32] = [
     MacroModel::CSaw,
     MacroModel::Morph,
     MacroModel::SawSquare,
@@ -971,9 +985,10 @@ pub const MODELS: [MacroModel; 31] = [
     MacroModel::FilteredNoise,
     MacroModel::TwinPeaksNoise,
     MacroModel::ClockedNoise,
+    MacroModel::Plucked,
 ];
 
-pub const MODEL_NAMES: [&str; 31] = [
+pub const MODEL_NAMES: [&str; 32] = [
     "csaw",
     "morph",
     "saw_square",
@@ -1005,6 +1020,7 @@ pub const MODEL_NAMES: [&str; 31] = [
     "filtered_noise",
     "twin_peaks_noise",
     "clocked_noise",
+    "plucked",
 ];
 
 pub struct MacroOscillator {
@@ -1115,6 +1131,7 @@ impl MacroOscillator {
             MacroModel::ClockedNoise => {
                 self.render_digital(DigitalShape::ClockedNoise, sync, buffer, size)
             }
+            MacroModel::Plucked => self.render_digital(DigitalShape::Plucked, sync, buffer, size),
         }
     }
 
@@ -1366,10 +1383,26 @@ pub enum DigitalShape {
     FilteredNoise,
     TwinPeaksNoise,
     ClockedNoise,
+    Plucked,
 }
 
 const NUM_FORMANTS: usize = 5;
 const NUM_ADDITIVE_HARMONICS: usize = 12;
+const NUM_PLUCK_VOICES: usize = 3;
+const KS_VOICE_STRIDE: usize = 1025;
+
+/// One Karplus-Strong voice of the PLUCKED model.
+#[derive(Debug, Clone, Copy, Default)]
+struct PluckVoice {
+    size: usize,
+    write_ptr: usize,
+    shift: u32,
+    mask: usize,
+    initialization_ptr: usize,
+    phase: u32,
+    phase_increment: u32,
+    max_phase_increment: u32,
+}
 
 /// braids' `InterpolateFormantParameter`: bilinear lookup into a 5×5×5
 /// formant table (x = parameter_1, y = parameter_0).
@@ -1450,6 +1483,11 @@ pub struct DigitalOscillator {
     clk_rng_state: u32,
     clk_seed: u32,
     clk_sample: i16,
+    // plucked (Karplus-Strong) state
+    pluck: [PluckVoice; NUM_PLUCK_VOICES],
+    pluck_active_voice: usize,
+    pluck_previous_sample: i16,
+    ks_delay: Vec<i16>,
 }
 
 impl Default for DigitalOscillator {
@@ -1498,6 +1536,10 @@ impl Default for DigitalOscillator {
             clk_rng_state: 0,
             clk_seed: 0,
             clk_sample: 0,
+            pluck: [PluckVoice::default(); NUM_PLUCK_VOICES],
+            pluck_active_voice: 0,
+            pluck_previous_sample: 0,
+            ks_delay: vec![0; NUM_PLUCK_VOICES * KS_VOICE_STRIDE],
         }
     }
 }
@@ -1560,6 +1602,10 @@ impl DigitalOscillator {
         self.clk_rng_state = 0;
         self.clk_seed = 0;
         self.clk_sample = 0;
+        self.pluck = [PluckVoice::default(); NUM_PLUCK_VOICES];
+        self.pluck_active_voice = 0;
+        self.pluck_previous_sample = 0;
+        self.ks_delay.iter_mut().for_each(|s| *s = 0);
         // previous_parameter is NOT reset by Init in the firmware
         self.phase = 0;
         self.strike = true;
@@ -1621,7 +1667,107 @@ impl DigitalOscillator {
             DigitalShape::FilteredNoise => self.render_filtered_noise(buffer, size),
             DigitalShape::TwinPeaksNoise => self.render_twin_peaks_noise(buffer, size),
             DigitalShape::ClockedNoise => self.render_clocked_noise(sync, buffer, size),
+            DigitalShape::Plucked => self.render_plucked(buffer, size),
         }
+    }
+
+    /// PLUCKED — a 3-voice Karplus-Strong string with per-voice
+    /// oversampling. parameter_0 sets damping/loss, parameter_1 the pluck
+    /// position (initial noise burst length). Rendered half-rate, 2× up.
+    fn render_plucked(&mut self, buffer: &mut [i16], size: usize) {
+        self.phase_increment <<= 1;
+        if self.strike {
+            self.pluck_active_voice += 1;
+            if self.pluck_active_voice >= NUM_PLUCK_VOICES {
+                self.pluck_active_voice = 0;
+            }
+            let phase_increment = self.phase_increment;
+            let p = &mut self.pluck[self.pluck_active_voice];
+            let mut increment = phase_increment as i32;
+            p.shift = 0;
+            while increment > (2 << 22) {
+                increment >>= 1;
+                p.shift += 1;
+            }
+            p.size = 1024 >> p.shift;
+            p.mask = p.size - 1;
+            p.write_ptr = 0;
+            p.max_phase_increment = phase_increment << 1;
+            p.phase_increment = phase_increment;
+            let width = (3 * self.parameter[1] as i32) >> 1;
+            p.initialization_ptr = (p.size as i32 * (8192 + width) >> 16) as usize;
+            self.strike = false;
+        }
+        {
+            let phase_increment = self.phase_increment;
+            let p = &mut self.pluck[self.pluck_active_voice];
+            p.phase_increment = phase_increment.min(p.max_phase_increment);
+        }
+        let update_probability = if self.parameter[0] < 16384 {
+            65535u32
+        } else {
+            131072 - (self.parameter[0] as u32 >> 3) * 31
+        };
+        let mut loss = 4096 - (self.phase_increment >> 14) as i32;
+        if loss < 256 {
+            loss = 256;
+        }
+        if self.parameter[0] < 16384 {
+            loss = loss * (16384 - self.parameter[0] as i32) >> 14;
+        } else {
+            loss = 0;
+        }
+        let mut previous_sample = self.pluck_previous_sample as i32;
+        let mut j = 0;
+        while j < size {
+            let mut sample = 0i32;
+            for i in 0..NUM_PLUCK_VOICES {
+                let base = i * KS_VOICE_STRIDE;
+                if self.pluck[i].initialization_ptr != 0 {
+                    self.pluck[i].initialization_ptr -= 1;
+                    let ip = base + self.pluck[i].initialization_ptr;
+                    let excitation = (self.ks_delay[ip] as i32 + 3 * self.next_sample() as i32) >> 2;
+                    self.ks_delay[ip] = excitation as i16;
+                    sample += excitation;
+                } else {
+                    self.pluck[i].phase =
+                        self.pluck[i].phase.wrapping_add(self.pluck[i].phase_increment);
+                    let shift = self.pluck[i].shift;
+                    let mask = self.pluck[i].mask;
+                    let read_ptr = (((self.pluck[i].phase >> (22 + shift)) as usize) + 2) & mask;
+                    let mut write_ptr = self.pluck[i].write_ptr;
+                    while write_ptr != read_ptr {
+                        let next = (write_ptr + 1) & mask;
+                        let a = self.ks_delay[base + write_ptr] as i32;
+                        let b = self.ks_delay[base + next] as i32;
+                        let probability = self.next_word();
+                        if (probability & 0xffff) <= update_probability {
+                            let mut sum = a + b;
+                            sum = if sum < 0 { -(-sum >> 1) } else { sum >> 1 };
+                            if loss != 0 {
+                                sum = sum * (32768 - loss) >> 15;
+                            }
+                            self.ks_delay[base + write_ptr] = sum as i16;
+                        }
+                        if write_ptr == 0 {
+                            self.ks_delay[base + self.pluck[i].size] = self.ks_delay[base];
+                        }
+                        write_ptr = next;
+                    }
+                    self.pluck[i].write_ptr = write_ptr;
+                    let read_phase = self.pluck[i].phase >> shift;
+                    sample += interpolate1022(&self.ks_delay[base..base + KS_VOICE_STRIDE], read_phase);
+                }
+            }
+            sample = clip16(sample);
+            buffer[j] = ((previous_sample + sample) >> 1) as i16;
+            if j + 1 < size {
+                buffer[j + 1] = sample as i16;
+            }
+            previous_sample = sample;
+            j += 2;
+        }
+        self.pluck_previous_sample = previous_sample as i16;
     }
 
     /// FILTERED_NOISE — white noise through a state-variable filter,
@@ -2549,6 +2695,7 @@ mod tests {
             MacroModel::FilteredNoise,
             MacroModel::TwinPeaksNoise,
             MacroModel::ClockedNoise,
+            MacroModel::Plucked,
         ] {
             let mut m = MacroOscillator::new();
             m.set_model(model);
