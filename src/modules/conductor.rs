@@ -367,6 +367,7 @@ pub fn canonical_module(name: &str) -> Option<&'static str> {
         "grids" | "topographic" => "grids",
         "edges" | "chiptune" => "edges",
         "frames" | "keyframer" => "frames",
+        "streams" | "dynamics" => "streams",
         "conductor" => "conductor",
         _ => return None,
     })
@@ -398,6 +399,7 @@ pub const ADDABLE_MODULES: &[&str] = &[
     "grids",
     "edges",
     "frames",
+    "streams",
 ];
 
 /// Spawn a new module instance in a fresh pane of the modules window.

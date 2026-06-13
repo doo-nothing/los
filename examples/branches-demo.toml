@@ -1,0 +1,64 @@
+# branches-demo.toml — one hat track split probabilistically between
+# the open (voice) and closed (peaks hat) sounds. Uncommitted example.
+
+[meta]
+name = "branches-demo"
+created = ""
+format = 2
+
+[[windows]]
+name = "modules"
+
+[[windows.panes]]
+module = "sequencer"
+instance = 0
+
+[windows.panes.patch_inline]
+bpm = 120.0
+playing = false
+
+[[windows.panes.patch_inline.tracks]]
+length = 8
+steps = [
+  { active = true, note = 42, velocity = 80 },
+  { active = true, note = 42, velocity = 52 },
+  { active = true, note = 42, velocity = 88 },
+  { active = true, note = 42, velocity = 47 },
+  { active = true, note = 42, velocity = 76 },
+  { active = true, note = 42, velocity = 50 },
+  { active = true, note = 42, velocity = 92 },
+  { active = true, note = 42, velocity = 44 },
+]
+
+[[windows.panes]]
+module = "branches"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+p1 = 0.3
+toggle1 = false
+latch1 = false
+notes1_src = "sequencer/0/t1"
+
+[[windows.panes]]
+module = "peaks"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+fn1 = "high_hat"
+fn2 = "snare_drum"
+p1 = [0.5, 0.5, 0.5, 0.3]
+p2 = [0.5, 0.4, 0.8, 0.45]
+level = 0.7
+notes1_src = "branches/0/1a"
+notes2_src = "branches/0/1b"
+
+[[windows.panes]]
+module = "mixer"
+instance = 0
+
+[[windows.panes]]
+module = "scope"
+instance = 0

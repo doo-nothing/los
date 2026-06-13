@@ -1,0 +1,112 @@
+# edges-demo.toml — a four-voice chip tune: two squares, NES triangle
+# bass, NES noise percussion. Uncommitted example (house rule).
+
+[meta]
+name = "edges-demo"
+created = ""
+format = 2
+
+[[windows]]
+name = "modules"
+
+[[windows.panes]]
+module = "sequencer"
+instance = 0
+
+[windows.panes.patch_inline]
+bpm = 132.0
+playing = false
+
+[[windows.panes.patch_inline.tracks]]
+length = 16
+scale = "major"
+root = 72
+steps = [
+  { active = true, note = 72, velocity = 90 },
+  { active = false, note = 72, velocity = 80 },
+  { active = true, note = 76, velocity = 80 },
+  { active = true, note = 79, velocity = 84 },
+  { active = false, note = 72, velocity = 80 },
+  { active = true, note = 76, velocity = 76 },
+  { active = true, note = 74, velocity = 70 },
+  { active = false, note = 72, velocity = 80 },
+  { active = true, note = 72, velocity = 88 },
+  { active = false, note = 72, velocity = 80 },
+  { active = true, note = 79, velocity = 82 },
+  { active = true, note = 81, velocity = 78 },
+  { active = false, note = 72, velocity = 80 },
+  { active = true, note = 76, velocity = 74 },
+  { active = true, note = 74, velocity = 68 },
+  { active = false, note = 72, velocity = 80 },
+]
+
+[[windows.panes.patch_inline.tracks]]
+length = 16
+scale = "major"
+root = 76
+steps = [
+  { active = false, note = 76, velocity = 70 },
+  { active = true, note = 76, velocity = 64 },
+  { active = false, note = 76, velocity = 70 },
+  { active = true, note = 79, velocity = 60 },
+  { active = false, note = 76, velocity = 70 },
+  { active = true, note = 83, velocity = 66 },
+  { active = false, note = 76, velocity = 70 },
+  { active = true, note = 79, velocity = 58 },
+  { active = false, note = 76, velocity = 70 },
+  { active = true, note = 76, velocity = 62 },
+  { active = false, note = 76, velocity = 70 },
+  { active = true, note = 81, velocity = 64 },
+  { active = false, note = 76, velocity = 70 },
+  { active = true, note = 84, velocity = 68 },
+  { active = false, note = 76, velocity = 70 },
+  { active = true, note = 79, velocity = 56 },
+]
+
+[[windows.panes.patch_inline.tracks]]
+length = 8
+scale = "major"
+root = 48
+steps = [
+  { active = true, note = 48, velocity = 96 },
+  { active = false, note = 48, velocity = 80 },
+  { active = true, note = 48, velocity = 70 },
+  { active = false, note = 48, velocity = 80 },
+  { active = true, note = 55, velocity = 88 },
+  { active = false, note = 48, velocity = 80 },
+  { active = true, note = 52, velocity = 74 },
+  { active = false, note = 48, velocity = 80 },
+]
+
+[[windows.panes.patch_inline.tracks]]
+length = 4
+steps = [
+  { active = true, note = 60, velocity = 60 },
+  { active = true, note = 60, velocity = 30 },
+  { active = true, note = 60, velocity = 80 },
+  { active = true, note = 60, velocity = 34 },
+]
+
+[[windows.panes]]
+module = "edges"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+shapes = ["square", "square", "nes_tri", "nes_noise"]
+pw = [0.5, 0.62, 0.5, 0.5]
+xpose = [0.5, 0.5, 0.25, 0.5]
+lvl = [0.7, 0.55, 0.8, 0.4]
+level = 0.8
+notes1_src = "sequencer/0/t1"
+notes2_src = "sequencer/0/t2"
+notes3_src = "sequencer/0/t3"
+notes4_src = "sequencer/0/t4"
+
+[[windows.panes]]
+module = "mixer"
+instance = 0
+
+[[windows.panes]]
+module = "scope"
+instance = 0

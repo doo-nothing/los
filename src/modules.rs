@@ -37,6 +37,7 @@ pub mod sampler;
 pub mod scope;
 pub mod wasp;
 pub mod sequencer;
+pub mod streams;
 pub mod tape;
 pub mod tides;
 pub mod swarm;

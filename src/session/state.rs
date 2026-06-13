@@ -981,6 +981,45 @@ pub struct FramesParams {
     pub coupling_src: Option<String>,
 }
 
+/// Streams (modules/streams) — the MI dual dynamics gate: two
+/// channels (left/right of the claimed input), each running one of
+/// six processors (envelope, vactrol, follower, compressor, filter
+/// controller, lorenz); p1/p2 are the channel's two knobs, excite
+/// the manual excitation level (a cable or a note gate overrides).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StreamsParams {
+    #[serde(default)]
+    pub format: u32,
+    pub fn1: Option<String>,
+    pub fn2: Option<String>,
+    pub alt1: Option<bool>,
+    pub alt2: Option<bool>,
+    #[serde(default)]
+    pub p1: Vec<f32>,
+    #[serde(default)]
+    pub p2: Vec<f32>,
+    pub excite1: Option<f32>,
+    pub excite2: Option<f32>,
+    #[serde(default)]
+    pub input: Option<String>,
+    #[serde(default)]
+    pub p1a_src: Option<String>,
+    #[serde(default)]
+    pub p1b_src: Option<String>,
+    #[serde(default)]
+    pub excite1_src: Option<String>,
+    #[serde(default)]
+    pub p2a_src: Option<String>,
+    #[serde(default)]
+    pub p2b_src: Option<String>,
+    #[serde(default)]
+    pub excite2_src: Option<String>,
+    #[serde(default)]
+    pub notes1_src: Option<String>,
+    #[serde(default)]
+    pub notes2_src: Option<String>,
+}
+
 /// The swarm voice (modules/swarm.rs) — the CS-80-flavored brass pad:
 /// chord by name ("min7"), the five knobs, glide, and the three kinds
 /// of binding (knob sources, amp, notes).
