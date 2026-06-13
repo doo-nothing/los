@@ -24,6 +24,8 @@ const NUM_ZONES: usize = 15;
 const HIGHEST_NOTE: i32 = 128 * 128;
 const PITCH_TABLE_START: i32 = 128 * 128;
 const OCTAVE: i32 = 12 * 128;
+const DIGITAL_HIGHEST_NOTE: i32 = 140 * 128;
+const COMB_DELAY_LENGTH: usize = 8192;
 
 const BRAIDS_TABLES_BIN: &[u8] = include_bytes!("braids_tables.bin");
 
@@ -35,7 +37,14 @@ pub struct Tables {
     pub comb: Vec<Vec<i16>>,               // 15 × 257
     pub svf_cutoff: Vec<u16>,              // 257
     pub violent_overdrive: Vec<i16>,       // 257
+    // digital-oscillator tables (braids_digital_tables.bin)
+    pub oscillator_delays: Vec<u32>,       // 97
+    pub svf_damp: Vec<u16>,                // 257
+    pub moderate_overdrive: Vec<i16>,      // 257
+    pub fm_frequency_quantizer: Vec<i16>,  // 129
 }
+
+const BRAIDS_DIGITAL_TABLES_BIN: &[u8] = include_bytes!("braids_digital_tables.bin");
 
 static TABLES: OnceLock<Tables> = OnceLock::new();
 
@@ -77,6 +86,33 @@ pub fn tables() -> &'static Tables {
             .chunks_exact(2)
             .map(|b| i16::from_le_bytes([b[0], b[1]]))
             .collect();
+        // digital tables: header of 4 u32 lengths, then delays(u32),
+        // damp(u16), overdrive(i16), fm_quantizer(i16)
+        let d = BRAIDS_DIGITAL_TABLES_BIN;
+        let len = |i: usize| {
+            u32::from_le_bytes([d[i * 4], d[i * 4 + 1], d[i * 4 + 2], d[i * 4 + 3]]) as usize
+        };
+        let (n_del, n_damp, n_over, n_fmq) = (len(0), len(1), len(2), len(3));
+        let mut off = 16;
+        let oscillator_delays: Vec<u32> = d[off..off + n_del * 4]
+            .chunks_exact(4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
+        off += n_del * 4;
+        let svf_damp: Vec<u16> = d[off..off + n_damp * 2]
+            .chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        off += n_damp * 2;
+        let moderate_overdrive: Vec<i16> = d[off..off + n_over * 2]
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        off += n_over * 2;
+        let fm_frequency_quantizer: Vec<i16> = d[off..off + n_fmq * 2]
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect();
         Tables {
             wav_sine,
             increments,
@@ -85,8 +121,54 @@ pub fn tables() -> &'static Tables {
             comb,
             svf_cutoff,
             violent_overdrive,
+            oscillator_delays,
+            svf_damp,
+            moderate_overdrive,
+            fm_frequency_quantizer,
         }
     })
+}
+
+/// `ComputePhaseIncrement` for the digital oscillator (clamps to the
+/// pitch-table start, then top-octave interpolation + octave shifts).
+/// Identical law to the analog oscillator's.
+fn compute_phase_increment(midi_pitch: i16) -> u32 {
+    let t = tables();
+    let mut pitch = midi_pitch as i32;
+    if pitch >= PITCH_TABLE_START {
+        pitch = PITCH_TABLE_START - 1;
+    }
+    let mut ref_pitch = pitch - PITCH_TABLE_START;
+    let mut num_shifts = 0u32;
+    while ref_pitch < 0 {
+        ref_pitch += OCTAVE;
+        num_shifts += 1;
+    }
+    let idx = (ref_pitch >> 4) as usize;
+    let a = t.increments[idx.min(t.increments.len() - 1)];
+    let b = t.increments[(idx + 1).min(t.increments.len() - 1)];
+    let inc = a.wrapping_add(((b.wrapping_sub(a) as i32) * (ref_pitch & 0xf) >> 4) as u32);
+    inc >> num_shifts
+}
+
+/// `ComputeDelay` — the comb/physical-model delay length in 16.16 samples.
+fn compute_delay(midi_pitch: i16) -> u32 {
+    let t = tables();
+    let mut pitch = midi_pitch as i32;
+    if pitch >= DIGITAL_HIGHEST_NOTE - OCTAVE {
+        pitch = DIGITAL_HIGHEST_NOTE - OCTAVE;
+    }
+    let mut ref_pitch = pitch - PITCH_TABLE_START;
+    let mut num_shifts = 0u32;
+    while ref_pitch < 0 {
+        ref_pitch += OCTAVE;
+        num_shifts += 1;
+    }
+    let idx = (ref_pitch >> 4) as usize;
+    let a = t.oscillator_delays[idx.min(t.oscillator_delays.len() - 1)];
+    let b = t.oscillator_delays[(idx + 1).min(t.oscillator_delays.len() - 1)];
+    let delay = a.wrapping_add(((b.wrapping_sub(a) as i32) * (ref_pitch & 0xf) >> 4) as u32);
+    delay >> 12u32.saturating_sub(num_shifts)
 }
 
 #[inline]
@@ -742,9 +824,15 @@ pub enum MacroModel {
     TripleSquare,
     TripleTriangle,
     TripleSine,
+    // digital models (dispatched to DigitalOscillator)
+    TripleRingMod,
+    SawSwarm,
+    SawComb,
+    Toy,
 }
 
-pub const ANALOG_MODELS: [MacroModel; 13] = [
+/// All macro models in panel order — parallel to [`MODEL_NAMES`].
+pub const MODELS: [MacroModel; 17] = [
     MacroModel::CSaw,
     MacroModel::Morph,
     MacroModel::SawSquare,
@@ -758,9 +846,13 @@ pub const ANALOG_MODELS: [MacroModel; 13] = [
     MacroModel::TripleSquare,
     MacroModel::TripleTriangle,
     MacroModel::TripleSine,
+    MacroModel::TripleRingMod,
+    MacroModel::SawSwarm,
+    MacroModel::SawComb,
+    MacroModel::Toy,
 ];
 
-pub const MODEL_NAMES: [&str; 13] = [
+pub const MODEL_NAMES: [&str; 17] = [
     "csaw",
     "morph",
     "saw_square",
@@ -774,10 +866,15 @@ pub const MODEL_NAMES: [&str; 13] = [
     "triple_square",
     "triple_triangle",
     "triple_sine",
+    "triple_ring_mod",
+    "saw_swarm",
+    "saw_comb",
+    "toy",
 ];
 
 pub struct MacroOscillator {
     osc: [AnalogOscillator; 3],
+    digital: DigitalOscillator,
     pub model: MacroModel,
     pub pitch: i16,
     pub parameter: [i16; 2],
@@ -794,6 +891,7 @@ impl Default for MacroOscillator {
                 AnalogOscillator::new(),
                 AnalogOscillator::new(),
             ],
+            digital: DigitalOscillator::new(),
             model: MacroModel::Morph,
             pitch: 60 << 7,
             parameter: [0, 0],
@@ -840,7 +938,38 @@ impl MacroOscillator {
             | MacroModel::TripleSquare
             | MacroModel::TripleTriangle
             | MacroModel::TripleSine => self.render_triple(sync, buffer, size),
+            MacroModel::TripleRingMod => {
+                self.render_digital(DigitalShape::TripleRingMod, sync, buffer, size)
+            }
+            MacroModel::SawSwarm => self.render_digital(DigitalShape::SawSwarm, sync, buffer, size),
+            MacroModel::Toy => self.render_digital(DigitalShape::Toy, sync, buffer, size),
+            MacroModel::SawComb => self.render_saw_comb(sync, buffer, size),
         }
+    }
+
+    fn render_digital(
+        &mut self,
+        shape: DigitalShape,
+        sync: &[u8],
+        buffer: &mut [i16],
+        size: usize,
+    ) {
+        self.digital.set_shape(shape);
+        self.digital.set_parameters(self.parameter[0], self.parameter[1]);
+        self.digital.set_pitch(self.pitch);
+        self.digital.render(sync, buffer, size);
+    }
+
+    /// SAW_COMB: render a raw saw, then run it through the digital comb.
+    fn render_saw_comb(&mut self, sync: &[u8], buffer: &mut [i16], size: usize) {
+        self.osc[0].set_parameter(0);
+        self.osc[0].set_pitch(self.pitch);
+        self.osc[0].set_shape(AnalogShape::Saw);
+        self.osc[0].render(sync, buffer, None, size);
+        self.digital.set_shape(DigitalShape::Comb);
+        self.digital.set_parameters(self.parameter[0], self.parameter[1]);
+        self.digital.set_pitch(self.pitch);
+        self.digital.render(sync, buffer, size);
     }
 
     fn render_csaw(&mut self, sync: &[u8], buffer: &mut [i16], size: usize) {
@@ -1042,6 +1171,287 @@ impl MacroOscillator {
     }
 }
 
+// ── the digital oscillator ───────────────────────────────────────────────────
+
+/// The braids digital-oscillator shapes (a growing subset of the
+/// firmware's `DigitalOscillatorShape`, ported in batches).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DigitalShape {
+    TripleRingMod,
+    SawSwarm,
+    Comb,
+    Toy,
+}
+
+const FIR4_COEFFICIENTS: [u32; 4] = [10530, 14751, 16384, 14751];
+const FIR4_DC_OFFSET: i32 = 28208;
+
+#[inline]
+fn clip16(x: i32) -> i32 {
+    x.clamp(-32768, 32767)
+}
+
+/// braids' `DigitalOscillator` — the bank of wavetable/physical/noise
+/// digital models behind the macro oscillator. State for all models is
+/// flattened here (only one model is active at a time; `init` zeroes it).
+pub struct DigitalOscillator {
+    shape: DigitalShape,
+    previous_shape: DigitalShape,
+    pitch: i16,
+    parameter: [i16; 2],
+    phase: u32,
+    phase_increment: u32,
+    strike: bool,
+    rng: u32,
+    // flattened per-model state
+    formant_phase: [u32; 3],
+    saw_phase: [u32; 6],
+    saw_bp: i32,
+    saw_lp: i32,
+    ffm_previous_sample: i32,
+    toy_decimation_counter: u16,
+    toy_held_sample: u8,
+    comb_delay: Vec<i16>,
+}
+
+impl Default for DigitalOscillator {
+    fn default() -> Self {
+        Self {
+            shape: DigitalShape::TripleRingMod,
+            previous_shape: DigitalShape::TripleRingMod,
+            pitch: 60 << 7,
+            parameter: [0, 0],
+            phase: 0,
+            phase_increment: 0,
+            strike: true,
+            rng: 0x2192_8374,
+            formant_phase: [0; 3],
+            saw_phase: [0; 6],
+            saw_bp: 0,
+            saw_lp: 0,
+            ffm_previous_sample: 0,
+            toy_decimation_counter: 0,
+            toy_held_sample: 0,
+            comb_delay: vec![0; COMB_DELAY_LENGTH],
+        }
+    }
+}
+
+impl DigitalOscillator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_shape(&mut self, shape: DigitalShape) {
+        self.shape = shape;
+    }
+    pub fn set_pitch(&mut self, pitch: i16) {
+        // Smooth HF noise when the pitch CV is noisy (set_pitch in firmware).
+        if self.pitch > (90 << 7) && pitch > (90 << 7) {
+            self.pitch = ((self.pitch as i32 + pitch as i32) >> 1) as i16;
+        } else {
+            self.pitch = pitch;
+        }
+    }
+    pub fn set_parameters(&mut self, p0: i16, p1: i16) {
+        self.parameter = [p0, p1];
+    }
+    pub fn strike(&mut self) {
+        self.strike = true;
+    }
+
+    fn init(&mut self) {
+        self.formant_phase = [0; 3];
+        self.saw_phase = [0; 6];
+        self.saw_bp = 0;
+        self.saw_lp = 0;
+        self.ffm_previous_sample = 0;
+        self.toy_decimation_counter = 0;
+        self.toy_held_sample = 0;
+        self.comb_delay.iter_mut().for_each(|s| *s = 0);
+        self.phase = 0;
+        self.strike = true;
+    }
+
+    #[inline]
+    fn next_word(&mut self) -> u32 {
+        // stmlib Random LCG.
+        self.rng = self.rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        self.rng
+    }
+
+    pub fn render(&mut self, sync: &[u8], buffer: &mut [i16], size: usize) {
+        if self.shape != self.previous_shape {
+            self.init();
+            self.previous_shape = self.shape;
+        }
+        self.phase_increment = compute_phase_increment(self.pitch);
+        if self.pitch > DIGITAL_HIGHEST_NOTE as i16 {
+            self.pitch = DIGITAL_HIGHEST_NOTE as i16;
+        } else if self.pitch < 0 {
+            self.pitch = 0;
+        }
+        match self.shape {
+            DigitalShape::TripleRingMod => self.render_triple_ring_mod(sync, buffer, size),
+            DigitalShape::SawSwarm => self.render_saw_swarm(sync, buffer, size),
+            DigitalShape::Comb => self.render_comb(buffer, size),
+            DigitalShape::Toy => self.render_toy(sync, buffer, size),
+        }
+    }
+
+    fn render_triple_ring_mod(&mut self, sync: &[u8], buffer: &mut [i16], size: usize) {
+        let t = tables();
+        let mut phase = self.phase.wrapping_add(1 << 30);
+        let increment = self.phase_increment;
+        let mut mod_phase = self.formant_phase[0];
+        let mut mod_phase_2 = self.formant_phase[1];
+        let mod_inc = compute_phase_increment(
+            (self.pitch as i32 + ((self.parameter[0] as i32 - 16384) >> 2)) as i16,
+        );
+        let mod_inc_2 = compute_phase_increment(
+            (self.pitch as i32 + ((self.parameter[1] as i32 - 16384) >> 2)) as i16,
+        );
+        for (n, b) in buffer.iter_mut().take(size).enumerate() {
+            phase = phase.wrapping_add(increment);
+            if sync[n] != 0 {
+                phase = 0;
+                mod_phase = 0;
+                mod_phase_2 = 0;
+            }
+            mod_phase = mod_phase.wrapping_add(mod_inc);
+            mod_phase_2 = mod_phase_2.wrapping_add(mod_inc_2);
+            let mut result = interpolate824(&t.wav_sine, phase);
+            result = result * interpolate824(&t.wav_sine, mod_phase) >> 16;
+            result = result * interpolate824(&t.wav_sine, mod_phase_2) >> 16;
+            result = interpolate88(&t.moderate_overdrive, (result + 32768) as u16);
+            *b = result as i16;
+        }
+        self.phase = phase.wrapping_sub(1 << 30);
+        self.formant_phase[0] = mod_phase;
+        self.formant_phase[1] = mod_phase_2;
+    }
+
+    fn render_saw_swarm(&mut self, sync: &[u8], buffer: &mut [i16], size: usize) {
+        let t = tables();
+        let mut detune = self.parameter[0] as i32 + 1024;
+        detune = (detune * detune) >> 9;
+        let mut increments = [0u32; 7];
+        for (i, inc) in increments.iter_mut().enumerate() {
+            let saw_detune = detune * (i as i32 - 3);
+            let detune_integral = saw_detune >> 16;
+            let detune_fractional = saw_detune & 0xffff;
+            let inc_a = compute_phase_increment((self.pitch as i32 + detune_integral) as i16) as i64;
+            let inc_b =
+                compute_phase_increment((self.pitch as i32 + detune_integral + 1) as i16) as i64;
+            *inc = (inc_a + (((inc_b - inc_a) * detune_fractional as i64) >> 16)) as u32;
+        }
+        if self.strike {
+            for k in 0..6 {
+                self.saw_phase[k] = self.next_word();
+            }
+            self.strike = false;
+        }
+        let mut hp_cutoff = self.pitch as i32;
+        if (self.parameter[1] as i32) < 10922 {
+            hp_cutoff += ((self.parameter[1] as i32 - 10922) * 24) >> 5;
+        } else {
+            hp_cutoff += ((self.parameter[1] as i32 - 10922) * 12) >> 5;
+        }
+        hp_cutoff = hp_cutoff.clamp(0, 32767);
+        let f = interpolate824_u16(&t.svf_cutoff, (hp_cutoff as u32) << 17) as i64;
+        let damp = t.svf_damp[0] as i64;
+        let mut bp = self.saw_bp;
+        let mut lp = self.saw_lp;
+        let mut phase0 = self.phase;
+        for (n, b) in buffer.iter_mut().take(size).enumerate() {
+            if sync[n] != 0 {
+                self.saw_phase = [0; 6];
+            }
+            phase0 = phase0.wrapping_add(increments[0]);
+            for k in 0..6 {
+                self.saw_phase[k] = self.saw_phase[k].wrapping_add(increments[k + 1]);
+            }
+            let mut sample = -28672i32;
+            sample += (phase0 >> 19) as i32;
+            for k in 0..6 {
+                sample += (self.saw_phase[k] >> 19) as i32;
+            }
+            sample = interpolate88(&t.moderate_overdrive, (sample + 32768) as u16);
+            let notch = sample - ((bp as i64 * damp >> 15) as i32);
+            lp += (f * bp as i64 >> 15) as i32;
+            lp = clip16(lp);
+            let hp = notch - lp;
+            bp += (f * hp as i64 >> 15) as i32;
+            *b = clip16(hp) as i16;
+        }
+        self.phase = phase0;
+        self.saw_bp = bp;
+        self.saw_lp = lp;
+    }
+
+    /// Comb filter applied in place over a pre-rendered saw buffer.
+    fn render_comb(&mut self, buffer: &mut [i16], size: usize) {
+        let t = tables();
+        let pitch = self.pitch as i32 + ((self.parameter[0] as i32 - 16384) >> 1);
+        let filtered_pitch = (15 * self.ffm_previous_sample + pitch) >> 4;
+        self.ffm_previous_sample = filtered_pitch;
+        let mut delay = compute_delay(filtered_pitch as i16);
+        if delay > (COMB_DELAY_LENGTH as u32) << 16 {
+            delay = (COMB_DELAY_LENGTH as u32) << 16;
+        }
+        let delay_integral = (delay >> 16) as usize;
+        let delay_fractional = (delay & 0xffff) as i64;
+        let mut resonance = (self.parameter[1] as i32) * 2 - 32768;
+        resonance = interpolate88(&t.moderate_overdrive, (resonance + 32768) as u16);
+        let resonance = resonance as i64;
+        let mut delay_ptr = (self.phase as usize) % COMB_DELAY_LENGTH;
+        for b in buffer.iter_mut().take(size) {
+            let input = *b as i32;
+            let offset = delay_ptr + 2 * COMB_DELAY_LENGTH - delay_integral;
+            let a = self.comb_delay[offset % COMB_DELAY_LENGTH] as i64;
+            let bb = self.comb_delay[(offset - 1) % COMB_DELAY_LENGTH] as i64;
+            let delayed = (a + (((bb - a) * (delay_fractional >> 1)) >> 15)) as i32;
+            let feedback = clip16(((delayed as i64 * resonance >> 15) as i32) + (input >> 1));
+            self.comb_delay[delay_ptr] = feedback as i16;
+            let out = clip16((input + (delayed << 1)) >> 1);
+            *b = out as i16;
+            delay_ptr = (delay_ptr + 1) % COMB_DELAY_LENGTH;
+        }
+        self.phase = delay_ptr as u32;
+    }
+
+    fn render_toy(&mut self, sync: &[u8], buffer: &mut [i16], size: usize) {
+        // 4x oversampling.
+        self.phase_increment >>= 2;
+        let phase_increment = self.phase_increment;
+        let mut phase = self.phase;
+        let mut decimation_counter = self.toy_decimation_counter;
+        let decimation_count = 512u16.wrapping_sub((self.parameter[0] >> 6) as u16);
+        let mut held_sample = self.toy_held_sample;
+        for (n, b) in buffer.iter_mut().take(size).enumerate() {
+            let mut filtered_sample = 0i32;
+            if sync[n] != 0 {
+                phase = 0;
+            }
+            for &coeff in FIR4_COEFFICIENTS.iter() {
+                phase = phase.wrapping_add(phase_increment);
+                if decimation_counter >= decimation_count {
+                    let x = (self.parameter[1] >> 8) as u32;
+                    let v = (((phase >> 24) ^ (x << 1)) & !x).wrapping_add(x >> 1);
+                    held_sample = v as u8;
+                    decimation_counter = 0;
+                }
+                filtered_sample += (coeff * held_sample as u32) as i32;
+                decimation_counter = decimation_counter.wrapping_add(1);
+            }
+            *b = ((filtered_sample >> 8) - FIR4_DC_OFFSET) as i16;
+        }
+        self.toy_held_sample = held_sample;
+        self.toy_decimation_counter = decimation_counter;
+        self.phase = phase;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1161,7 +1571,7 @@ mod tests {
 
     #[test]
     fn all_analog_macro_models_render_bounded_audio() {
-        for model in ANALOG_MODELS {
+        for model in MODELS {
             let mut m = MacroOscillator::new();
             m.set_model(model);
             m.set_pitch(55 << 7);
@@ -1217,6 +1627,40 @@ mod tests {
             nonzero |= out.iter().any(|&v| v.abs() > 1000);
         }
         assert!(nonzero, "triple saw sings");
+    }
+
+    #[test]
+    fn digital_models_make_bounded_sound() {
+        let sync = vec![0u8; 128];
+        for model in [
+            MacroModel::TripleRingMod,
+            MacroModel::SawSwarm,
+            MacroModel::SawComb,
+            MacroModel::Toy,
+        ] {
+            let mut m = MacroOscillator::new();
+            m.set_model(model);
+            m.set_pitch(60 << 7);
+            let mut nonzero = false;
+            for (p0, p1) in [(2000, 4000), (16000, 20000), (30000, 8000)] {
+                m.set_parameters(p0, p1);
+                let mut out = vec![0i16; 128];
+                for _ in 0..40 {
+                    m.render(&sync, &mut out, 128);
+                    assert!(
+                        out.iter().all(|&v| (-32768..=32767).contains(&(v as i32))),
+                        "{model:?} bounded"
+                    );
+                    nonzero |= out.iter().any(|&v| (v as i32).abs() > 200);
+                }
+            }
+            assert!(nonzero, "{model:?} makes sound");
+        }
+    }
+
+    #[test]
+    fn digital_model_count_matches_names() {
+        assert_eq!(MODELS.len(), MODEL_NAMES.len());
     }
 
     #[test]

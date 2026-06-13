@@ -1942,13 +1942,11 @@ fn check_braids(
     r: &mut Report,
     pending: &mut Vec<PendingTrackRef>,
 ) {
-    const MODELS: [&str; 13] = [
-        "csaw", "morph", "saw_square", "sine_triangle", "buzz", "square_sub", "saw_sub",
-        "square_sync", "saw_sync", "triple_saw", "triple_square", "triple_triangle", "triple_sine",
-    ];
+    // canonical list lives in the braids module — never drift from it
+    let models = crate::modules::braids::dsp::MODEL_NAMES;
     if let Some(m) = p.model.as_deref() {
-        if !MODELS.contains(&m) {
-            r.error(loc, format!("model {m:?} — one of {}", MODELS.join(" ")));
+        if !models.contains(&m) {
+            r.error(loc, format!("model {m:?} — one of {}", models.join(" ")));
         }
     }
     for (name, v) in [("timbre", p.timbre), ("color", p.color), ("level", p.level)] {
