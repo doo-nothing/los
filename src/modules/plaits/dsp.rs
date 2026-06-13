@@ -1934,6 +1934,237 @@ impl Engine for GrainEngine {
     }
 }
 
+// ── the wavetable engine ─────────────────────────────────────────────────────
+
+const WAVETABLE_BIN: &[u8] = include_bytes!("wavetable_waves.bin");
+const WT_NUM_WAVES: usize = 192;
+const WT_TABLE_SIZE: usize = 128;
+const WT_STRIDE: usize = WT_TABLE_SIZE + 4; // 4 guard samples per integrated wave
+
+static WT_WAVES: OnceLock<Vec<i16>> = OnceLock::new();
+
+fn wt_waves() -> &'static Vec<i16> {
+    WT_WAVES.get_or_init(|| {
+        WAVETABLE_BIN
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect()
+    })
+}
+
+/// The wave map: 4 banks × 64 waves, each an index into the integrated
+/// wave table. Banks 0–2 are identity; bank 3 is the firmware's shuffled
+/// `w * 101 % 192` map. (No user data — the factory layout.)
+fn wt_wave_map() -> &'static Vec<usize> {
+    static MAP: OnceLock<Vec<usize>> = OnceLock::new();
+    MAP.get_or_init(|| {
+        let mut map = vec![0usize; 4 * 64];
+        for (i, slot) in map.iter_mut().enumerate() {
+            let bank = i / 64;
+            *slot = if bank == 3 {
+                (i * 101) % WT_NUM_WAVES
+            } else {
+                i
+            };
+        }
+        map
+    })
+}
+
+/// stmlib's `Differentiator` — a one-pole high-pass that differentiates
+/// the integrated wavetable back to the audio waveform.
+#[derive(Debug, Clone, Default)]
+struct Differentiator {
+    lp: f32,
+    previous: f32,
+}
+
+impl Differentiator {
+    fn new() -> Self {
+        Self::default()
+    }
+    #[inline]
+    fn process(&mut self, coefficient: f32, s: f32) -> f32 {
+        self.lp += (s - self.previous - self.lp) * coefficient;
+        self.previous = s;
+        self.lp
+    }
+}
+
+#[inline]
+fn interpolate_wave_hermite(table: &[i16], base: usize, index_integral: usize, frac: f32) -> f32 {
+    let at = |k: usize| table[(base + index_integral + k).min(table.len() - 1)] as f32;
+    let xm1 = at(0);
+    let x0 = at(1);
+    let x1 = at(2);
+    let x2 = at(3);
+    let c = (x1 - xm1) * 0.5;
+    let v = x0 - x1;
+    let w = c + v;
+    let a = w + v + (x2 - x0) * 0.5;
+    let b_neg = w + a;
+    (((a * frac) - b_neg) * frac + c) * frac + x0
+}
+
+#[inline]
+fn wt_clamp(x: f32, amount: f32) -> f32 {
+    let mut x = (x - 0.5) * amount;
+    x = x.clamp(-0.5, 0.5);
+    x + 0.5
+}
+
+/// The wavetable engine: an 8×8×4 wave terrain. Three smoothed coordinates
+/// (timbre→X, morph→Y, harmonics→Z) index a trilinear blend of integrated
+/// wavetables, differentiated back to audio. Aux is a 5-bit-crushed copy.
+pub struct WavetableEngine {
+    phase: f32,
+    x_pre_lp: f32,
+    y_pre_lp: f32,
+    z_pre_lp: f32,
+    x_lp: f32,
+    y_lp: f32,
+    z_lp: f32,
+    previous_x: f32,
+    previous_y: f32,
+    previous_z: f32,
+    previous_f0: f32,
+    diff_out: Differentiator,
+}
+
+impl Default for WavetableEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+const WT_A0: f32 = (440.0 / 8.0) / SAMPLE_RATE;
+
+impl WavetableEngine {
+    pub fn new() -> Self {
+        Self {
+            phase: 0.0,
+            x_pre_lp: 0.0,
+            y_pre_lp: 0.0,
+            z_pre_lp: 0.0,
+            x_lp: 0.0,
+            y_lp: 0.0,
+            z_lp: 0.0,
+            previous_x: 0.0,
+            previous_y: 0.0,
+            previous_z: 0.0,
+            previous_f0: WT_A0,
+            diff_out: Differentiator::new(),
+        }
+    }
+
+    #[inline]
+    fn read_wave(waves: &[i16], map: &[usize], x: i32, y: i32, z: i32, pi: usize, pf: f32) -> f32 {
+        let slot = (x + y * 8 + z * 64) as usize;
+        let base = map[slot.min(map.len() - 1)] * WT_STRIDE;
+        interpolate_wave_hermite(waves, base, pi, pf)
+    }
+}
+
+impl Engine for WavetableEngine {
+    fn render(&mut self, p: &EngineParameters, out: &mut [f32], aux: &mut [f32]) -> bool {
+        let waves = wt_waves();
+        let map = wt_wave_map();
+        let f0 = note_to_frequency(p.note);
+        let table_size_f = WT_TABLE_SIZE as f32;
+
+        self.x_pre_lp += (p.timbre * 6.9999 - self.x_pre_lp) * 0.2;
+        self.y_pre_lp += (p.morph * 6.9999 - self.y_pre_lp) * 0.2;
+        self.z_pre_lp += (p.harmonics * 6.9999 - self.z_pre_lp) * 0.05;
+
+        let z = self.z_pre_lp;
+        let quantization = (z - 3.0).clamp(0.0, 1.0);
+        let lp_coefficient = (2.0 * f0 * (4.0 - 3.0 * quantization)).clamp(0.01, 0.1);
+
+        let blend = |pre: f32| {
+            let integral = pre.floor();
+            let mut frac = pre - integral;
+            frac += quantization * (wt_clamp(frac, 16.0) - frac);
+            integral + frac
+        };
+        let x_target = blend(self.x_pre_lp);
+        let y_target = blend(self.y_pre_lp);
+        let z_target = blend(self.z_pre_lp);
+
+        let size = out.len();
+        let mut x_mod = ParamInterp::new(self.previous_x, x_target, size);
+        let mut y_mod = ParamInterp::new(self.previous_y, y_target, size);
+        let mut z_mod = ParamInterp::new(self.previous_z, z_target, size);
+        let mut f0_mod = ParamInterp::new(self.previous_f0, f0, size);
+
+        for (o, a) in out.iter_mut().zip(aux.iter_mut()) {
+            let f0 = f0_mod.next();
+            let gain = (1.0 / (f0 * 131072.0)) * (0.95 - f0);
+            let cutoff = (table_size_f * f0).min(1.0);
+
+            self.x_lp += (x_mod.next() - self.x_lp) * lp_coefficient;
+            self.y_lp += (y_mod.next() - self.y_lp) * lp_coefficient;
+            self.z_lp += (z_mod.next() - self.z_lp) * lp_coefficient;
+
+            let xi = self.x_lp.floor();
+            let xf = self.x_lp - xi;
+            let yi = self.y_lp.floor();
+            let yf = self.y_lp - yi;
+            let zi = self.z_lp.floor();
+            let zf = self.z_lp - zi;
+
+            self.phase += f0;
+            if self.phase >= 1.0 {
+                self.phase -= 1.0;
+            }
+            let pp = self.phase * table_size_f;
+            let pi = pp as usize;
+            let pf = pp - pi as f32;
+
+            let x0 = (xi as i32).clamp(0, 7);
+            let x1 = (xi as i32 + 1).clamp(0, 7);
+            let y0 = (yi as i32).clamp(0, 7);
+            let y1 = (yi as i32 + 1).clamp(0, 7);
+            let mut z0 = zi as i32;
+            let mut z1 = zi as i32 + 1;
+            if z0 >= 4 {
+                z0 = 7 - z0;
+            }
+            if z1 >= 4 {
+                z1 = 7 - z1;
+            }
+            let z0 = z0.clamp(0, 3);
+            let z1 = z1.clamp(0, 3);
+
+            let rd = |x: i32, y: i32, z: i32| Self::read_wave(waves, map, x, y, z, pi, pf);
+            let x0y0z0 = rd(x0, y0, z0);
+            let x1y0z0 = rd(x1, y0, z0);
+            let xy0z0 = x0y0z0 + (x1y0z0 - x0y0z0) * xf;
+            let x0y1z0 = rd(x0, y1, z0);
+            let x1y1z0 = rd(x1, y1, z0);
+            let xy1z0 = x0y1z0 + (x1y1z0 - x0y1z0) * xf;
+            let xyz0 = xy0z0 + (xy1z0 - xy0z0) * yf;
+
+            let x0y0z1 = rd(x0, y0, z1);
+            let x1y0z1 = rd(x1, y0, z1);
+            let xy0z1 = x0y0z1 + (x1y0z1 - x0y0z1) * xf;
+            let x0y1z1 = rd(x0, y1, z1);
+            let x1y1z1 = rd(x1, y1, z1);
+            let xy1z1 = x0y1z1 + (x1y1z1 - x0y1z1) * xf;
+            let xyz1 = xy0z1 + (xy1z1 - xy0z1) * yf;
+
+            let mix = xyz0 + (xyz1 - xyz0) * zf;
+            let mix = self.diff_out.process(cutoff, mix) * gain;
+            *o = mix;
+            *a = ((mix * 32.0) as i32) as f32 / 32.0;
+        }
+        self.previous_x = x_target;
+        self.previous_y = y_target;
+        self.previous_z = z_target;
+        self.previous_f0 = f0;
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2003,6 +2234,27 @@ mod tests {
             energy += out.iter().map(|v| v * v).sum::<f32>();
         }
         assert!(energy > 0.0, "the noise engine sings: {energy}");
+    }
+
+    #[test]
+    fn wavetable_engine_scans_the_terrain() {
+        let mut eng = WavetableEngine::new();
+        let mut out = vec![0.0_f32; 64];
+        let mut aux = vec![0.0_f32; 64];
+        for (h, tb, mo) in [(0.1, 0.2, 0.3), (0.5, 0.5, 0.5), (0.9, 0.8, 0.7)] {
+            let p = EngineParameters { note: 48.0, harmonics: h, timbre: tb, morph: mo, ..Default::default() };
+            // warm up past the differentiator's init transient
+            for _ in 0..4 {
+                eng.render(&p, &mut out, &mut aux);
+            }
+            let mut energy = 0.0;
+            for _ in 0..200 {
+                eng.render(&p, &mut out, &mut aux);
+                assert!(out.iter().chain(aux.iter()).all(|v| v.is_finite() && v.abs() <= 4.0), "h={h} bounded");
+                energy += out.iter().map(|v| v * v).sum::<f32>();
+            }
+            assert!(energy > 0.0001, "wavetable sounds at h={h}: {energy}");
+        }
     }
 
     #[test]
