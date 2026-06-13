@@ -1119,6 +1119,163 @@ impl Engine for WaveshapingEngine {
     }
 }
 
+// ── the additive (harmonic) engine ───────────────────────────────────────────
+
+#[inline]
+fn sine_no_wrap(phase: f32) -> f32 {
+    let t = fm_tables();
+    let p = (phase * 512.0).clamp(0.0, (t.sine.len() - 2) as f32);
+    let i = p as usize;
+    let frac = p - i as f32;
+    t.sine[i] + (t.sine[i + 1] - t.sine[i]) * frac
+}
+
+const ADD_BATCH: usize = 12;
+
+/// plaits harmonic_oscillator.h — a bank of `ADD_BATCH` sine partials
+/// from `first_harmonic`, summed by a Chebyshev recurrence.
+#[derive(Debug, Clone, Default)]
+struct HarmonicOscillator {
+    phase: f32,
+    frequency: f32,
+    amplitude: [f32; ADD_BATCH],
+}
+
+impl HarmonicOscillator {
+    fn render(&mut self, first_harmonic: usize, frequency: f32, amps: &[f32], out: &mut [f32], add: bool) {
+        let frequency = frequency.min(0.5);
+        let size = out.len();
+        let f_step = (frequency - self.frequency) / size.max(1) as f32;
+        let mut targets = [0.0_f32; ADD_BATCH];
+        let mut am_step = [0.0_f32; ADD_BATCH];
+        for i in 0..ADD_BATCH {
+            let f = (frequency * (first_harmonic + i) as f32).min(0.5);
+            targets[i] = amps.get(i).copied().unwrap_or(0.0) * (1.0 - f * 2.0);
+            am_step[i] = (targets[i] - self.amplitude[i]) / size.max(1) as f32;
+        }
+        for o in out.iter_mut() {
+            self.frequency += f_step;
+            self.phase += self.frequency;
+            if self.phase >= 1.0 {
+                self.phase -= 1.0;
+            }
+            let two_x = 2.0 * sine_no_wrap(self.phase);
+            let (mut previous, mut current) = if first_harmonic == 1 {
+                (1.0, two_x * 0.5)
+            } else {
+                let k = first_harmonic as f32;
+                (
+                    ws_sine(self.phase * (k - 1.0) + 0.25),
+                    ws_sine(self.phase * k),
+                )
+            };
+            let mut sum = 0.0;
+            for (amp, &step) in self.amplitude.iter_mut().zip(am_step.iter()) {
+                *amp += step;
+                sum += *amp * current;
+                let temp = current;
+                current = two_x * current - previous;
+                previous = temp;
+            }
+            if add {
+                *o += sum;
+            } else {
+                *o = sum;
+            }
+        }
+        self.frequency = frequency;
+        self.amplitude = targets;
+    }
+}
+
+const INTEGER_HARMONICS: [usize; 24] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+];
+const ORGAN_HARMONICS: [usize; 8] = [0, 1, 2, 3, 5, 7, 9, 11];
+
+/// The additive engine: a spectrum shaped by a moving centroid (timbre),
+/// a falloff slope (morph) and resonant bumps (harmonics), rendered by
+/// banks of harmonic oscillators.
+pub struct AdditiveEngine {
+    amplitudes: [f32; 36],
+    osc: [HarmonicOscillator; 3],
+}
+
+impl AdditiveEngine {
+    pub fn new() -> Self {
+        Self {
+            amplitudes: [0.0; 36],
+            osc: Default::default(),
+        }
+    }
+
+    fn update_amplitudes(
+        centroid: f32,
+        slope: f32,
+        bumps: f32,
+        amplitudes: &mut [f32],
+        harmonic_indices: &[usize],
+    ) {
+        let num = harmonic_indices.len();
+        let n = num as f32 - 1.0;
+        let margin = (1.0 / slope - 1.0) / (1.0 + bumps);
+        let center = centroid * (n + margin) - 0.5 * margin;
+        let mut sum = 0.001;
+        for (i, &j) in harmonic_indices.iter().enumerate() {
+            let order = (i as f32 - center).abs() * slope;
+            let mut gain = 1.0 - order;
+            gain += gain.abs();
+            gain *= gain;
+            let b = 0.25 + order * bumps;
+            let bump_factor = 1.0 + ws_sine(b);
+            gain *= bump_factor;
+            gain *= gain;
+            gain *= gain;
+            amplitudes[j] += (gain - amplitudes[j]) * 0.001;
+            sum += amplitudes[j];
+        }
+        let inv = 1.0 / sum;
+        for &j in harmonic_indices.iter() {
+            amplitudes[j] *= inv;
+        }
+    }
+}
+
+impl Default for AdditiveEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Engine for AdditiveEngine {
+    fn render(&mut self, p: &EngineParameters, out: &mut [f32], aux: &mut [f32]) -> bool {
+        let f0 = note_to_frequency(p.note);
+        let centroid = p.timbre;
+        let raw_bumps = p.harmonics;
+        let raw_slope = (1.0 - 0.6 * raw_bumps) * p.morph;
+        let slope = 0.01 + 1.99 * raw_slope * raw_slope * raw_slope;
+        let bumps = 16.0 * raw_bumps * raw_bumps;
+
+        Self::update_amplitudes(centroid, slope, bumps, &mut self.amplitudes, &INTEGER_HARMONICS);
+        let (a0, rest) = self.amplitudes.split_at(12);
+        let a0: Vec<f32> = a0.to_vec();
+        let a1: Vec<f32> = rest[..12].to_vec();
+        self.osc[0].render(1, f0, &a0, out, false);
+        self.osc[1].render(13, f0, &a1, out, true);
+
+        Self::update_amplitudes(
+            centroid,
+            slope,
+            bumps,
+            &mut self.amplitudes[24..],
+            &ORGAN_HARMONICS,
+        );
+        let a2: Vec<f32> = self.amplitudes[24..36].to_vec();
+        self.osc[2].render(1, f0, &a2, aux, false);
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1188,6 +1345,23 @@ mod tests {
             energy += out.iter().map(|v| v * v).sum::<f32>();
         }
         assert!(energy > 0.0, "the noise engine sings: {energy}");
+    }
+
+    #[test]
+    fn additive_engine_makes_a_spectrum() {
+        let mut eng = AdditiveEngine::new();
+        let mut out = vec![0.0_f32; 64];
+        let mut aux = vec![0.0_f32; 64];
+        for (h, tb, mo) in [(0.2, 0.3, 0.4), (0.5, 0.5, 0.6), (0.8, 0.7, 0.8)] {
+            let p = EngineParameters { note: 48.0, harmonics: h, timbre: tb, morph: mo, ..Default::default() };
+            let mut energy = 0.0;
+            for _ in 0..60 {
+                eng.render(&p, &mut out, &mut aux);
+                assert!(out.iter().chain(aux.iter()).all(|v| v.is_finite() && v.abs() <= 4.0), "h={h} bounded");
+                energy += out.iter().map(|v| v * v).sum::<f32>();
+            }
+            assert!(energy > 0.001, "additive sounds at h={h}: {energy}");
+        }
     }
 
     #[test]

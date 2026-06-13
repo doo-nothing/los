@@ -35,8 +35,8 @@ use ratatui::{
 };
 
 use super::dsp::{
-    ChordEngine, Engine, EngineParameters, FmEngine, NoiseEngine, VirtualAnalogEngine,
-    WaveshapingEngine, TRIGGER_HIGH, TRIGGER_RISING_EDGE,
+    AdditiveEngine, ChordEngine, Engine, EngineParameters, FmEngine, NoiseEngine,
+    VirtualAnalogEngine, WaveshapingEngine, TRIGGER_HIGH, TRIGGER_RISING_EDGE,
 };
 use crate::ipc::routing::{self, SourceAddr};
 use crate::shm::{AudioRingbuf, EventRingbuf, Manifest, ModulationBus, ShmTransport};
@@ -45,7 +45,7 @@ use crate::state;
 const FALLBACK_RATE: f32 = 48_000.0;
 const BLOCK: usize = 24;
 
-pub const ENGINE_NAMES: [&str; 5] = ["noise", "fm", "virtual_analog", "chord", "waveshaping"];
+pub const ENGINE_NAMES: [&str; 6] = ["noise", "fm", "virtual_analog", "chord", "waveshaping", "additive"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Row {
@@ -264,6 +264,7 @@ fn audio_thread(shared: Arc<Mutex<PlaitsState>>, instance: usize) -> Result<()> 
     let mut va = VirtualAnalogEngine::new();
     let mut chord = ChordEngine::new();
     let mut waveshaping = WaveshapingEngine::new();
+    let mut additive = AdditiveEngine::new();
     let mut out_buf = vec![0.0_f32; slot_frames + BLOCK];
     let mut aux_buf = vec![0.0_f32; slot_frames + BLOCK];
 
@@ -379,6 +380,7 @@ fn audio_thread(shared: Arc<Mutex<PlaitsState>>, instance: usize) -> Result<()> 
                 2 => &mut va,
                 3 => &mut chord,
                 4 => &mut waveshaping,
+                5 => &mut additive,
                 _ => &mut noise,
             };
             eng.render(
@@ -423,6 +425,7 @@ fn audio_thread(shared: Arc<Mutex<PlaitsState>>, instance: usize) -> Result<()> 
             va = VirtualAnalogEngine::new();
             chord = ChordEngine::new();
             waveshaping = WaveshapingEngine::new();
+            additive = AdditiveEngine::new();
             resample_pos = 0.0;
         }
         if let (Some(base), Some(bus)) = (mod_base, modbus.as_mut()) {
