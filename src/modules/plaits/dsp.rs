@@ -117,6 +117,18 @@ impl Svf {
         }
     }
 
+    /// One pass returning band-pass and low-pass together (the firmware's
+    /// two-mode `Process`).
+    #[inline]
+    pub fn process_bp_lp(&mut self, input: f32) -> (f32, f32) {
+        let hp = (input - self.r * self.state_1 - self.g * self.state_1 - self.state_2) * self.h;
+        let bp = self.g * hp + self.state_1;
+        self.state_1 = self.g * hp + bp;
+        let lp = self.g * bp + self.state_2;
+        self.state_2 = self.g * bp + lp;
+        (bp, lp)
+    }
+
     /// Blend low-pass → high-pass by `mode` (0 = LP, 1 = HP), the
     /// firmware's `ProcessMultimodeLPtoHP`.
     #[inline]
@@ -2933,6 +2945,474 @@ impl Engine for StringEngine {
     }
 }
 
+// ── the bass drum engine ─────────────────────────────────────────────────────
+
+#[inline]
+fn soft_clip(x: f32) -> f32 {
+    if x < -3.0 {
+        -1.0
+    } else if x > 3.0 {
+        1.0
+    } else {
+        x * (27.0 + x * x) / (27.0 + 9.0 * x * x)
+    }
+}
+
+#[inline]
+fn diode(x: f32) -> f32 {
+    if x >= 0.0 {
+        x
+    } else {
+        let x = x * 2.0;
+        0.7 * x / (1.0 + x.abs())
+    }
+}
+
+/// stmlib's `SLOPE` macro: an asymmetric slew toward `target`.
+#[inline]
+fn slope(state: &mut f32, target: f32, positive: f32, negative: f32) {
+    let error = target - *state;
+    *state += if error > 0.0 { positive } else { negative } * error;
+}
+
+/// stmlib's `Overdrive` — a pre-gain → soft-clip → post-gain saturator.
+#[derive(Debug, Clone, Default)]
+struct Overdrive {
+    pre_gain: f32,
+    post_gain: f32,
+}
+
+impl Overdrive {
+    fn new() -> Self {
+        Self::default()
+    }
+    fn process(&mut self, drive: f32, in_out: &mut [f32]) {
+        let drive_2 = drive * drive;
+        let pre_gain_a = drive * 0.5;
+        let pre_gain_b = drive_2 * drive_2 * drive * 24.0;
+        let pre_gain = pre_gain_a + (pre_gain_b - pre_gain_a) * drive_2;
+        let drive_squashed = drive * (2.0 - drive);
+        let post_gain = 1.0 / soft_clip(0.33 + drive_squashed * (pre_gain - 0.33));
+        let size = in_out.len();
+        let mut pre_mod = ParamInterp::new(self.pre_gain, pre_gain, size);
+        let mut post_mod = ParamInterp::new(self.post_gain, post_gain, size);
+        for s in in_out.iter_mut() {
+            let pre = pre_mod.next() * *s;
+            *s = soft_clip(pre) * post_mod.next();
+        }
+        self.pre_gain = pre_gain;
+        self.post_gain = post_gain;
+    }
+}
+
+/// A bare quadrature sine oscillator (stmlib `SineOscillator`), used by
+/// the analog bass drum in its sustained (free-running) mode.
+#[derive(Debug, Clone, Default)]
+struct SineOscillator {
+    phase: f32,
+}
+
+impl SineOscillator {
+    fn new() -> Self {
+        Self::default()
+    }
+    /// `sin = amp·sine(phase)`, `cos = amp·sine(phase+0.25)`.
+    #[inline]
+    fn next(&mut self, frequency: f32, amplitude: f32) -> (f32, f32) {
+        let f = frequency.min(0.5);
+        self.phase += f;
+        if self.phase >= 1.0 {
+            self.phase -= 1.0;
+        }
+        (
+            amplitude * ws_sine(self.phase),
+            amplitude * ws_sine(self.phase + 0.25),
+        )
+    }
+}
+
+/// The 808 bass drum model, revisited (plaits `AnalogBassDrum`).
+struct AnalogBassDrum {
+    pulse_remaining_samples: i32,
+    fm_pulse_remaining_samples: i32,
+    pulse: f32,
+    pulse_height: f32,
+    pulse_lp: f32,
+    fm_pulse_lp: f32,
+    retrig_pulse: f32,
+    lp_out: f32,
+    tone_lp: f32,
+    sustain_gain: f32,
+    resonator: Svf,
+    oscillator: SineOscillator,
+}
+
+impl AnalogBassDrum {
+    fn new() -> Self {
+        Self {
+            pulse_remaining_samples: 0,
+            fm_pulse_remaining_samples: 0,
+            pulse: 0.0,
+            pulse_height: 0.0,
+            pulse_lp: 0.0,
+            fm_pulse_lp: 0.0,
+            retrig_pulse: 0.0,
+            lp_out: 0.0,
+            tone_lp: 0.0,
+            sustain_gain: 0.0,
+            resonator: Svf::new(),
+            oscillator: SineOscillator::new(),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render(
+        &mut self,
+        sustain: bool,
+        trigger: bool,
+        accent: f32,
+        f0: f32,
+        tone: f32,
+        decay: f32,
+        attack_fm_amount: f32,
+        self_fm_amount: f32,
+        out: &mut [f32],
+    ) {
+        let trigger_pulse_duration = (1.0e-3 * SAMPLE_RATE) as i32;
+        let fm_pulse_duration = (6.0e-3 * SAMPLE_RATE) as i32;
+        let pulse_decay_time = 0.2e-3 * SAMPLE_RATE;
+        let pulse_filter_time = 0.1e-3 * SAMPLE_RATE;
+        let retrig_pulse_duration = 0.05 * SAMPLE_RATE;
+
+        let scale = 0.001 / f0;
+        let q = 1500.0 * semitones_to_ratio(decay * 80.0);
+        let tone_f = (4.0 * f0 * semitones_to_ratio(tone * 108.0)).min(1.0);
+        let exciter_leak = 0.08 * (tone + 0.25);
+
+        if trigger {
+            self.pulse_remaining_samples = trigger_pulse_duration;
+            self.fm_pulse_remaining_samples = fm_pulse_duration;
+            self.pulse_height = 3.0 + 7.0 * accent;
+            self.lp_out = 0.0;
+        }
+
+        let size = out.len();
+        let mut sustain_gain = ParamInterp::new(self.sustain_gain, accent * decay, size);
+
+        for o in out.iter_mut() {
+            let mut pulse;
+            if self.pulse_remaining_samples != 0 {
+                self.pulse_remaining_samples -= 1;
+                pulse = if self.pulse_remaining_samples != 0 {
+                    self.pulse_height
+                } else {
+                    self.pulse_height - 1.0
+                };
+                self.pulse = pulse;
+            } else {
+                self.pulse *= 1.0 - 1.0 / pulse_decay_time;
+                pulse = self.pulse;
+            }
+            if sustain {
+                pulse = 0.0;
+            }
+            self.pulse_lp += (pulse - self.pulse_lp) * (1.0 / pulse_filter_time);
+            pulse = diode((pulse - self.pulse_lp) + pulse * 0.044);
+
+            let mut fm_pulse = 0.0;
+            if self.fm_pulse_remaining_samples != 0 {
+                self.fm_pulse_remaining_samples -= 1;
+                fm_pulse = 1.0;
+                self.retrig_pulse = if self.fm_pulse_remaining_samples != 0 {
+                    0.0
+                } else {
+                    -0.8
+                };
+            } else {
+                self.retrig_pulse *= 1.0 - 1.0 / retrig_pulse_duration;
+            }
+            if sustain {
+                fm_pulse = 0.0;
+            }
+            self.fm_pulse_lp += (fm_pulse - self.fm_pulse_lp) * (1.0 / pulse_filter_time);
+
+            let punch = 0.7 + diode(10.0 * self.lp_out - 1.0);
+            let attack_fm = self.fm_pulse_lp * 1.7 * attack_fm_amount;
+            let self_fm = punch * 0.08 * self_fm_amount;
+            let f = (f0 * (1.0 + attack_fm + self_fm)).clamp(0.0, 0.4);
+
+            let resonator_out;
+            if sustain {
+                let (s, c) = self.oscillator.next(f, sustain_gain.next());
+                resonator_out = s;
+                self.lp_out = c;
+            } else {
+                self.resonator.set_g_q(tan_dirty(f), 1.0 + q * f);
+                let (bp, lp) = self.resonator.process_bp_lp((pulse - self.retrig_pulse * 0.2) * scale);
+                resonator_out = bp;
+                self.lp_out = lp;
+            }
+            self.tone_lp += (pulse * exciter_leak + resonator_out - self.tone_lp) * tone_f;
+            *o = self.tone_lp;
+        }
+        self.sustain_gain = accent * decay;
+    }
+}
+
+/// The transient click filter of the synthetic bass drum.
+#[derive(Debug, Clone)]
+struct SyntheticBassDrumClick {
+    lp: f32,
+    hp: f32,
+    filter: Svf,
+}
+
+impl SyntheticBassDrumClick {
+    fn new() -> Self {
+        let mut filter = Svf::new();
+        filter.set_g_q(tan_fast(5000.0 / SAMPLE_RATE), 2.0);
+        Self {
+            lp: 0.0,
+            hp: 0.0,
+            filter,
+        }
+    }
+    #[inline]
+    fn process(&mut self, input: f32) -> f32 {
+        slope(&mut self.lp, input, 0.5, 0.1);
+        self.hp += (self.lp - self.hp) * 0.04;
+        self.filter.process(self.lp - self.hp, SvfMode::LowPass)
+    }
+}
+
+/// The attack-noise band of the synthetic bass drum.
+#[derive(Debug, Clone, Default)]
+struct SyntheticBassDrumAttackNoise {
+    lp: f32,
+    hp: f32,
+}
+
+impl SyntheticBassDrumAttackNoise {
+    #[inline]
+    fn render(&mut self, rng: &mut Rng) -> f32 {
+        let sample = rng.get_float();
+        self.lp += (sample - self.lp) * 0.05;
+        self.hp += (self.lp - self.hp) * 0.005;
+        self.lp - self.hp
+    }
+}
+
+/// A naive (inadvertently 909-ish) bass drum: a distorted FM sine with
+/// body/transient envelopes (plaits `SyntheticBassDrum`).
+struct SyntheticBassDrum {
+    f0: f32,
+    phase: f32,
+    phase_noise: f32,
+    fm: f32,
+    fm_lp: f32,
+    body_env: f32,
+    body_env_lp: f32,
+    transient_env: f32,
+    transient_env_lp: f32,
+    sustain_gain: f32,
+    tone_lp: f32,
+    click: SyntheticBassDrumClick,
+    noise: SyntheticBassDrumAttackNoise,
+    body_env_pulse_width: i32,
+    fm_pulse_width: i32,
+    rng: Rng,
+}
+
+impl SyntheticBassDrum {
+    fn new() -> Self {
+        Self {
+            f0: 0.0,
+            phase: 0.0,
+            phase_noise: 0.0,
+            fm: 0.0,
+            fm_lp: 0.0,
+            body_env: 0.0,
+            body_env_lp: 0.0,
+            transient_env: 0.0,
+            transient_env_lp: 0.0,
+            sustain_gain: 0.0,
+            tone_lp: 0.0,
+            click: SyntheticBassDrumClick::new(),
+            noise: SyntheticBassDrumAttackNoise::default(),
+            body_env_pulse_width: 0,
+            fm_pulse_width: 0,
+            rng: Rng::new(0x9_b1c3),
+        }
+    }
+
+    #[inline]
+    fn distorted_sine(phase: f32, phase_noise: f32, dirtiness: f32) -> f32 {
+        let mut phase = phase + phase_noise * dirtiness;
+        phase -= phase.floor();
+        let triangle = (if phase < 0.5 { phase } else { 1.0 - phase }) * 4.0 - 1.0;
+        let sine = 2.0 * triangle / (1.0 + triangle.abs());
+        let clean_sine = ws_sine(phase + 0.75);
+        sine + (1.0 - dirtiness) * (clean_sine - sine)
+    }
+
+    #[inline]
+    fn transistor_vca(s: f32, gain: f32) -> f32 {
+        let s = (s - 0.6) * gain;
+        3.0 * s / (2.0 + s.abs()) + gain * 0.3
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render(
+        &mut self,
+        sustain: bool,
+        trigger: bool,
+        accent: f32,
+        f0: f32,
+        tone: f32,
+        mut decay: f32,
+        mut dirtiness: f32,
+        fm_envelope_amount: f32,
+        mut fm_envelope_decay: f32,
+        out: &mut [f32],
+    ) {
+        decay *= decay;
+        fm_envelope_decay *= fm_envelope_decay;
+        let size = out.len();
+        let mut f0_mod = ParamInterp::new(self.f0, f0, size);
+        dirtiness *= (1.0 - 8.0 * f0).max(0.0);
+
+        let fm_decay = 1.0 - 1.0 / (0.008 * (1.0 + fm_envelope_decay * 4.0) * SAMPLE_RATE);
+        let body_env_decay =
+            1.0 - 1.0 / (0.02 * SAMPLE_RATE) * semitones_to_ratio(-decay * 60.0);
+        let transient_env_decay = 1.0 - 1.0 / (0.005 * SAMPLE_RATE);
+        let tone_f = (4.0 * f0 * semitones_to_ratio(tone * 108.0)).min(1.0);
+        let transient_level = tone;
+
+        if trigger {
+            self.fm = 1.0;
+            self.body_env = 0.3 + 0.7 * accent;
+            self.transient_env = self.body_env;
+            self.body_env_pulse_width = (SAMPLE_RATE * 0.001) as i32;
+            self.fm_pulse_width = (SAMPLE_RATE * 0.0013) as i32;
+        }
+
+        let mut sustain_gain = ParamInterp::new(self.sustain_gain, accent * decay, size);
+
+        for o in out.iter_mut() {
+            self.phase_noise += (self.rng.get_float() - 0.5 - self.phase_noise) * 0.002;
+            let mut mix = 0.0;
+            if sustain {
+                self.phase += f0_mod.next();
+                if self.phase >= 1.0 {
+                    self.phase -= 1.0;
+                }
+                let body = Self::distorted_sine(self.phase, self.phase_noise, dirtiness);
+                mix -= Self::transistor_vca(body, sustain_gain.next());
+            } else {
+                if self.fm_pulse_width != 0 {
+                    self.fm_pulse_width -= 1;
+                    self.phase = 0.25;
+                } else {
+                    self.fm *= fm_decay;
+                    let fm = 1.0 + fm_envelope_amount * 3.5 * self.fm_lp;
+                    self.phase += (f0_mod.next() * fm).min(0.5);
+                    if self.phase >= 1.0 {
+                        self.phase -= 1.0;
+                    }
+                }
+                if self.body_env_pulse_width != 0 {
+                    self.body_env_pulse_width -= 1;
+                } else {
+                    self.body_env *= body_env_decay;
+                    self.transient_env *= transient_env_decay;
+                }
+                let envelope_lp_f = 0.1;
+                self.body_env_lp += (self.body_env - self.body_env_lp) * envelope_lp_f;
+                self.transient_env_lp += (self.transient_env - self.transient_env_lp) * envelope_lp_f;
+                self.fm_lp += (self.fm - self.fm_lp) * envelope_lp_f;
+
+                let body = Self::distorted_sine(self.phase, self.phase_noise, dirtiness);
+                let click_in = if self.body_env_pulse_width != 0 { 0.0 } else { 1.0 };
+                let transient = self.click.process(click_in) + self.noise.render(&mut self.rng);
+                mix -= Self::transistor_vca(body, self.body_env_lp);
+                mix -= transient * self.transient_env_lp * transient_level;
+            }
+            self.tone_lp += (mix - self.tone_lp) * tone_f;
+            *o = self.tone_lp;
+        }
+        self.f0 = f0;
+        self.sustain_gain = accent * decay;
+    }
+}
+
+/// The bass drum engine: an analog 808 model (out, overdriven) and a
+/// synthetic 909-ish model (aux). harmonics → FM/drive, timbre → tone,
+/// morph → decay.
+pub struct BassDrumEngine {
+    analog: AnalogBassDrum,
+    synthetic: SyntheticBassDrum,
+    overdrive: Overdrive,
+}
+
+impl Default for BassDrumEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BassDrumEngine {
+    pub fn new() -> Self {
+        Self {
+            analog: AnalogBassDrum::new(),
+            synthetic: SyntheticBassDrum::new(),
+            overdrive: Overdrive::new(),
+        }
+    }
+}
+
+impl Engine for BassDrumEngine {
+    fn render(&mut self, p: &EngineParameters, out: &mut [f32], aux: &mut [f32]) -> bool {
+        let f0 = note_to_frequency(p.note);
+        let attack_fm_amount = (p.harmonics * 4.0).min(1.0);
+        let self_fm_amount = (p.harmonics * 4.0 - 1.0).clamp(0.0, 1.0);
+        let drive = (p.harmonics * 2.0 - 1.0).max(0.0) * (1.0 - 16.0 * f0).max(0.0);
+        let sustain = (p.trigger & TRIGGER_UNPATCHED) != 0;
+        let trigger = (p.trigger & TRIGGER_RISING_EDGE) != 0;
+
+        self.analog.render(
+            sustain,
+            trigger,
+            p.accent,
+            f0,
+            p.timbre,
+            p.morph,
+            attack_fm_amount,
+            self_fm_amount,
+            out,
+        );
+        self.overdrive.process(0.5 + 0.5 * drive, out);
+
+        let synth_dirtiness = if sustain {
+            p.harmonics
+        } else {
+            0.4 - 0.25 * p.morph * p.morph
+        };
+        self.synthetic.render(
+            sustain,
+            trigger,
+            p.accent,
+            f0,
+            p.timbre,
+            p.morph,
+            synth_dirtiness,
+            (p.harmonics * 2.0).min(1.0),
+            (p.harmonics * 2.0 - 1.0).max(0.0),
+            aux,
+        );
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3002,6 +3482,24 @@ mod tests {
             energy += out.iter().map(|v| v * v).sum::<f32>();
         }
         assert!(energy > 0.0, "the noise engine sings: {energy}");
+    }
+
+    #[test]
+    fn bass_drum_engine_thumps() {
+        let mut eng = BassDrumEngine::new();
+        let mut out = vec![0.0_f32; 64];
+        let mut aux = vec![0.0_f32; 64];
+        for (h, tb, mo) in [(0.2, 0.4, 0.4), (0.6, 0.5, 0.6), (0.9, 0.7, 0.5)] {
+            let mut energy = 0.0;
+            for blk in 0..120 {
+                let trig = if blk == 0 { TRIGGER_RISING_EDGE } else { 0 };
+                let p = EngineParameters { trigger: trig, note: 36.0, harmonics: h, timbre: tb, morph: mo, ..Default::default() };
+                eng.render(&p, &mut out, &mut aux);
+                assert!(out.iter().chain(aux.iter()).all(|v| v.is_finite() && v.abs() <= 8.0), "h={h} bounded");
+                energy += out.iter().chain(aux.iter()).map(|v| v * v).sum::<f32>();
+            }
+            assert!(energy > 1e-5, "bass drum thumps at h={h}: {energy}");
+        }
     }
 
     #[test]
