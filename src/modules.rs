@@ -30,6 +30,7 @@ pub mod filterbank;
 pub mod frames;
 pub mod grids;
 pub mod lfo;
+pub mod marbles;
 pub mod mixer;
 pub mod peaks;
 pub mod rings;
