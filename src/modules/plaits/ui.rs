@@ -35,8 +35,8 @@ use ratatui::{
 };
 
 use super::dsp::{
-    AdditiveEngine, ChordEngine, Engine, EngineParameters, FmEngine, NoiseEngine, SwarmEngine,
-    VirtualAnalogEngine, WaveshapingEngine, TRIGGER_HIGH, TRIGGER_RISING_EDGE,
+    AdditiveEngine, ChordEngine, Engine, EngineParameters, FmEngine, GrainEngine, NoiseEngine,
+    SwarmEngine, VirtualAnalogEngine, WaveshapingEngine, TRIGGER_HIGH, TRIGGER_RISING_EDGE,
 };
 use crate::ipc::routing::{self, SourceAddr};
 use crate::shm::{AudioRingbuf, EventRingbuf, Manifest, ModulationBus, ShmTransport};
@@ -45,8 +45,8 @@ use crate::state;
 const FALLBACK_RATE: f32 = 48_000.0;
 const BLOCK: usize = 24;
 
-pub const ENGINE_NAMES: [&str; 7] =
-    ["noise", "fm", "virtual_analog", "chord", "waveshaping", "additive", "swarm"];
+pub const ENGINE_NAMES: [&str; 8] =
+    ["noise", "fm", "virtual_analog", "chord", "waveshaping", "additive", "swarm", "grain"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Row {
@@ -267,6 +267,7 @@ fn audio_thread(shared: Arc<Mutex<PlaitsState>>, instance: usize) -> Result<()> 
     let mut waveshaping = WaveshapingEngine::new();
     let mut additive = AdditiveEngine::new();
     let mut swarm = SwarmEngine::new();
+    let mut grain = GrainEngine::new();
     let mut out_buf = vec![0.0_f32; slot_frames + BLOCK];
     let mut aux_buf = vec![0.0_f32; slot_frames + BLOCK];
 
@@ -384,6 +385,7 @@ fn audio_thread(shared: Arc<Mutex<PlaitsState>>, instance: usize) -> Result<()> 
                 4 => &mut waveshaping,
                 5 => &mut additive,
                 6 => &mut swarm,
+                7 => &mut grain,
                 _ => &mut noise,
             };
             eng.render(
@@ -430,6 +432,7 @@ fn audio_thread(shared: Arc<Mutex<PlaitsState>>, instance: usize) -> Result<()> 
             waveshaping = WaveshapingEngine::new();
             additive = AdditiveEngine::new();
             swarm = SwarmEngine::new();
+            grain = GrainEngine::new();
             resample_pos = 0.0;
         }
         if let (Some(base), Some(bus)) = (mod_base, modbus.as_mut()) {

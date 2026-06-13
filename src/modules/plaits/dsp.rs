@@ -1590,6 +1590,350 @@ impl Engine for SwarmEngine {
     }
 }
 
+// ── the grain engine ─────────────────────────────────────────────────────────
+
+/// stmlib's `ParameterInterpolator` — a linear ramp from the previous
+/// block-end value to a target across the block, with a `subsample`
+/// read used by the polyblep reset paths.
+#[derive(Debug, Clone, Default)]
+struct ParamInterp {
+    value: f32,
+    increment: f32,
+}
+
+impl ParamInterp {
+    fn new(state: f32, new_value: f32, size: usize) -> Self {
+        Self {
+            value: state,
+            increment: (new_value - state) / size.max(1) as f32,
+        }
+    }
+    #[inline]
+    fn next(&mut self) -> f32 {
+        self.value += self.increment;
+        self.value
+    }
+    #[inline]
+    fn subsample(&self, t: f32) -> f32 {
+        self.value + self.increment * t
+    }
+}
+
+/// stmlib's `OnePole`, used here as a high-pass DC blocker.
+#[derive(Debug, Clone, Default)]
+struct OnePole {
+    g: f32,
+    gi: f32,
+    state: f32,
+}
+
+impl OnePole {
+    fn new() -> Self {
+        let mut p = OnePole::default();
+        p.set_f(0.01);
+        p
+    }
+    #[inline]
+    fn set_f(&mut self, f: f32) {
+        let f = f.clamp(0.0, 0.497);
+        self.g = (std::f32::consts::PI * f).tan();
+        self.gi = 1.0 / (1.0 + self.g);
+    }
+    #[inline]
+    fn process_high_pass(&mut self, input: f32) -> f32 {
+        let lp = (self.g * input + self.state) * self.gi;
+        self.state = self.g * (input - lp) + lp;
+        input - lp
+    }
+}
+
+/// A grainlet oscillator: a phase-distorted carrier sine windowed by a
+/// formant sine, with a polyblep correction at each carrier reset.
+#[derive(Debug, Clone, Default)]
+struct GrainletOscillator {
+    carrier_phase: f32,
+    formant_phase: f32,
+    next_sample: f32,
+    carrier_frequency: f32,
+    formant_frequency: f32,
+    carrier_shape: f32,
+    carrier_bleed: f32,
+}
+
+impl GrainletOscillator {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    #[inline]
+    fn carrier(phase: f32, shape: f32) -> f32 {
+        let shape = shape * 3.0;
+        let shape_integral = shape.floor();
+        let shape_fractional = shape - shape_integral;
+        let shape_integral = shape_integral as i32;
+        let t = 1.0 - shape_fractional;
+        let mut phase = phase;
+        if shape_integral == 0 {
+            phase *= 1.0 + t * t * t * 15.0;
+            if phase >= 1.0 {
+                phase = 1.0;
+            }
+            phase += 0.75;
+        } else if shape_integral == 1 {
+            let breakpoint = 0.001 + 0.499 * t * t * t;
+            if phase < breakpoint {
+                phase *= 0.5 / breakpoint;
+            } else {
+                phase = 0.5 + (phase - breakpoint) * 0.5 / (1.0 - breakpoint);
+            }
+            phase += 0.75;
+        } else {
+            let t = 1.0 - t;
+            phase = 0.25 + phase * (0.5 + t * t * t * 14.5);
+            if phase >= 0.75 {
+                phase = 0.75;
+            }
+        }
+        (ws_sine(phase) + 1.0) * 0.25
+    }
+
+    #[inline]
+    fn grainlet(carrier_phase: f32, formant_phase: f32, shape: f32, bleed: f32) -> f32 {
+        let carrier = Self::carrier(carrier_phase, shape);
+        let formant = ws_sine(formant_phase);
+        carrier * (formant + bleed) / (1.0 + bleed)
+    }
+
+    fn render(
+        &mut self,
+        carrier_frequency: f32,
+        formant_frequency: f32,
+        carrier_shape: f32,
+        carrier_bleed: f32,
+        out: &mut [f32],
+    ) {
+        let carrier_frequency = carrier_frequency.min(0.25 * 0.5);
+        let formant_frequency = formant_frequency.min(0.25);
+        let size = out.len();
+        let mut cfm = ParamInterp::new(self.carrier_frequency, carrier_frequency, size);
+        let mut ffm = ParamInterp::new(self.formant_frequency, formant_frequency, size);
+        let mut csm = ParamInterp::new(self.carrier_shape, carrier_shape, size);
+        let mut cbm = ParamInterp::new(self.carrier_bleed, carrier_bleed, size);
+        let mut next_sample = self.next_sample;
+        for o in out.iter_mut() {
+            let mut this_sample = next_sample;
+            next_sample = 0.0;
+            let f0 = cfm.next();
+            let f1 = ffm.next();
+            self.carrier_phase += f0;
+            let reset = self.carrier_phase >= 1.0;
+            if reset {
+                self.carrier_phase -= 1.0;
+                let reset_time = self.carrier_phase / f0;
+                let before = Self::grainlet(
+                    1.0,
+                    self.formant_phase + (1.0 - reset_time) * f1,
+                    csm.subsample(1.0 - reset_time),
+                    cbm.subsample(1.0 - reset_time),
+                );
+                let after = Self::grainlet(0.0, 0.0, csm.subsample(1.0), cbm.subsample(1.0));
+                let discontinuity = after - before;
+                this_sample += discontinuity * this_blep(reset_time);
+                next_sample += discontinuity * next_blep(reset_time);
+                self.formant_phase = reset_time * f1;
+            } else {
+                self.formant_phase += f1;
+                if self.formant_phase >= 1.0 {
+                    self.formant_phase -= 1.0;
+                }
+            }
+            next_sample +=
+                Self::grainlet(self.carrier_phase, self.formant_phase, csm.next(), cbm.next());
+            *o = this_sample;
+        }
+        self.next_sample = next_sample;
+        self.carrier_frequency = carrier_frequency;
+        self.formant_frequency = formant_frequency;
+        self.carrier_shape = carrier_shape;
+        self.carrier_bleed = carrier_bleed;
+    }
+}
+
+/// A "Z" oscillator: a ramp-down-windowed pair of sines with a mode knob
+/// sweeping the formant offset, polyblep-corrected at its discontinuity.
+#[derive(Debug, Clone, Default)]
+struct ZOscillator {
+    carrier_phase: f32,
+    discontinuity_phase: f32,
+    formant_phase: f32,
+    next_sample: f32,
+    carrier_frequency: f32,
+    formant_frequency: f32,
+    carrier_shape: f32,
+    mode: f32,
+}
+
+impl ZOscillator {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    #[inline]
+    fn z(c: f32, d: f32, f: f32, shape: f32, mode: f32) -> f32 {
+        let mut ramp_down = 0.5 * (1.0 + ws_sine(0.5 * d + 0.25));
+        let offset;
+        let phase_shift;
+        if mode < 0.333 {
+            offset = 1.0;
+            phase_shift = 0.25 + mode * 1.50;
+        } else if mode < 0.666 {
+            phase_shift = 0.7495 - (mode - 0.33) * 0.75;
+            offset = -ws_sine(phase_shift);
+        } else {
+            phase_shift = 0.7495 - (mode - 0.33) * 0.75;
+            offset = 0.001;
+        }
+        let discontinuity = ws_sine(f + phase_shift);
+        let contour = if shape < 0.5 {
+            let shape = shape * 2.0;
+            if c >= 0.5 {
+                ramp_down *= shape;
+            }
+            1.0 + (ws_sine(c + 0.25) - 1.0) * shape
+        } else {
+            ws_sine(c + shape * 0.5)
+        };
+        (ramp_down * (offset + discontinuity) - offset) * contour
+    }
+
+    fn render(
+        &mut self,
+        carrier_frequency: f32,
+        formant_frequency: f32,
+        carrier_shape: f32,
+        mode: f32,
+        out: &mut [f32],
+    ) {
+        let carrier_frequency = carrier_frequency.min(0.25 * 0.5);
+        let formant_frequency = formant_frequency.min(0.25);
+        let size = out.len();
+        let mut cfm = ParamInterp::new(self.carrier_frequency, carrier_frequency, size);
+        let mut ffm = ParamInterp::new(self.formant_frequency, formant_frequency, size);
+        let mut csm = ParamInterp::new(self.carrier_shape, carrier_shape, size);
+        let mut mm = ParamInterp::new(self.mode, mode, size);
+        let mut next_sample = self.next_sample;
+        for o in out.iter_mut() {
+            let mut this_sample = next_sample;
+            next_sample = 0.0;
+            let f0 = cfm.next();
+            let f1 = ffm.next();
+            self.discontinuity_phase += 2.0 * f0;
+            self.carrier_phase += f0;
+            let reset = self.discontinuity_phase >= 1.0;
+            if reset {
+                self.discontinuity_phase -= 1.0;
+                let reset_time = self.discontinuity_phase / (2.0 * f0);
+                let carrier_phase_before = if self.carrier_phase >= 1.0 { 1.0 } else { 0.5 };
+                let carrier_phase_after = if self.carrier_phase >= 1.0 { 0.0 } else { 0.5 };
+                let before = Self::z(
+                    carrier_phase_before,
+                    1.0,
+                    self.formant_phase + (1.0 - reset_time) * f1,
+                    csm.subsample(1.0 - reset_time),
+                    mm.subsample(1.0 - reset_time),
+                );
+                let after = Self::z(carrier_phase_after, 0.0, 0.0, csm.subsample(1.0), mm.subsample(1.0));
+                let discontinuity = after - before;
+                this_sample += discontinuity * this_blep(reset_time);
+                next_sample += discontinuity * next_blep(reset_time);
+                self.formant_phase = reset_time * f1;
+                if self.carrier_phase > 1.0 {
+                    self.carrier_phase = self.discontinuity_phase * 0.5;
+                }
+            } else {
+                self.formant_phase += f1;
+                if self.formant_phase >= 1.0 {
+                    self.formant_phase -= 1.0;
+                }
+            }
+            if self.carrier_phase >= 1.0 {
+                self.carrier_phase -= 1.0;
+            }
+            next_sample += Self::z(
+                self.carrier_phase,
+                self.discontinuity_phase,
+                self.formant_phase,
+                csm.next(),
+                mm.next(),
+            );
+            *o = this_sample;
+        }
+        self.next_sample = next_sample;
+        self.carrier_frequency = carrier_frequency;
+        self.formant_frequency = formant_frequency;
+        self.carrier_shape = carrier_shape;
+        self.mode = mode;
+    }
+}
+
+/// The grain engine: windowed sine segments. Two grainlet oscillators
+/// summed (and DC-blocked) into the main output, a Z oscillator into aux.
+pub struct GrainEngine {
+    grainlet: [GrainletOscillator; 2],
+    z_oscillator: ZOscillator,
+    dc_blocker: [OnePole; 2],
+    aux_scratch: Vec<f32>,
+}
+
+impl Default for GrainEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GrainEngine {
+    pub fn new() -> Self {
+        Self {
+            grainlet: [GrainletOscillator::new(), GrainletOscillator::new()],
+            z_oscillator: ZOscillator::new(),
+            dc_blocker: [OnePole::new(), OnePole::new()],
+            aux_scratch: Vec::new(),
+        }
+    }
+}
+
+impl Engine for GrainEngine {
+    fn render(&mut self, p: &EngineParameters, out: &mut [f32], aux: &mut [f32]) -> bool {
+        let root = p.note;
+        let f0 = note_to_frequency(root);
+        let f1 = note_to_frequency(24.0 + 84.0 * p.timbre);
+        let ratio = semitones_to_ratio(-24.0 + 48.0 * p.harmonics);
+        let carrier_bleed = if p.harmonics < 0.5 {
+            1.0 - 2.0 * p.harmonics
+        } else {
+            0.0
+        };
+        let carrier_bleed_fixed = carrier_bleed * (2.0 - carrier_bleed);
+        let carrier_shape = 0.33 + (p.morph - 0.33) * (1.0 - f0 * 24.0).max(0.0);
+
+        self.grainlet[0].render(f0, f1, carrier_shape, carrier_bleed_fixed, out);
+        self.aux_scratch.resize(aux.len(), 0.0);
+        self.grainlet[1].render(f0, f1 * ratio, carrier_shape, carrier_bleed_fixed, &mut self.aux_scratch);
+        self.dc_blocker[0].set_f(0.3 * f0);
+        for (o, &a) in out.iter_mut().zip(self.aux_scratch.iter()) {
+            *o = self.dc_blocker[0].process_high_pass(*o + a);
+        }
+
+        let cutoff = note_to_frequency(root + 96.0 * p.timbre);
+        self.z_oscillator.render(f0, cutoff, p.morph, p.harmonics, aux);
+        self.dc_blocker[1].set_f(0.3 * f0);
+        for a in aux.iter_mut() {
+            *a = self.dc_blocker[1].process_high_pass(*a);
+        }
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1659,6 +2003,23 @@ mod tests {
             energy += out.iter().map(|v| v * v).sum::<f32>();
         }
         assert!(energy > 0.0, "the noise engine sings: {energy}");
+    }
+
+    #[test]
+    fn grain_engine_makes_grains() {
+        let mut eng = GrainEngine::new();
+        let mut out = vec![0.0_f32; 64];
+        let mut aux = vec![0.0_f32; 64];
+        for (h, tb, mo) in [(0.2, 0.3, 0.4), (0.5, 0.5, 0.5), (0.8, 0.7, 0.7)] {
+            let p = EngineParameters { note: 48.0, harmonics: h, timbre: tb, morph: mo, ..Default::default() };
+            let mut energy = 0.0;
+            for _ in 0..80 {
+                eng.render(&p, &mut out, &mut aux);
+                assert!(out.iter().chain(aux.iter()).all(|v| v.is_finite() && v.abs() <= 8.0), "h={h} bounded");
+                energy += out.iter().chain(aux.iter()).map(|v| v * v).sum::<f32>();
+            }
+            assert!(energy > 0.001, "grain sounds at h={h}: {energy}");
+        }
     }
 
     #[test]
