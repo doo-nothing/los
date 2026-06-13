@@ -32,6 +32,7 @@ pub mod ui;
 
 pub use ipc::{routing, shm};
 pub use modules::{
+    clouds,
     braids,
     warps,
     badge, branches, conductor, delay, dld, dpo, edges, elements, envelope, filterbank, frames, grids, lfo, mixer, peaks, rings,

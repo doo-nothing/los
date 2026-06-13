@@ -20,6 +20,7 @@
 pub mod badge;
 pub mod braids;
 pub mod branches;
+pub mod clouds;
 pub mod conductor;
 pub mod delay;
 pub mod dld;
