@@ -27,6 +27,7 @@ pub mod edges;
 pub mod elements;
 pub mod envelope;
 pub mod filterbank;
+pub mod frames;
 pub mod grids;
 pub mod lfo;
 pub mod mixer;
