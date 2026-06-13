@@ -63,6 +63,7 @@ pub fn output_labels(module: &str) -> &'static [&'static str] {
         "streams" => &["g1", "f1", "g2", "f2"],
         "stages" => &["o1", "o2", "o3", "o4", "o5", "o6"],
         "marbles" => &["t1", "t2", "t3", "x1", "x2", "x3", "y"],
+        "warps" => &["aux"],
         "delay" => &["in", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"],
         "filterbank" => &[
             "b1", "b2", "b3", "b4", "b5", "b6", "b7", "b8", "b9", "b10", "b11", "b12", "b13",

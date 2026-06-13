@@ -36,6 +36,7 @@ pub mod peaks;
 pub mod rings;
 pub mod sampler;
 pub mod scope;
+pub mod warps;
 pub mod wasp;
 pub mod sequencer;
 pub mod stages;
