@@ -36,8 +36,8 @@ use ratatui::{
 
 use super::dsp::{
     AdditiveEngine, ChordEngine, Engine, EngineParameters, FmEngine, GrainEngine, ModalEngine,
-    NoiseEngine, SwarmEngine, VirtualAnalogEngine, WaveshapingEngine, WavetableEngine, TRIGGER_HIGH,
-    TRIGGER_RISING_EDGE,
+    NoiseEngine, StringEngine, SwarmEngine, VirtualAnalogEngine, WaveshapingEngine, WavetableEngine,
+    TRIGGER_HIGH, TRIGGER_RISING_EDGE,
 };
 use crate::ipc::routing::{self, SourceAddr};
 use crate::shm::{AudioRingbuf, EventRingbuf, Manifest, ModulationBus, ShmTransport};
@@ -46,9 +46,9 @@ use crate::state;
 const FALLBACK_RATE: f32 = 48_000.0;
 const BLOCK: usize = 24;
 
-pub const ENGINE_NAMES: [&str; 10] = [
+pub const ENGINE_NAMES: [&str; 11] = [
     "noise", "fm", "virtual_analog", "chord", "waveshaping", "additive", "swarm", "grain",
-    "wavetable", "modal",
+    "wavetable", "modal", "string",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,6 +273,7 @@ fn audio_thread(shared: Arc<Mutex<PlaitsState>>, instance: usize) -> Result<()> 
     let mut grain = GrainEngine::new();
     let mut wavetable = WavetableEngine::new();
     let mut modal = ModalEngine::new();
+    let mut string = StringEngine::new();
     let mut out_buf = vec![0.0_f32; slot_frames + BLOCK];
     let mut aux_buf = vec![0.0_f32; slot_frames + BLOCK];
 
@@ -393,6 +394,7 @@ fn audio_thread(shared: Arc<Mutex<PlaitsState>>, instance: usize) -> Result<()> 
                 7 => &mut grain,
                 8 => &mut wavetable,
                 9 => &mut modal,
+                10 => &mut string,
                 _ => &mut noise,
             };
             eng.render(
@@ -442,6 +444,7 @@ fn audio_thread(shared: Arc<Mutex<PlaitsState>>, instance: usize) -> Result<()> 
             grain = GrainEngine::new();
             wavetable = WavetableEngine::new();
             modal = ModalEngine::new();
+            string = StringEngine::new();
             resample_pos = 0.0;
         }
         if let (Some(base), Some(bus)) = (mod_base, modbus.as_mut()) {
