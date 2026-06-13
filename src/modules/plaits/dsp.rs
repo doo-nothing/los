@@ -3755,6 +3755,293 @@ impl Engine for SnareDrumEngine {
     }
 }
 
+// ── the hi-hat engine ────────────────────────────────────────────────────────
+
+/// A minimal band-limited (polyblep) oscillator with saw and square
+/// shapes — the plaits `Oscillator`, pared to what the ring-mod noise
+/// source needs.
+#[derive(Debug, Clone)]
+struct HatOscillator {
+    phase: f32,
+    next_sample: f32,
+    high: bool,
+    frequency: f32,
+}
+
+impl HatOscillator {
+    fn new() -> Self {
+        Self {
+            phase: 0.5,
+            next_sample: 0.0,
+            high: true,
+            frequency: 0.001,
+        }
+    }
+
+    fn render(&mut self, square: bool, frequency: f32, pw: f32, out: &mut [f32]) {
+        let frequency = frequency.clamp(0.0000016, 0.25);
+        let pw = pw.clamp(frequency.abs() * 2.0, 1.0 - 2.0 * frequency.abs());
+        let size = out.len();
+        let mut fm = ParamInterp::new(self.frequency, frequency, size);
+        let mut next_sample = self.next_sample;
+        for o in out.iter_mut() {
+            let mut this_sample = next_sample;
+            next_sample = 0.0;
+            let f = fm.next();
+            if !square {
+                self.phase += f;
+                if self.phase >= 1.0 {
+                    self.phase -= 1.0;
+                    let t = self.phase / f;
+                    this_sample -= this_blep(t);
+                    next_sample -= next_blep(t);
+                }
+                next_sample += self.phase;
+                *o = 2.0 * this_sample - 1.0;
+            } else {
+                self.phase += f;
+                if self.high ^ (self.phase >= pw) {
+                    let t = (self.phase - pw) / f;
+                    this_sample += this_blep(t);
+                    next_sample += next_blep(t);
+                    self.high = self.phase >= pw;
+                }
+                if self.phase >= 1.0 {
+                    self.phase -= 1.0;
+                    let t = self.phase / f;
+                    this_sample -= this_blep(t);
+                    next_sample -= next_blep(t);
+                    self.high = false;
+                }
+                next_sample += if self.phase < pw { 0.0 } else { 1.0 };
+                *o = 2.0 * this_sample - 1.0;
+            }
+        }
+        self.next_sample = next_sample;
+        self.frequency = frequency;
+    }
+}
+
+/// The two metallic-noise sources for the hi-hat: 808-style six square
+/// oscillators, or a ring-modulated bank (more KR-55 / FM-ish).
+enum MetallicNoise {
+    Square { phase: [u32; 6] },
+    RingMod { osc: Vec<HatOscillator> },
+}
+
+impl MetallicNoise {
+    fn square() -> Self {
+        MetallicNoise::Square { phase: [0; 6] }
+    }
+    fn ring_mod() -> Self {
+        MetallicNoise::RingMod {
+            osc: (0..6).map(|_| HatOscillator::new()).collect(),
+        }
+    }
+
+    fn render(&mut self, f0: f32, temp_1: &mut [f32], temp_2: &mut [f32], out: &mut [f32]) {
+        match self {
+            MetallicNoise::Square { phase } => {
+                const RATIOS: [f32; 6] = [1.0, 1.304, 1.466, 1.787, 1.932, 2.536];
+                let mut increment = [0u32; 6];
+                for i in 0..6 {
+                    let f = (f0 * RATIOS[i]).min(0.499);
+                    increment[i] = (f * 4_294_967_296.0) as u32;
+                }
+                for o in out.iter_mut() {
+                    let mut noise = 0u32;
+                    for i in 0..6 {
+                        phase[i] = phase[i].wrapping_add(increment[i]);
+                        noise += phase[i] >> 31;
+                    }
+                    *o = 0.33 * noise as f32 - 1.0;
+                }
+            }
+            MetallicNoise::RingMod { osc } => {
+                let ratio = f0 / (0.01 + f0);
+                let pairs = [
+                    [200.0 / SAMPLE_RATE * ratio, 7530.0 / SAMPLE_RATE * ratio],
+                    [510.0 / SAMPLE_RATE * ratio, 8075.0 / SAMPLE_RATE * ratio],
+                    [730.0 / SAMPLE_RATE * ratio, 10500.0 / SAMPLE_RATE * ratio],
+                ];
+                out.iter_mut().for_each(|o| *o = 0.0);
+                for (i, f) in pairs.iter().enumerate() {
+                    let (a, b) = osc.split_at_mut(2 * i + 1);
+                    let sq = &mut a[2 * i];
+                    let sw = &mut b[0];
+                    sq.render(true, f[0], 0.5, temp_1);
+                    sw.render(false, f[1], 0.5, temp_2);
+                    for (o, (&t1, &t2)) in out.iter_mut().zip(temp_1.iter().zip(temp_2.iter())) {
+                        *o += t1 * t2;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A single hi-hat (one of the engine's two): a metallic-noise source,
+/// band-pass coloration, a touch of clocked noise, a VCA, and an HPF.
+struct HiHat {
+    envelope: f32,
+    noise_clock: f32,
+    noise_sample: f32,
+    sustain_gain: f32,
+    metallic_noise: MetallicNoise,
+    noise_coloration_svf: Svf,
+    hpf: Svf,
+    resonance: bool,
+    two_stage_envelope: bool,
+    swing_vca: bool,
+    rng: Rng,
+    temp_1: Vec<f32>,
+    temp_2: Vec<f32>,
+}
+
+impl HiHat {
+    fn new(
+        metallic_noise: MetallicNoise,
+        resonance: bool,
+        two_stage_envelope: bool,
+        swing_vca: bool,
+        seed: u32,
+    ) -> Self {
+        Self {
+            envelope: 0.0,
+            noise_clock: 0.0,
+            noise_sample: 0.0,
+            sustain_gain: 0.0,
+            metallic_noise,
+            noise_coloration_svf: Svf::new(),
+            hpf: Svf::new(),
+            resonance,
+            two_stage_envelope,
+            swing_vca,
+            rng: Rng::new(seed),
+            temp_1: Vec::new(),
+            temp_2: Vec::new(),
+        }
+    }
+
+    #[inline]
+    fn vca(&self, s: f32, gain: f32) -> f32 {
+        if self.swing_vca {
+            let mut s = s * if s > 0.0 { 4.0 } else { 0.1 };
+            s = s / (1.0 + s.abs());
+            (s + 0.1) * gain
+        } else {
+            s * gain
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render(
+        &mut self,
+        sustain: bool,
+        trigger: bool,
+        accent: f32,
+        f0: f32,
+        tone: f32,
+        decay: f32,
+        mut noisiness: f32,
+        out: &mut [f32],
+    ) {
+        let envelope_decay = 1.0 - 0.003 * semitones_to_ratio(-decay * 84.0);
+        let cut_decay = 1.0 - 0.0025 * semitones_to_ratio(-decay * 36.0);
+        if trigger {
+            self.envelope = (1.5 + 0.5 * (1.0 - decay)) * (0.3 + 0.7 * accent);
+        }
+
+        let size = out.len();
+        self.temp_1.resize(size, 0.0);
+        self.temp_2.resize(size, 0.0);
+        let mut temp_1 = std::mem::take(&mut self.temp_1);
+        let mut temp_2 = std::mem::take(&mut self.temp_2);
+        self.metallic_noise
+            .render(2.0 * f0, &mut temp_1, &mut temp_2, out);
+
+        let cutoff = (150.0 / SAMPLE_RATE * semitones_to_ratio(tone * 72.0))
+            .clamp(0.0, 16000.0 / SAMPLE_RATE);
+        let q = if self.resonance { 3.0 + 3.0 * tone } else { 1.0 };
+        self.noise_coloration_svf.set_f_q(cutoff, q);
+        for o in out.iter_mut() {
+            *o = self.noise_coloration_svf.process(*o, SvfMode::BandPass);
+        }
+
+        noisiness *= noisiness;
+        let noise_f = (f0 * (16.0 + 16.0 * (1.0 - noisiness))).clamp(0.0, 0.5);
+        for o in out.iter_mut() {
+            self.noise_clock += noise_f;
+            if self.noise_clock >= 1.0 {
+                self.noise_clock -= 1.0;
+                self.noise_sample = self.rng.get_float() - 0.5;
+            }
+            *o += noisiness * (self.noise_sample - *o);
+        }
+
+        let mut sustain_gain = ParamInterp::new(self.sustain_gain, accent * decay, size);
+        for o in out.iter_mut() {
+            self.envelope *= if self.envelope > 0.5 || !self.two_stage_envelope {
+                envelope_decay
+            } else {
+                cut_decay
+            };
+            let gain = if sustain {
+                sustain_gain.next()
+            } else {
+                self.envelope
+            };
+            *o = self.vca(*o, gain);
+        }
+        self.sustain_gain = accent * decay;
+
+        self.hpf.set_f_q(cutoff, 0.5);
+        for o in out.iter_mut() {
+            *o = self.hpf.process(*o, SvfMode::HighPass);
+        }
+
+        self.temp_1 = temp_1;
+        self.temp_2 = temp_2;
+    }
+}
+
+/// The hi-hat engine: an 808-style hat (square metallic noise, swing VCA,
+/// resonant coloration) on the main output, and a ring-mod hat (linear
+/// VCA, two-stage envelope) on aux. timbre → coloration, morph → decay,
+/// harmonics → clocked-noise blend.
+pub struct HiHatEngine {
+    hat_1: HiHat,
+    hat_2: HiHat,
+}
+
+impl Default for HiHatEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HiHatEngine {
+    pub fn new() -> Self {
+        Self {
+            hat_1: HiHat::new(MetallicNoise::square(), true, false, true, 0xc_1a55),
+            hat_2: HiHat::new(MetallicNoise::ring_mod(), false, true, false, 0xd_3f12),
+        }
+    }
+}
+
+impl Engine for HiHatEngine {
+    fn render(&mut self, p: &EngineParameters, out: &mut [f32], aux: &mut [f32]) -> bool {
+        let f0 = note_to_frequency(p.note);
+        let sustain = (p.trigger & TRIGGER_UNPATCHED) != 0;
+        let trigger = (p.trigger & TRIGGER_RISING_EDGE) != 0;
+        self.hat_1
+            .render(sustain, trigger, p.accent, f0, p.timbre, p.morph, p.harmonics, out);
+        self.hat_2
+            .render(sustain, trigger, p.accent, f0, p.timbre, p.morph, p.harmonics, aux);
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3824,6 +4111,24 @@ mod tests {
             energy += out.iter().map(|v| v * v).sum::<f32>();
         }
         assert!(energy > 0.0, "the noise engine sings: {energy}");
+    }
+
+    #[test]
+    fn hi_hat_engine_sizzles() {
+        let mut eng = HiHatEngine::new();
+        let mut out = vec![0.0_f32; 64];
+        let mut aux = vec![0.0_f32; 64];
+        for (h, tb, mo) in [(0.2, 0.4, 0.4), (0.6, 0.6, 0.5), (0.9, 0.8, 0.6)] {
+            let mut energy = 0.0;
+            for blk in 0..120 {
+                let trig = if blk == 0 { TRIGGER_RISING_EDGE } else { 0 };
+                let p = EngineParameters { trigger: trig, note: 60.0, harmonics: h, timbre: tb, morph: mo, ..Default::default() };
+                eng.render(&p, &mut out, &mut aux);
+                assert!(out.iter().chain(aux.iter()).all(|v| v.is_finite() && v.abs() <= 8.0), "h={h} bounded");
+                energy += out.iter().chain(aux.iter()).map(|v| v * v).sum::<f32>();
+            }
+            assert!(energy > 1e-5, "hi-hat sizzles at h={h}: {energy}");
+        }
     }
 
     #[test]
