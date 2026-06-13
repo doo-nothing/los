@@ -952,10 +952,13 @@ pub enum MacroModel {
     Plucked,
     StruckBell,
     StruckDrum,
+    Kick,
+    Snare,
+    Cymbal,
 }
 
 /// All macro models in panel order — parallel to [`MODEL_NAMES`].
-pub const MODELS: [MacroModel; 34] = [
+pub const MODELS: [MacroModel; 37] = [
     MacroModel::CSaw,
     MacroModel::Morph,
     MacroModel::SawSquare,
@@ -990,9 +993,12 @@ pub const MODELS: [MacroModel; 34] = [
     MacroModel::Plucked,
     MacroModel::StruckBell,
     MacroModel::StruckDrum,
+    MacroModel::Kick,
+    MacroModel::Snare,
+    MacroModel::Cymbal,
 ];
 
-pub const MODEL_NAMES: [&str; 34] = [
+pub const MODEL_NAMES: [&str; 37] = [
     "csaw",
     "morph",
     "saw_square",
@@ -1027,6 +1033,9 @@ pub const MODEL_NAMES: [&str; 34] = [
     "plucked",
     "struck_bell",
     "struck_drum",
+    "kick",
+    "snare",
+    "cymbal",
 ];
 
 pub struct MacroOscillator {
@@ -1144,6 +1153,9 @@ impl MacroOscillator {
             MacroModel::StruckDrum => {
                 self.render_digital(DigitalShape::StruckDrum, sync, buffer, size)
             }
+            MacroModel::Kick => self.render_digital(DigitalShape::Kick, sync, buffer, size),
+            MacroModel::Snare => self.render_digital(DigitalShape::Snare, sync, buffer, size),
+            MacroModel::Cymbal => self.render_digital(DigitalShape::Cymbal, sync, buffer, size),
         }
     }
 
@@ -1398,6 +1410,9 @@ pub enum DigitalShape {
     Plucked,
     StruckBell,
     StruckDrum,
+    Kick,
+    Snare,
+    Cymbal,
 }
 
 const NUM_FORMANTS: usize = 5;
@@ -1425,6 +1440,135 @@ const DRUM_PARTIAL_DECAY_LONG: [i32; NUM_DRUM_PARTIALS] =
     [65533, 65531, 65531, 65531, 65531, 65516];
 const DRUM_PARTIAL_DECAY_SHORT: [i32; NUM_DRUM_PARTIALS] =
     [65083, 64715, 64715, 64715, 64715, 62312];
+
+/// braids' `Excitation` — an exponential-decay pulse with an optional
+/// delay before it fires.
+#[derive(Debug, Clone, Copy)]
+struct Excitation {
+    delay: u32,
+    decay: u32,
+    counter: i32,
+    state: i32,
+    level: i32,
+}
+
+impl Default for Excitation {
+    fn default() -> Self {
+        Self { delay: 0, decay: 4093, counter: 0, state: 0, level: 0 }
+    }
+}
+
+impl Excitation {
+    fn set_delay(&mut self, delay: u32) {
+        self.delay = delay;
+    }
+    fn set_decay(&mut self, decay: u32) {
+        self.decay = decay;
+    }
+    fn trigger(&mut self, level: i32) {
+        self.level = level;
+        self.counter = self.delay as i32 + 1;
+    }
+    fn done(&self) -> bool {
+        self.counter == 0
+    }
+    fn process(&mut self) -> i32 {
+        self.state = (self.state as i64 * self.decay as i64 >> 12) as i32;
+        if self.counter > 0 {
+            self.counter -= 1;
+            if self.counter == 0 {
+                self.state += self.level.abs();
+            }
+        }
+        if self.level < 0 {
+            -self.state
+        } else {
+            self.state
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SvfMode {
+    #[allow(dead_code)] // part of the faithful braids Svf; no model selects LP
+    Lp,
+    Bp,
+    Hp,
+}
+
+/// braids' `Svf` — the drum-modeling state-variable filter (with the
+/// "punch" frequency/damp boost). Distinct from the plaits/TPT Svf.
+#[derive(Debug, Clone, Copy)]
+struct DrumSvf {
+    dirty: bool,
+    frequency: i16,
+    resonance: i16,
+    punch: i32,
+    f: i32,
+    damp: i32,
+    lp: i32,
+    bp: i32,
+    mode: SvfMode,
+}
+
+impl Default for DrumSvf {
+    fn default() -> Self {
+        Self {
+            dirty: true,
+            frequency: 33 << 7,
+            resonance: 16384,
+            punch: 0,
+            f: 0,
+            damp: 0,
+            lp: 0,
+            bp: 0,
+            mode: SvfMode::Bp,
+        }
+    }
+}
+
+impl DrumSvf {
+    fn set_frequency(&mut self, frequency: i16) {
+        self.dirty = self.dirty || self.frequency != frequency;
+        self.frequency = frequency;
+    }
+    fn set_resonance(&mut self, resonance: i16) {
+        self.resonance = resonance;
+        self.dirty = true;
+    }
+    fn set_punch(&mut self, punch: u16) {
+        self.punch = ((punch as u32 * punch as u32) >> 24) as i32;
+    }
+    fn set_mode(&mut self, mode: SvfMode) {
+        self.mode = mode;
+    }
+    fn process(&mut self, input: i32) -> i32 {
+        let t = tables();
+        if self.dirty {
+            self.f = interpolate824_u16(&t.svf_cutoff, (self.frequency as i32 as u32) << 17);
+            self.damp = interpolate824_u16(&t.svf_damp, (self.resonance as i32 as u32) << 17);
+            self.dirty = false;
+        }
+        let mut f = self.f;
+        let mut damp = self.damp;
+        if self.punch != 0 {
+            let punch_signal = if self.lp > 4096 { self.lp } else { 2048 };
+            f += ((punch_signal >> 4) * self.punch) >> 9;
+            damp += (punch_signal - 2048) >> 3;
+        }
+        let notch = input - ((self.bp as i64 * damp as i64 >> 15) as i32);
+        self.lp += (f as i64 * self.bp as i64 >> 15) as i32;
+        self.lp = clip16(self.lp);
+        let hp = notch - self.lp;
+        self.bp += (f as i64 * hp as i64 >> 15) as i32;
+        self.bp = clip16(self.bp);
+        match self.mode {
+            SvfMode::Bp => self.bp,
+            SvfMode::Hp => hp,
+            SvfMode::Lp => self.lp,
+        }
+    }
+}
 
 /// One Karplus-Strong voice of the PLUCKED model.
 #[derive(Debug, Clone, Copy, Default)]
@@ -1530,6 +1674,11 @@ pub struct DigitalOscillator {
     add_target_partial_amplitude: [i32; NUM_BELL_PARTIALS],
     add_current_partial: usize,
     add_lp_noise: [i32; 3],
+    // analog drum (kick/snare/cymbal) state
+    pulse: [Excitation; 4],
+    bsvf: [DrumSvf; 3],
+    hat_phase: [u32; 6],
+    hat_rng_state: u32,
 }
 
 impl Default for DigitalOscillator {
@@ -1588,6 +1737,10 @@ impl Default for DigitalOscillator {
             add_target_partial_amplitude: [0; NUM_BELL_PARTIALS],
             add_current_partial: 0,
             add_lp_noise: [0; 3],
+            pulse: [Excitation::default(); 4],
+            bsvf: [DrumSvf::default(); 3],
+            hat_phase: [0; 6],
+            hat_rng_state: 0,
         }
     }
 }
@@ -1660,6 +1813,10 @@ impl DigitalOscillator {
         self.add_target_partial_amplitude = [0; NUM_BELL_PARTIALS];
         self.add_current_partial = 0;
         self.add_lp_noise = [0; 3];
+        self.pulse = [Excitation::default(); 4];
+        self.bsvf = [DrumSvf::default(); 3];
+        self.hat_phase = [0; 6];
+        self.hat_rng_state = 0;
         // previous_parameter is NOT reset by Init in the firmware
         self.phase = 0;
         self.strike = true;
@@ -1724,6 +1881,188 @@ impl DigitalOscillator {
             DigitalShape::Plucked => self.render_plucked(buffer, size),
             DigitalShape::StruckBell => self.render_struck_bell(buffer, size),
             DigitalShape::StruckDrum => self.render_struck_drum(buffer, size),
+            DigitalShape::Kick => self.render_kick(buffer, size),
+            DigitalShape::Snare => self.render_snare(buffer, size),
+            DigitalShape::Cymbal => self.render_cymbal(buffer, size),
+        }
+    }
+
+    /// KICK — an 808-ish bridged-T kick: a triple-pulse exciter into a
+    /// punchy resonant band-pass with a sweepable pitch and a one-pole
+    /// tone control (parameter_0 = decay, parameter_1 = tone). Half-rate.
+    fn render_kick(&mut self, buffer: &mut [i16], size: usize) {
+        if self.digital_init {
+            self.pulse[0] = Excitation::default();
+            self.pulse[0].set_delay(0);
+            self.pulse[0].set_decay(3340);
+            self.pulse[1] = Excitation::default();
+            self.pulse[1].set_delay((1.0e-3 * 48000.0) as u32);
+            self.pulse[1].set_decay(3072);
+            self.pulse[2] = Excitation::default();
+            self.pulse[2].set_delay((4.0e-3 * 48000.0) as u32);
+            self.pulse[2].set_decay(4093);
+            self.bsvf[0] = DrumSvf::default();
+            self.bsvf[0].set_punch(32768);
+            self.bsvf[0].set_mode(SvfMode::Bp);
+            self.digital_init = false;
+        }
+        if self.strike {
+            self.strike = false;
+            self.pulse[0].trigger((12 * 32768) * 7 / 10);
+            self.pulse[1].trigger(-19662 * 7 / 10);
+            self.pulse[2].trigger(18000);
+            self.bsvf[0].set_punch(24000);
+        }
+        let decay = self.parameter[0] as u32;
+        let mut scaled = 65535 - (decay << 1);
+        let squared = (scaled as u64 * scaled as u64 >> 16) as u32;
+        scaled = (squared as u64 * scaled as u64 >> 18) as u32;
+        self.bsvf[0].set_resonance((32768 - 128 - scaled as i32) as i16);
+        let mut coefficient = self.parameter[1] as i64;
+        coefficient = coefficient * coefficient >> 15;
+        coefficient = coefficient * coefficient >> 15;
+        let lp_coefficient = 128 + (coefficient as i32 >> 1) * 3;
+        let mut lp_state = self.svf_lp;
+        let mut j = 0;
+        while j < size {
+            let mut excitation = self.pulse[0].process();
+            excitation += if !self.pulse[1].done() { 16384 } else { 0 };
+            excitation += self.pulse[1].process();
+            self.pulse[2].process();
+            self.bsvf[0]
+                .set_frequency(self.pitch + if self.pulse[2].done() { 0 } else { 17 << 7 });
+            for _ in 0..2 {
+                let resonator_output = (excitation >> 4) + self.bsvf[0].process(excitation);
+                lp_state += ((resonator_output - lp_state) as i64 * lp_coefficient as i64 >> 15)
+                    as i32;
+                lp_state = clip16(lp_state);
+                if j < size {
+                    buffer[j] = lp_state as i16;
+                    j += 1;
+                }
+            }
+        }
+        self.svf_lp = lp_state;
+    }
+
+    /// SNARE — two tuned resonant band-passes (shell modes) excited by
+    /// pulses, plus a band-passed noise burst (the snares). parameter_0
+    /// balances the two shell modes, parameter_1 sets decay + snappiness.
+    fn render_snare(&mut self, buffer: &mut [i16], size: usize) {
+        if self.digital_init {
+            self.pulse[0] = Excitation::default();
+            self.pulse[0].set_delay(0);
+            self.pulse[0].set_decay(1536);
+            self.pulse[1] = Excitation::default();
+            self.pulse[1].set_delay((1e-3 * 48000.0) as u32);
+            self.pulse[1].set_decay(3072);
+            self.pulse[2] = Excitation::default();
+            self.pulse[2].set_delay((1e-3 * 48000.0) as u32);
+            self.pulse[2].set_decay(1200);
+            self.pulse[3] = Excitation::default();
+            self.pulse[3].set_delay(0);
+            self.bsvf[0] = DrumSvf::default();
+            self.bsvf[1] = DrumSvf::default();
+            self.bsvf[2] = DrumSvf::default();
+            self.bsvf[2].set_resonance(2000);
+            self.bsvf[2].set_mode(SvfMode::Bp);
+            self.digital_init = false;
+        }
+        if self.strike {
+            let mut decay = 49152 - self.pitch as i32;
+            decay += if self.parameter[1] < 16384 {
+                0
+            } else {
+                self.parameter[1] as i32 - 16384
+            };
+            if decay > 65535 {
+                decay = 65535;
+            }
+            self.bsvf[0].set_resonance((29000 + (decay >> 5)) as i16);
+            self.bsvf[1].set_resonance((26500 + (decay >> 5)) as i16);
+            self.pulse[3].set_decay((4092 + (decay >> 14)) as u32);
+            self.pulse[0].trigger(15 * 32768);
+            self.pulse[1].trigger(-32768);
+            self.pulse[2].trigger(13107);
+            let snappy = (self.parameter[1] as i32).min(14336);
+            self.pulse[3].trigger(512 + (snappy << 1));
+            self.strike = false;
+        }
+        self.bsvf[0].set_frequency(self.pitch + (12 << 7));
+        self.bsvf[1].set_frequency(self.pitch + (24 << 7));
+        self.bsvf[2].set_frequency(self.pitch + (60 << 7));
+        let g_1 = 22000 - (self.parameter[0] as i32 >> 1);
+        let g_2 = 22000 + (self.parameter[0] as i32 >> 1);
+        let mut j = 0;
+        while j < size {
+            let mut excitation_1 = self.pulse[0].process();
+            excitation_1 += self.pulse[1].process();
+            excitation_1 += if !self.pulse[1].done() { 2621 } else { 0 };
+            let mut excitation_2 = self.pulse[2].process();
+            excitation_2 += if !self.pulse[2].done() { 13107 } else { 0 };
+            let noise_sample = (self.next_sample() as i32 * self.pulse[3].process()) >> 15;
+            let mut sd = (self.bsvf[0].process(excitation_1) as i64 + (excitation_1 >> 4) as i64)
+                * g_1 as i64
+                >> 15;
+            sd += (self.bsvf[1].process(excitation_2) as i64 + (excitation_2 >> 4) as i64)
+                * g_2 as i64
+                >> 15;
+            sd += self.bsvf[2].process(noise_sample) as i64;
+            let sd = clip16(sd as i32);
+            buffer[j] = sd as i16;
+            if j + 1 < size {
+                buffer[j + 1] = sd as i16;
+            }
+            j += 2;
+        }
+    }
+
+    /// CYMBAL — six inharmonic square oscillators (808-style metallic
+    /// noise) plus an LCG noise source, each band/high-passed and crossfaded
+    /// by parameter_1; parameter_0 sets the filter frequencies.
+    fn render_cymbal(&mut self, buffer: &mut [i16], size: usize) {
+        if self.digital_init {
+            self.bsvf[0] = DrumSvf::default();
+            self.bsvf[0].set_mode(SvfMode::Bp);
+            self.bsvf[0].set_resonance(12000);
+            self.bsvf[1] = DrumSvf::default();
+            self.bsvf[1].set_mode(SvfMode::Hp);
+            self.bsvf[1].set_resonance(2000);
+            self.digital_init = false;
+        }
+        let mut increments = [0u32; 7];
+        let note = ((40 << 7) + (self.pitch as i32 >> 1)) as i16;
+        increments[0] = compute_phase_increment(note);
+        let root = increments[0] >> 10;
+        increments[1] = root.wrapping_mul(24273) >> 4;
+        increments[2] = root.wrapping_mul(12561) >> 4;
+        increments[3] = root.wrapping_mul(18417) >> 4;
+        increments[4] = root.wrapping_mul(22452) >> 4;
+        increments[5] = root.wrapping_mul(31858) >> 4;
+        increments[6] = increments[0].wrapping_mul(24);
+        let xfade = self.parameter[1] as i64;
+        self.bsvf[0].set_frequency(self.parameter[0] >> 1);
+        self.bsvf[1].set_frequency(self.parameter[0] >> 1);
+        for b in buffer.iter_mut().take(size) {
+            self.phase = self.phase.wrapping_add(increments[6]);
+            if self.phase < increments[6] {
+                self.hat_rng_state = self
+                    .hat_rng_state
+                    .wrapping_mul(1_664_525)
+                    .wrapping_add(1_013_904_223);
+            }
+            let mut hat_noise = 0i32;
+            #[allow(clippy::needless_range_loop)] // parallel hat_phase / increments
+            for i in 0..6 {
+                self.hat_phase[i] = self.hat_phase[i].wrapping_add(increments[i]);
+                hat_noise += (self.hat_phase[i] >> 31) as i32;
+            }
+            hat_noise -= 3;
+            hat_noise *= 5461;
+            hat_noise = clip16(self.bsvf[0].process(hat_noise));
+            let mut noise = (self.hat_rng_state >> 16) as i32 - 32768;
+            noise = clip16(self.bsvf[1].process(noise >> 1));
+            *b = (hat_noise + ((noise - hat_noise) as i64 * xfade >> 15) as i32) as i16;
         }
     }
 
@@ -2911,6 +3250,9 @@ mod tests {
             MacroModel::Plucked,
             MacroModel::StruckBell,
             MacroModel::StruckDrum,
+            MacroModel::Kick,
+            MacroModel::Snare,
+            MacroModel::Cymbal,
         ] {
             let mut m = MacroOscillator::new();
             m.set_model(model);
