@@ -29,6 +29,7 @@ use crate::state::{
     DelayParams, DldParams, DpoParamsState, ElementsParams, EnvelopeParams, FilterbankParams,
     BranchesParams, EdgesParams, FramesParams, GridsParams, LfoParams, MacroCmd, MixerParams,
     PeaksParams, RingsParams, SamplerParams, ScopeParams, SequencerParams, SessionState,
+    StagesParams,
     StepParam,
     StreamsParams,
     SwarmParams,
@@ -324,6 +325,11 @@ fn validate_session(st: &SessionState, r: &mut Report) {
             "streams" => {
                 if let Some(p) = decode::<StreamsParams>(value, &loc, r) {
                     check_streams(&p, &loc, &declared, r, &mut pending);
+                }
+            }
+            "stages" => {
+                if let Some(p) = decode::<StagesParams>(value, &loc, r) {
+                    check_stages(&p, &loc, &declared, r, &mut pending);
                 }
             }
             // No params structs: state is ephemeral or none.
@@ -1767,6 +1773,65 @@ fn check_streams(
     check_notes_src(&p.notes2_src, loc, declared, r, pending);
 }
 
+/// Stages (modules/stages): per-segment type names, knob ranges,
+/// knob srcs, gate (note-source) bindings.
+fn check_stages(
+    p: &StagesParams,
+    loc: &str,
+    declared: &BTreeSet<(String, usize)>,
+    r: &mut Report,
+    pending: &mut Vec<PendingTrackRef>,
+) {
+    const TYPES: [&str; 3] = ["ramp", "step", "hold"];
+    if p.types.len() > 6 {
+        r.error(loc, format!("types: {} — stages has 6 segments", p.types.len()));
+    }
+    for (i, t) in p.types.iter().enumerate() {
+        if !TYPES.contains(&t.as_str()) {
+            r.error(loc, format!("seg {} type {t:?} — one of {}", i + 1, TYPES.join(" ")));
+        }
+    }
+    if p.loops.len() > 6 {
+        r.error(loc, format!("loops: {} — stages has 6 segments", p.loops.len()));
+    }
+    for (name, knobs) in [("p", &p.p), ("s", &p.s)] {
+        if knobs.len() > 6 {
+            r.error(loc, format!("{name}: {} values — stages has 6 segments", knobs.len()));
+        }
+        for (i, v) in knobs.iter().enumerate() {
+            if !(0.0..=1.0).contains(v) {
+                r.error(loc, format!("{name}[{i}] {v} is out of range 0–1"));
+            }
+        }
+    }
+    for (field, src) in [
+        ("p1_src", &p.p1_src),
+        ("p2_src", &p.p2_src),
+        ("p3_src", &p.p3_src),
+        ("p4_src", &p.p4_src),
+        ("p5_src", &p.p5_src),
+        ("p6_src", &p.p6_src),
+        ("s1_src", &p.s1_src),
+        ("s2_src", &p.s2_src),
+        ("s3_src", &p.s3_src),
+        ("s4_src", &p.s4_src),
+        ("s5_src", &p.s5_src),
+        ("s6_src", &p.s6_src),
+    ] {
+        check_src(src, field, loc, declared, r);
+    }
+    for src in [
+        &p.gate1_src,
+        &p.gate2_src,
+        &p.gate3_src,
+        &p.gate4_src,
+        &p.gate5_src,
+        &p.gate6_src,
+    ] {
+        check_notes_src(src, loc, declared, r, pending);
+    }
+}
+
 /// Template (template.rs SHAPES): shape by name.
 fn check_template(
     p: &TemplateParams,
@@ -1818,8 +1883,8 @@ const AUDIO_MODULES: [&str; 16] =
     ["voice", "swarm", "tone", "template", "delay", "filterbank", "dld", "sampler", "wasp", "dpo", "elements", "rings", "tides", "peaks", "edges", "streams"];
 
 /// Canonical module names, for misspelled-pane suggestions.
-const MODULE_NAMES: [&str; 27] =
-    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements", "rings", "tides", "peaks", "branches", "grids", "edges", "frames", "streams"];
+const MODULE_NAMES: [&str; 28] =
+    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements", "rings", "tides", "peaks", "branches", "grids", "edges", "frames", "streams", "stages"];
 
 /// An optional `*_src` field: grammar, known output, declared instance.
 /// Returns the parsed address so callers can queue cross-module checks.
@@ -2079,6 +2144,9 @@ const KNOWN_KEYS: &[&str] = &[
     "note", "notes_src", "notes1_src", "notes2_src", "offset", "or_enabled", "output", "pan",
     "pan_src", "panes", "patch", "fn1", "fn2", "p1", "p2", "p1a_src", "p1b_src", "p1c_src",
     "alt1", "alt2", "excite1", "excite2", "excite1_src", "excite2_src",
+    "types", "loops", "p3_src", "p4_src", "p5_src", "p6_src",
+    "s1_src", "s2_src", "s3_src", "s4_src", "s5_src", "s6_src",
+    "gate1_src", "gate2_src", "gate3_src", "gate4_src", "gate5_src", "gate6_src",
     "p1d_src", "p2a_src", "p2b_src", "p2c_src", "p2d_src",
     "patch_inline", "phase", "phase_src", "ping_ms", "ping_src", "pitch", "pitch_src", "playing",
     "pluck", "pluck_src", "prob", "pulses", "quant",
