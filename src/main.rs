@@ -8,7 +8,7 @@
 
 use anyhow::Result;
 use los::{
-    badge, branches, conductor, delay, dld, dpo, edges, elements, envelope, filterbank, frames, grids, lfo, mixer, peaks, rings,
+    badge, branches, conductor, delay, dld, dpo, edges, elements, envelope, filterbank, frames, grids, lfo, marbles, mixer, peaks, rings,
     sampler, stages, streams, tides,
     scope,
     sequencer,
@@ -114,6 +114,7 @@ fn usage() {
     eprintln!("  frames             Keyframer / poly LFO (Mutable Instruments Frames)");
     eprintln!("  streams            Dual dynamics gate (Mutable Instruments Streams): vactrol");
     eprintln!("  stages             Segment generator (Mutable Instruments Stages): env/seq/LFO");
+    eprintln!("  marbles            Random sampler (Mutable Instruments Marbles): t/x deja-vu");
     eprintln!("  badge              Los faceplate (beat-synced animation, session info)");
     eprintln!();
     eprintln!("Aliases:");
@@ -154,6 +155,7 @@ fn dispatch_module(name: &str, instance: usize) -> Result<()> {
         "frames" => frames::run(instance),
         "streams" => streams::run(instance),
         "stages" => stages::run(instance),
+        "marbles" => marbles::run(instance),
         "badge" => badge::run(instance),
         other => anyhow::bail!("unknown module: {other}"),
     }

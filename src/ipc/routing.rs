@@ -62,6 +62,7 @@ pub fn output_labels(module: &str) -> &'static [&'static str] {
         "frames" => &["ch1", "ch2", "ch3", "ch4"],
         "streams" => &["g1", "f1", "g2", "f2"],
         "stages" => &["o1", "o2", "o3", "o4", "o5", "o6"],
+        "marbles" => &["t1", "t2", "t3", "x1", "x2", "x3", "y"],
         "delay" => &["in", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"],
         "filterbank" => &[
             "b1", "b2", "b3", "b4", "b5", "b6", "b7", "b8", "b9", "b10", "b11", "b12", "b13",
@@ -97,6 +98,12 @@ pub fn note_source_track(addr: &SourceAddr) -> Option<u8> {
             .iter()
             .position(|l| *l == addr.output)?;
         return Some((160 + addr.instance * 3 + off).min(255) as u8);
+    }
+    if addr.module == "marbles" {
+        let off = ["t1", "t2", "t3"]
+            .iter()
+            .position(|l| *l == addr.output)?;
+        return Some((220 + addr.instance * 3 + off).min(255) as u8);
     }
     if addr.module == "branches" {
         let off = output_labels("branches")

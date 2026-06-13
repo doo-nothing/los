@@ -27,7 +27,7 @@ use std::path::Path;
 use crate::routing::{output_labels, SourceAddr};
 use crate::state::{
     DelayParams, DldParams, DpoParamsState, ElementsParams, EnvelopeParams, FilterbankParams,
-    BranchesParams, EdgesParams, FramesParams, GridsParams, LfoParams, MacroCmd, MixerParams,
+    BranchesParams, EdgesParams, FramesParams, GridsParams, LfoParams, MacroCmd, MarblesParams, MixerParams,
     PeaksParams, RingsParams, SamplerParams, ScopeParams, SequencerParams, SessionState,
     StagesParams,
     StepParam,
@@ -330,6 +330,11 @@ fn validate_session(st: &SessionState, r: &mut Report) {
             "stages" => {
                 if let Some(p) = decode::<StagesParams>(value, &loc, r) {
                     check_stages(&p, &loc, &declared, r, &mut pending);
+                }
+            }
+            "marbles" => {
+                if let Some(p) = decode::<MarblesParams>(value, &loc, r) {
+                    check_marbles(&p, &loc, &declared, r);
                 }
             }
             // No params structs: state is ephemeral or none.
@@ -1832,6 +1837,67 @@ fn check_stages(
     }
 }
 
+/// Marbles (modules/marbles): model/range/scale names, knob ranges,
+/// the continuous-knob srcs.
+fn check_marbles(
+    p: &MarblesParams,
+    loc: &str,
+    declared: &BTreeSet<(String, usize)>,
+    r: &mut Report,
+) {
+    const MODELS: [&str; 7] = [
+        "bernoulli", "clusters", "drums", "independent", "divider", "three_states", "markov",
+    ];
+    const RANGES: [&str; 3] = ["0.25x", "1x", "4x"];
+    const YDIV: [&str; 5] = ["1", "2", "4", "8", "16"];
+    if let Some(m) = p.t_model.as_deref() {
+        if !MODELS.contains(&m) {
+            r.error(loc, format!("t_model {m:?} — one of {}", MODELS.join(" ")));
+        }
+    }
+    if let Some(rg) = p.t_range.as_deref() {
+        if !RANGES.contains(&rg) {
+            r.error(loc, format!("t_range {rg:?} — one of {}", RANGES.join(" ")));
+        }
+    }
+    if let Some(d) = p.y_div.as_deref() {
+        if !YDIV.contains(&d) {
+            r.error(loc, format!("y_div {d:?} — one of {}", YDIV.join(" ")));
+        }
+    }
+    if let Some(l) = p.x_length {
+        if !(1..=16).contains(&l) {
+            r.error(loc, format!("x_length {l} — 1..16"));
+        }
+    }
+    for (name, v) in [
+        ("t_bias", p.t_bias),
+        ("t_jitter", p.t_jitter),
+        ("t_pw", p.t_pw),
+        ("x_spread", p.x_spread),
+        ("x_bias", p.x_bias),
+        ("x_steps", p.x_steps),
+        ("x_deja_vu", p.x_deja_vu),
+        ("y_spread", p.y_spread),
+        ("y_steps", p.y_steps),
+    ] {
+        range01(v, name, loc, r);
+    }
+    for (field, src) in [
+        ("t_bias_src", &p.t_bias_src),
+        ("t_jitter_src", &p.t_jitter_src),
+        ("t_pw_src", &p.t_pw_src),
+        ("x_spread_src", &p.x_spread_src),
+        ("x_bias_src", &p.x_bias_src),
+        ("x_steps_src", &p.x_steps_src),
+        ("x_deja_vu_src", &p.x_deja_vu_src),
+        ("y_spread_src", &p.y_spread_src),
+        ("y_steps_src", &p.y_steps_src),
+    ] {
+        check_src(src, field, loc, declared, r);
+    }
+}
+
 /// Template (template.rs SHAPES): shape by name.
 fn check_template(
     p: &TemplateParams,
@@ -1883,8 +1949,8 @@ const AUDIO_MODULES: [&str; 16] =
     ["voice", "swarm", "tone", "template", "delay", "filterbank", "dld", "sampler", "wasp", "dpo", "elements", "rings", "tides", "peaks", "edges", "streams"];
 
 /// Canonical module names, for misspelled-pane suggestions.
-const MODULE_NAMES: [&str; 28] =
-    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements", "rings", "tides", "peaks", "branches", "grids", "edges", "frames", "streams", "stages"];
+const MODULE_NAMES: [&str; 29] =
+    ["sequencer", "voice", "mixer", "scope", "envelope", "badge", "tone", "template", "delay", "filterbank", "tape", "swarm", "conductor", "dld", "sampler", "wasp", "dpo", "lfo", "elements", "rings", "tides", "peaks", "branches", "grids", "edges", "frames", "streams", "stages", "marbles"];
 
 /// An optional `*_src` field: grammar, known output, declared instance.
 /// Returns the parsed address so callers can queue cross-module checks.
@@ -1985,6 +2051,16 @@ fn check_notes_src(
             r.error(
                 loc,
                 format!("notes_src \"{s}\": branches outputs are 1a, 1b, 2a, 2b"),
+            );
+        }
+        return;
+    }
+    // marbles emits stochastic gates on t1/t2/t3
+    if addr.module == "marbles" {
+        if !["t1", "t2", "t3"].contains(&addr.output.as_str()) {
+            r.error(
+                loc,
+                format!("notes_src \"{s}\": marbles note outputs are t1, t2, t3"),
             );
         }
         return;
@@ -2147,6 +2223,10 @@ const KNOWN_KEYS: &[&str] = &[
     "types", "loops", "p3_src", "p4_src", "p5_src", "p6_src",
     "s1_src", "s2_src", "s3_src", "s4_src", "s5_src", "s6_src",
     "gate1_src", "gate2_src", "gate3_src", "gate4_src", "gate5_src", "gate6_src",
+    "t_model", "t_range", "t_bias", "t_jitter", "t_pw", "x_spread", "x_bias", "x_steps",
+    "x_deja_vu", "x_length", "x_scale", "y_spread", "y_steps", "y_div",
+    "t_bias_src", "t_jitter_src", "t_pw_src", "x_spread_src", "x_bias_src", "x_steps_src",
+    "x_deja_vu_src", "y_spread_src", "y_steps_src",
     "p1d_src", "p2a_src", "p2b_src", "p2c_src", "p2d_src",
     "patch_inline", "phase", "phase_src", "ping_ms", "ping_src", "pitch", "pitch_src", "playing",
     "pluck", "pluck_src", "prob", "pulses", "quant",

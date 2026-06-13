@@ -981,6 +981,47 @@ pub struct FramesParams {
     pub coupling_src: Option<String>,
 }
 
+/// Marbles (modules/marbles) — the MI random sampler: a t-section
+/// (rhythm model, bias, jitter) and an x/y section (spread, bias,
+/// steps, déjà-vu loop length, scale). CV+gate generator.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MarblesParams {
+    #[serde(default)]
+    pub format: u32,
+    pub t_model: Option<String>,
+    pub t_range: Option<String>,
+    pub t_bias: Option<f32>,
+    pub t_jitter: Option<f32>,
+    pub t_pw: Option<f32>,
+    pub x_spread: Option<f32>,
+    pub x_bias: Option<f32>,
+    pub x_steps: Option<f32>,
+    pub x_deja_vu: Option<f32>,
+    pub x_length: Option<usize>,
+    pub x_scale: Option<String>,
+    pub y_spread: Option<f32>,
+    pub y_steps: Option<f32>,
+    pub y_div: Option<String>,
+    #[serde(default)]
+    pub t_bias_src: Option<String>,
+    #[serde(default)]
+    pub t_jitter_src: Option<String>,
+    #[serde(default)]
+    pub t_pw_src: Option<String>,
+    #[serde(default)]
+    pub x_spread_src: Option<String>,
+    #[serde(default)]
+    pub x_bias_src: Option<String>,
+    #[serde(default)]
+    pub x_steps_src: Option<String>,
+    #[serde(default)]
+    pub x_deja_vu_src: Option<String>,
+    #[serde(default)]
+    pub y_spread_src: Option<String>,
+    #[serde(default)]
+    pub y_steps_src: Option<String>,
+}
+
 /// Stages (modules/stages) — the MI segment generator: six segments
 /// (type ramp|step|hold, loop flag, two knobs each), wired into
 /// groups by gate bindings exactly like the hardware. CV-only;
