@@ -24,6 +24,7 @@
 
 pub mod audit;
 pub mod faust;
+pub mod midi;
 pub mod ipc;
 pub mod modules;
 pub mod session;

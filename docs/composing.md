@@ -136,6 +136,8 @@ and a second **sequencer** to step fx parameters.
 | `bpm` | 20–300 | tempo; macros move it per-section |
 | `playing` | bool | ships true in the house file; `los render` forces its own start |
 | `lane` | `["a","",…]` | one slot per bar: `""` = keep going, letter = fire that macro |
+
+**Loading a MIDI file:** `:set midi path/to/file.mid` in the sequencer imports a Standard MIDI File — note-ons quantized to sixteenth-note steps, one sequencer track per MIDI channel, the file's tempo applied as the BPM. A quick way to get a riff or a drum pattern in from a DAW.
 | `lane_len` | 1–128 | bars before the form wraps |
 | `tracks` | ≤ 8 | each track is a voice's pattern or a CV lane |
 
