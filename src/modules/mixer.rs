@@ -1706,12 +1706,12 @@ pub fn run() -> Result<()> {
                     // J/K push the selected value down/up — vertical keys
                     // for vertical faders, fine (1%) on the homerow.
                     // -/= mirror them; _/+ are the 5% coarse pair.
-                    KeyCode::Char(c @ ('-' | '=' | '_' | '+' | 'J' | 'K')) => {
+                    KeyCode::Char(c @ ('-' | '=' | '_' | '+' | 'J' | 'K' | 'H' | 'L')) => {
                         let n = count.take() as i32;
                         let (steps, coarse) = match c {
                             '-' | 'J' => (-n, false),
                             '=' | 'K' => (n, false),
-                            '_' => (-n, true),
+                            '_' | 'H' => (-n, true),
                             _ => (n, true),
                         };
                         use crate::undo::ParamUndo;

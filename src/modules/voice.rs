@@ -1039,7 +1039,7 @@ pub fn run(instance: usize) -> Result<()> {
                             history.undo(&mut *s)
                         }));
                     }
-                    KeyCode::Char('@') => {
+                    KeyCode::Char('@') | KeyCode::Enter => {
                         count.clear();
                         let sources = Manifest::open()
                             .map(|m| crate::routing::live_sources(&m.entries()))
@@ -1049,6 +1049,34 @@ pub fn run(instance: usize) -> Result<()> {
                         drop(s);
                         if row_binding(&VoiceState::default(), selected).is_some() {
                             picker.open(sources, current.as_ref());
+                        }
+                    }
+                    KeyCode::Char('x') => {
+                        // unbind the selected row's modulation source (consistent
+                        // with every other panel module)
+                        use crate::undo::{ParamUndo, ParamValue};
+                        count.clear();
+                        let mut s = state.lock().unwrap();
+                        if row_binding(&s, selected).map(|b| b.is_some()).unwrap_or(false) {
+                            let slot = BIND_SLOT + selected;
+                            let old = s.get_param(slot);
+                            set_row_binding(&mut s, selected, None);
+                            if let Some(old) = old {
+                                history.record(slot, "Unbind", old, ParamValue::Src(None));
+                            }
+                        }
+                    }
+                    KeyCode::Char('0') => {
+                        // reset the selected value param to its default
+                        use crate::undo::ParamUndo;
+                        count.clear();
+                        let mut s = state.lock().unwrap();
+                        let old = s.get_param(selected);
+                        if let Some(def) = VoiceState::default().get_param(selected) {
+                            s.set_param(selected, def.clone());
+                            if let Some(old) = old {
+                                history.record(selected, "Reset", old, def);
+                            }
                         }
                     }
                     KeyCode::Char(' ') => {

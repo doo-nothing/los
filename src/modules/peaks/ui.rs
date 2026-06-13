@@ -1129,7 +1129,7 @@ pub fn run(instance: usize) -> Result<()> {
                     }
                 }
             }
-            KeyCode::Char('@') => {
+            KeyCode::Char('@') | KeyCode::Enter => {
                 count.clear();
                 let s = shared.lock().unwrap();
                 let r = ROWS[s.selected.min(ROWS.len() - 1)];

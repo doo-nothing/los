@@ -1357,12 +1357,12 @@ pub fn run(instance: usize) -> Result<()> {
                 let rows = s.rows_in(s.selected);
                 s.sel_row = crate::keys::cycle(s.sel_row.min(rows - 1), -n, rows);
             }
-            KeyCode::Char(c @ ('-' | '=' | '_' | '+' | 'J' | 'K')) => {
+            KeyCode::Char(c @ ('-' | '=' | '_' | '+' | 'J' | 'K' | 'H' | 'L')) => {
                 let n = count.take() as i32;
                 let (steps, coarse) = match c {
                     '-' | 'J' => (-n, false),
                     '=' | 'K' => (n, false),
-                    '_' => (-n, true),
+                    '_' | 'H' => (-n, true),
                     _ => (n, true),
                 };
                 use crate::undo::ParamUndo;

@@ -5,7 +5,8 @@
 //! firmware's panel — position, size, pitch, density, texture,
 //! dry/wet, stereo spread, feedback, reverb — plus a freeze toggle
 //! that holds the recording buffer. Publishes clouds/N/level (an
-//! output follower) on the bus. v1 is the granular playback mode.
+//! output follower) on the bus. The `mode` row selects granular or
+//! looping/delay playback (stretch/spectral are follow-ups).
 
 // max/min, not clamp, where modbus values land: clamp(NaN) is NaN and
 // a stale channel must die at the boundary.
