@@ -61,6 +61,7 @@ First five minutes: [docs/tour.md](docs/tour.md) · every key:
 | **branches** | Mutable Instruments Branches port: probabilistic note routing, toggle/latch |
 | **grids** | Mutable Instruments Grids port: the topographic drum map, euclid mode |
 | **edges** | Mutable Instruments Edges port: quad chiptune, NES noise + triangle |
+| **frames** | Mutable Instruments Frames port: keyframer + coupled poly LFO |
 | **envelope** (`maths`) | 6 function generators: trig/gate/cycle, slew, pluck, SUM/OR/INV, EOR/EOC, audio-rate out |
 | **mixer** | Auto-discovers sources, per-track meters, clip warning, tape out (`los record`) |
 | **scope** | Braille/half-block/bars/dots renderers, level trigger, taps any signal |

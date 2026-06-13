@@ -7,3 +7,6 @@
 //! frame knob itself takes a cable — that's the whole instrument.
 
 pub mod dsp;
+pub mod ui;
+
+pub use ui::run;
