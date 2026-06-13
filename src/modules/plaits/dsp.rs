@@ -4042,6 +4042,239 @@ impl Engine for HiHatEngine {
     }
 }
 
+// ── the particle engine ──────────────────────────────────────────────────────
+
+const NUM_PARTICLES: usize = 6;
+
+/// One particle: a random impulse train through a resonant band-pass
+/// whose frequency is re-randomized (spread around f0) on each impulse.
+struct Particle {
+    pre_gain: f32,
+    filter: Svf,
+}
+
+impl Particle {
+    fn new() -> Self {
+        Self {
+            pre_gain: 0.0,
+            filter: Svf::new(),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render(
+        &mut self,
+        sync: bool,
+        density: f32,
+        gain: f32,
+        frequency: f32,
+        spread: f32,
+        q: f32,
+        out: &mut [f32],
+        aux: &mut [f32],
+        rng: &mut Rng,
+    ) {
+        let mut u = if sync { density } else { rng.get_float() };
+        let mut can_randomize_frequency = true;
+        for (o, a) in out.iter_mut().zip(aux.iter_mut()) {
+            let mut s = 0.0;
+            if u <= density {
+                s = u * gain;
+                if can_randomize_frequency {
+                    let uu = 2.0 * rng.get_float() - 1.0;
+                    let f = (semitones_to_ratio(spread * uu) * frequency).min(0.25);
+                    self.pre_gain = 0.5 / (q * f * density.sqrt()).sqrt();
+                    self.filter.set_g_q(tan_dirty(f), q);
+                    can_randomize_frequency = false;
+                }
+            }
+            *a += s;
+            *o += self.filter.process(self.pre_gain * s, SvfMode::BandPass);
+            u = rng.get_float();
+        }
+    }
+}
+
+/// A delay line for the diffuser network (owned ring buffer).
+#[derive(Debug, Clone)]
+struct DiffLine {
+    buf: Vec<f32>,
+    write_ptr: usize,
+}
+
+impl DiffLine {
+    fn new(size: usize) -> Self {
+        Self {
+            buf: vec![0.0; size],
+            write_ptr: 0,
+        }
+    }
+    #[inline]
+    fn write(&mut self, sample: f32) {
+        let n = self.buf.len();
+        self.buf[self.write_ptr] = sample;
+        self.write_ptr = (self.write_ptr + n - 1) % n;
+    }
+    #[inline]
+    fn read(&self, delay: f32) -> f32 {
+        let n = self.buf.len();
+        let di = delay as usize;
+        let df = delay - di as f32;
+        let a = self.buf[(self.write_ptr + di) % n];
+        let b = self.buf[(self.write_ptr + di + 1) % n];
+        a + (b - a) * df
+    }
+    #[inline]
+    fn read_tail(&self) -> f32 {
+        self.read((self.buf.len() - 1) as f32)
+    }
+}
+
+/// The granular diffuser (plaits fx/diffuser.h): a Griesinger-style chain
+/// of allpasses (four input, two output) around a modulated, low-passed,
+/// feedback delay. Ported from the FxEngine context DSL.
+struct Diffuser {
+    ap1: DiffLine,
+    ap2: DiffLine,
+    ap3: DiffLine,
+    ap4: DiffLine,
+    dapa: DiffLine,
+    dapb: DiffLine,
+    del: DiffLine,
+    lp_decay: f32,
+    lfo_phase: f32,
+}
+
+impl Diffuser {
+    fn new() -> Self {
+        Self {
+            ap1: DiffLine::new(126),
+            ap2: DiffLine::new(180),
+            ap3: DiffLine::new(269),
+            ap4: DiffLine::new(444),
+            dapa: DiffLine::new(1653),
+            dapb: DiffLine::new(2010),
+            del: DiffLine::new(3411),
+            lp_decay: 0.0,
+            lfo_phase: 0.0,
+        }
+    }
+
+    fn process(&mut self, amount: f32, rt: f32, in_out: &mut [f32]) {
+        const KAP: f32 = 0.625;
+        const KLP: f32 = 0.75;
+        let lfo_inc = 0.3 / SAMPLE_RATE;
+        let mut lp = self.lp_decay;
+        for x in in_out.iter_mut() {
+            self.lfo_phase += lfo_inc;
+            if self.lfo_phase >= 1.0 {
+                self.lfo_phase -= 1.0;
+            }
+            let lfo = (self.lfo_phase * std::f32::consts::TAU).sin();
+
+            let mut acc = *x;
+            // four input allpasses (last one modulated)
+            for ap in [&mut self.ap1, &mut self.ap2, &mut self.ap3] {
+                let d = ap.read_tail();
+                let a = acc + KAP * d;
+                ap.write(a);
+                acc = -KAP * a + d;
+            }
+            {
+                let d = self.ap4.read(400.0 + 43.0 * lfo);
+                let a = acc + KAP * d;
+                self.ap4.write(a);
+                acc = -KAP * a + d;
+            }
+            // modulated feedback delay, low-passed
+            let d = self.del.read(3070.0 + 340.0 * lfo);
+            acc += rt * d;
+            lp += KLP * (acc - lp);
+            acc = lp;
+            // two output allpasses
+            {
+                let d = self.dapa.read_tail();
+                let a = acc - KAP * d;
+                self.dapa.write(a);
+                acc = KAP * a + d;
+            }
+            {
+                let d = self.dapb.read_tail();
+                let a = acc + KAP * d;
+                self.dapb.write(a);
+                acc = -KAP * a + d;
+            }
+            self.del.write(acc);
+            let wet = acc * 2.0;
+            *x += amount * (wet - *x);
+        }
+        self.lp_decay = lp;
+    }
+}
+
+/// The particle engine: clocked noise (a swarm of random impulse trains)
+/// through resonant band-pass filters, a post low-pass, and a granular
+/// diffuser. timbre → density, morph → resonance vs diffusion, harmonics
+/// → frequency spread.
+pub struct ParticleEngine {
+    particles: Vec<Particle>,
+    diffuser: Diffuser,
+    post_filter: Svf,
+    rng: Rng,
+}
+
+impl Default for ParticleEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ParticleEngine {
+    pub fn new() -> Self {
+        Self {
+            particles: (0..NUM_PARTICLES).map(|_| Particle::new()).collect(),
+            diffuser: Diffuser::new(),
+            post_filter: Svf::new(),
+            rng: Rng::new(0xe_5b90),
+        }
+    }
+}
+
+impl Engine for ParticleEngine {
+    fn render(&mut self, p: &EngineParameters, out: &mut [f32], aux: &mut [f32]) -> bool {
+        let f0 = note_to_frequency(p.note);
+        let density_sqrt = note_to_frequency(60.0 + p.timbre * p.timbre * 72.0);
+        let density = density_sqrt * density_sqrt * (1.0 / NUM_PARTICLES as f32);
+        let gain = 1.0 / density;
+        let q_sqrt = semitones_to_ratio(if p.morph >= 0.5 {
+            (p.morph - 0.5) * 120.0
+        } else {
+            0.0
+        });
+        let q = 0.5 + q_sqrt * q_sqrt;
+        let spread = 48.0 * p.harmonics * p.harmonics;
+        let raw_diffusion_sqrt = 2.0 * (p.morph - 0.5).abs();
+        let raw_diffusion = raw_diffusion_sqrt * raw_diffusion_sqrt;
+        let diffusion = if p.morph < 0.5 { raw_diffusion } else { 0.0 };
+        let sync = (p.trigger & TRIGGER_RISING_EDGE) != 0;
+
+        out.iter_mut().for_each(|o| *o = 0.0);
+        aux.iter_mut().for_each(|a| *a = 0.0);
+
+        for particle in self.particles.iter_mut() {
+            particle.render(sync, density, gain, f0, spread, q, out, aux, &mut self.rng);
+        }
+
+        self.post_filter.set_g_q(tan_dirty(f0.min(0.49)), 0.5);
+        for o in out.iter_mut() {
+            *o = self.post_filter.process(*o, SvfMode::LowPass);
+        }
+        self.diffuser
+            .process(0.8 * diffusion * diffusion, 0.5 * diffusion + 0.25, out);
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4111,6 +4344,23 @@ mod tests {
             energy += out.iter().map(|v| v * v).sum::<f32>();
         }
         assert!(energy > 0.0, "the noise engine sings: {energy}");
+    }
+
+    #[test]
+    fn particle_engine_sparkles() {
+        let mut eng = ParticleEngine::new();
+        let mut out = vec![0.0_f32; 64];
+        let mut aux = vec![0.0_f32; 64];
+        for (h, tb, mo) in [(0.2, 0.6, 0.3), (0.5, 0.7, 0.5), (0.9, 0.9, 0.8)] {
+            let mut energy = 0.0;
+            for _ in 0..200 {
+                let p = EngineParameters { note: 48.0, harmonics: h, timbre: tb, morph: mo, ..Default::default() };
+                eng.render(&p, &mut out, &mut aux);
+                assert!(out.iter().chain(aux.iter()).all(|v| v.is_finite() && v.abs() <= 8.0), "h={h} bounded");
+                energy += out.iter().chain(aux.iter()).map(|v| v * v).sum::<f32>();
+            }
+            assert!(energy > 1e-6, "particle sparkles at h={h}: {energy}");
+        }
     }
 
     #[test]
