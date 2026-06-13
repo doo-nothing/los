@@ -42,7 +42,15 @@ pub struct Tables {
     pub svf_damp: Vec<u16>,                // 257
     pub moderate_overdrive: Vec<i16>,      // 257
     pub fm_frequency_quantizer: Vec<i16>,  // 129
+    // formant-synth tables (braids_formant_tables.bin)
+    pub lut_bell: Vec<u16>,                // 257
+    pub wav_formant_sine: Vec<i16>,        // 256
+    pub wav_formant_square: Vec<i16>,      // 256
+    pub formant_f_data: Vec<i16>,          // 125 (5×5×5)
+    pub formant_a_data: Vec<i16>,          // 125
 }
+
+const BRAIDS_FORMANT_TABLES_BIN: &[u8] = include_bytes!("braids_formant_tables.bin");
 
 const BRAIDS_DIGITAL_TABLES_BIN: &[u8] = include_bytes!("braids_digital_tables.bin");
 
@@ -113,6 +121,36 @@ pub fn tables() -> &'static Tables {
             .chunks_exact(2)
             .map(|b| i16::from_le_bytes([b[0], b[1]]))
             .collect();
+        // formant tables: header of 5 u32 lengths, then lut_bell(u16),
+        // wav_formant_sine(i16), wav_formant_square(i16), formant_f(i16),
+        // formant_a(i16)
+        let fd = BRAIDS_FORMANT_TABLES_BIN;
+        let flen = |i: usize| {
+            u32::from_le_bytes([fd[i * 4], fd[i * 4 + 1], fd[i * 4 + 2], fd[i * 4 + 3]]) as usize
+        };
+        let (n_bell, n_fsin, n_fsq, n_ff, n_fa) = (flen(0), flen(1), flen(2), flen(3), flen(4));
+        let mut fo = 20;
+        let take_u16 = |fd: &[u8], off: &mut usize, n: usize| {
+            let v: Vec<u16> = fd[*off..*off + n * 2]
+                .chunks_exact(2)
+                .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                .collect();
+            *off += n * 2;
+            v
+        };
+        let take_i16 = |fd: &[u8], off: &mut usize, n: usize| {
+            let v: Vec<i16> = fd[*off..*off + n * 2]
+                .chunks_exact(2)
+                .map(|b| i16::from_le_bytes([b[0], b[1]]))
+                .collect();
+            *off += n * 2;
+            v
+        };
+        let lut_bell = take_u16(fd, &mut fo, n_bell);
+        let wav_formant_sine = take_i16(fd, &mut fo, n_fsin);
+        let wav_formant_square = take_i16(fd, &mut fo, n_fsq);
+        let formant_f_data = take_i16(fd, &mut fo, n_ff);
+        let formant_a_data = take_i16(fd, &mut fo, n_fa);
         Tables {
             wav_sine,
             increments,
@@ -125,9 +163,45 @@ pub fn tables() -> &'static Tables {
             svf_damp,
             moderate_overdrive,
             fm_frequency_quantizer,
+            lut_bell,
+            wav_formant_sine,
+            wav_formant_square,
+            formant_f_data,
+            formant_a_data,
         }
     })
 }
+
+/// braids' formant phoneme table: 3 formant frequencies + 3 amplitudes
+/// (all u8) per phoneme.
+#[derive(Clone, Copy)]
+struct PhonemeDefinition {
+    formant_frequency: [u8; 3],
+    formant_amplitude: [u8; 3],
+}
+
+const VOWELS_DATA: [PhonemeDefinition; 9] = [
+    PhonemeDefinition { formant_frequency: [27, 40, 89], formant_amplitude: [15, 13, 1] },
+    PhonemeDefinition { formant_frequency: [18, 51, 62], formant_amplitude: [13, 12, 6] },
+    PhonemeDefinition { formant_frequency: [15, 69, 93], formant_amplitude: [14, 12, 7] },
+    PhonemeDefinition { formant_frequency: [10, 84, 110], formant_amplitude: [13, 10, 8] },
+    PhonemeDefinition { formant_frequency: [23, 44, 87], formant_amplitude: [15, 12, 1] },
+    PhonemeDefinition { formant_frequency: [13, 29, 80], formant_amplitude: [13, 8, 0] },
+    PhonemeDefinition { formant_frequency: [6, 46, 81], formant_amplitude: [12, 3, 0] },
+    PhonemeDefinition { formant_frequency: [9, 51, 95], formant_amplitude: [15, 3, 0] },
+    PhonemeDefinition { formant_frequency: [6, 73, 99], formant_amplitude: [7, 3, 14] },
+];
+
+const CONSONANT_DATA: [PhonemeDefinition; 8] = [
+    PhonemeDefinition { formant_frequency: [6, 54, 121], formant_amplitude: [9, 9, 0] },
+    PhonemeDefinition { formant_frequency: [18, 50, 51], formant_amplitude: [12, 10, 5] },
+    PhonemeDefinition { formant_frequency: [11, 24, 70], formant_amplitude: [13, 8, 0] },
+    PhonemeDefinition { formant_frequency: [15, 69, 74], formant_amplitude: [14, 12, 7] },
+    PhonemeDefinition { formant_frequency: [16, 37, 111], formant_amplitude: [14, 8, 1] },
+    PhonemeDefinition { formant_frequency: [18, 51, 62], formant_amplitude: [14, 12, 6] },
+    PhonemeDefinition { formant_frequency: [6, 26, 81], formant_amplitude: [5, 5, 5] },
+    PhonemeDefinition { formant_frequency: [6, 73, 99], formant_amplitude: [7, 10, 14] },
+];
 
 /// `ComputePhaseIncrement` for the digital oscillator (clamps to the
 /// pitch-table start, then top-octave interpolation + octave shifts).
@@ -833,10 +907,12 @@ pub enum MacroModel {
     DigitalFilterPk,
     DigitalFilterBp,
     DigitalFilterHp,
+    Vosim,
+    Vowel,
 }
 
 /// All macro models in panel order — parallel to [`MODEL_NAMES`].
-pub const MODELS: [MacroModel; 21] = [
+pub const MODELS: [MacroModel; 23] = [
     MacroModel::CSaw,
     MacroModel::Morph,
     MacroModel::SawSquare,
@@ -858,9 +934,11 @@ pub const MODELS: [MacroModel; 21] = [
     MacroModel::DigitalFilterPk,
     MacroModel::DigitalFilterBp,
     MacroModel::DigitalFilterHp,
+    MacroModel::Vosim,
+    MacroModel::Vowel,
 ];
 
-pub const MODEL_NAMES: [&str; 21] = [
+pub const MODEL_NAMES: [&str; 23] = [
     "csaw",
     "morph",
     "saw_square",
@@ -882,6 +960,8 @@ pub const MODEL_NAMES: [&str; 21] = [
     "digital_filter_pk",
     "digital_filter_bp",
     "digital_filter_hp",
+    "vosim",
+    "vowel",
 ];
 
 pub struct MacroOscillator {
@@ -968,6 +1048,8 @@ impl MacroOscillator {
             MacroModel::DigitalFilterHp => {
                 self.render_digital(DigitalShape::DigitalFilterHp, sync, buffer, size)
             }
+            MacroModel::Vosim => self.render_digital(DigitalShape::Vosim, sync, buffer, size),
+            MacroModel::Vowel => self.render_digital(DigitalShape::Vowel, sync, buffer, size),
         }
     }
 
@@ -1209,6 +1291,8 @@ pub enum DigitalShape {
     DigitalFilterPk,
     DigitalFilterBp,
     DigitalFilterHp,
+    Vosim,
+    Vowel,
 }
 
 const FIR4_COEFFICIENTS: [u32; 4] = [10530, 14751, 16384, 14751];
@@ -1247,6 +1331,11 @@ pub struct DigitalOscillator {
     res_square_modulator_phase: u32,
     res_integrator: i32,
     res_polarity: bool,
+    // formant-synth (vow) state — formant_phase reuses the field above
+    vow_formant_increment: [u32; 3],
+    vow_formant_amplitude: [u32; 3],
+    vow_consonant_frames: u16,
+    vow_noise: u16,
 }
 
 impl Default for DigitalOscillator {
@@ -1273,6 +1362,10 @@ impl Default for DigitalOscillator {
             res_square_modulator_phase: 0,
             res_integrator: 0,
             res_polarity: false,
+            vow_formant_increment: [0; 3],
+            vow_formant_amplitude: [0; 3],
+            vow_consonant_frames: 0,
+            vow_noise: 0,
         }
     }
 }
@@ -1314,6 +1407,10 @@ impl DigitalOscillator {
         self.res_square_modulator_phase = 0;
         self.res_integrator = 0;
         self.res_polarity = false;
+        self.vow_formant_increment = [0; 3];
+        self.vow_formant_amplitude = [0; 3];
+        self.vow_consonant_frames = 0;
+        self.vow_noise = 0;
         self.phase = 0;
         self.strike = true;
     }
@@ -1345,6 +1442,104 @@ impl DigitalOscillator {
             DigitalShape::DigitalFilterPk => self.render_digital_filter(1, sync, buffer, size),
             DigitalShape::DigitalFilterBp => self.render_digital_filter(2, sync, buffer, size),
             DigitalShape::DigitalFilterHp => self.render_digital_filter(3, sync, buffer, size),
+            DigitalShape::Vosim => self.render_vosim(sync, buffer, size),
+            DigitalShape::Vowel => self.render_vowel(buffer, size),
+        }
+    }
+
+    /// VOSIM — two sine formants windowed by a bell, retriggered each
+    /// carrier cycle.
+    fn render_vosim(&mut self, sync: &[u8], buffer: &mut [i16], size: usize) {
+        let t = tables();
+        for i in 0..2 {
+            self.vow_formant_increment[i] = compute_phase_increment(self.parameter[i] >> 1);
+        }
+        for (n, b) in buffer.iter_mut().take(size).enumerate() {
+            self.phase = self.phase.wrapping_add(self.phase_increment);
+            if sync[n] != 0 {
+                self.phase = 0;
+            }
+            let mut sample = 16384 + 8192;
+            self.formant_phase[0] =
+                self.formant_phase[0].wrapping_add(self.vow_formant_increment[0]);
+            sample += interpolate824(&t.wav_sine, self.formant_phase[0]) >> 1;
+            self.formant_phase[1] =
+                self.formant_phase[1].wrapping_add(self.vow_formant_increment[1]);
+            sample += interpolate824(&t.wav_sine, self.formant_phase[1]) >> 2;
+            let bell = interpolate824_u16(&t.lut_bell, self.phase) >> 1;
+            sample = (sample as i64 * bell as i64 >> 15) as i32;
+            if self.phase < self.phase_increment {
+                self.formant_phase[0] = 0;
+                self.formant_phase[1] = 0;
+                sample = 0;
+            }
+            sample -= 16384 + 8192;
+            *b = sample as i16;
+        }
+    }
+
+    /// VOWEL — three formants (two sine, one square) from a vowel/consonant
+    /// table, with a struck consonant attack and noise modulation.
+    fn render_vowel(&mut self, buffer: &mut [i16], size: usize) {
+        let t = tables();
+        let vowel_index = (self.parameter[0] >> 12) as usize;
+        let balance = (self.parameter[0] & 0x0fff) as i32;
+        let formant_shift = 200u32 + (self.parameter[1] as u32 >> 6);
+        if self.strike {
+            self.strike = false;
+            self.vow_consonant_frames = 160;
+            let index = (((self.next_word() >> 16) as i16 as i32 + 1) & 7) as usize;
+            for i in 0..3 {
+                self.vow_formant_increment[i] =
+                    CONSONANT_DATA[index].formant_frequency[i] as u32 * 0x1000 * formant_shift;
+                self.vow_formant_amplitude[i] = CONSONANT_DATA[index].formant_amplitude[i] as u32;
+            }
+            self.vow_noise = if index >= 6 { 4095 } else { 0 };
+        }
+        if self.vow_consonant_frames != 0 {
+            self.vow_consonant_frames -= 1;
+        } else {
+            for i in 0..3 {
+                let f0 = VOWELS_DATA[vowel_index].formant_frequency[i] as i32;
+                let f1 = VOWELS_DATA[vowel_index + 1].formant_frequency[i] as i32;
+                self.vow_formant_increment[i] =
+                    ((f0 * (0x1000 - balance) + f1 * balance) as u32) * formant_shift;
+                let a0 = VOWELS_DATA[vowel_index].formant_amplitude[i] as i32;
+                let a1 = VOWELS_DATA[vowel_index + 1].formant_amplitude[i] as i32;
+                self.vow_formant_amplitude[i] =
+                    ((a0 * (0x1000 - balance) + a1 * balance) >> 12) as u32;
+            }
+            self.vow_noise = 0;
+        }
+        let noise = self.vow_noise as i32;
+        for b in buffer.iter_mut().take(size) {
+            self.phase = self.phase.wrapping_add(self.phase_increment);
+            let mut sample: i16 = 0;
+            self.formant_phase[0] =
+                self.formant_phase[0].wrapping_add(self.vow_formant_increment[0]);
+            let phaselet = ((self.formant_phase[0] >> 24) & 0xf0) as usize;
+            sample = sample
+                .wrapping_add(t.wav_formant_sine[phaselet | self.vow_formant_amplitude[0] as usize]);
+            self.formant_phase[1] =
+                self.formant_phase[1].wrapping_add(self.vow_formant_increment[1]);
+            let phaselet = ((self.formant_phase[1] >> 24) & 0xf0) as usize;
+            sample = sample
+                .wrapping_add(t.wav_formant_sine[phaselet | self.vow_formant_amplitude[1] as usize]);
+            self.formant_phase[2] =
+                self.formant_phase[2].wrapping_add(self.vow_formant_increment[2]);
+            let phaselet = ((self.formant_phase[2] >> 24) & 0xf0) as usize;
+            sample = sample.wrapping_add(
+                t.wav_formant_square[phaselet | self.vow_formant_amplitude[2] as usize],
+            );
+            sample = sample.wrapping_mul((255 - (self.phase >> 24) as i32) as i16);
+            let phase_noise = (self.next_word() >> 16) as i16 as i32 * noise;
+            if self.phase.wrapping_add(phase_noise as u32) < self.phase_increment {
+                self.formant_phase[0] = 0;
+                self.formant_phase[1] = 0;
+                self.formant_phase[2] = 0;
+                sample = 0;
+            }
+            *b = interpolate88(&t.moderate_overdrive, (sample as i32 + 32768) as u16) as i16;
         }
     }
 
@@ -1786,6 +1981,8 @@ mod tests {
             MacroModel::DigitalFilterPk,
             MacroModel::DigitalFilterBp,
             MacroModel::DigitalFilterHp,
+            MacroModel::Vosim,
+            MacroModel::Vowel,
         ] {
             let mut m = MacroOscillator::new();
             m.set_model(model);
