@@ -829,10 +829,14 @@ pub enum MacroModel {
     SawSwarm,
     SawComb,
     Toy,
+    DigitalFilterLp,
+    DigitalFilterPk,
+    DigitalFilterBp,
+    DigitalFilterHp,
 }
 
 /// All macro models in panel order — parallel to [`MODEL_NAMES`].
-pub const MODELS: [MacroModel; 17] = [
+pub const MODELS: [MacroModel; 21] = [
     MacroModel::CSaw,
     MacroModel::Morph,
     MacroModel::SawSquare,
@@ -850,9 +854,13 @@ pub const MODELS: [MacroModel; 17] = [
     MacroModel::SawSwarm,
     MacroModel::SawComb,
     MacroModel::Toy,
+    MacroModel::DigitalFilterLp,
+    MacroModel::DigitalFilterPk,
+    MacroModel::DigitalFilterBp,
+    MacroModel::DigitalFilterHp,
 ];
 
-pub const MODEL_NAMES: [&str; 17] = [
+pub const MODEL_NAMES: [&str; 21] = [
     "csaw",
     "morph",
     "saw_square",
@@ -870,6 +878,10 @@ pub const MODEL_NAMES: [&str; 17] = [
     "saw_swarm",
     "saw_comb",
     "toy",
+    "digital_filter_lp",
+    "digital_filter_pk",
+    "digital_filter_bp",
+    "digital_filter_hp",
 ];
 
 pub struct MacroOscillator {
@@ -944,6 +956,18 @@ impl MacroOscillator {
             MacroModel::SawSwarm => self.render_digital(DigitalShape::SawSwarm, sync, buffer, size),
             MacroModel::Toy => self.render_digital(DigitalShape::Toy, sync, buffer, size),
             MacroModel::SawComb => self.render_saw_comb(sync, buffer, size),
+            MacroModel::DigitalFilterLp => {
+                self.render_digital(DigitalShape::DigitalFilterLp, sync, buffer, size)
+            }
+            MacroModel::DigitalFilterPk => {
+                self.render_digital(DigitalShape::DigitalFilterPk, sync, buffer, size)
+            }
+            MacroModel::DigitalFilterBp => {
+                self.render_digital(DigitalShape::DigitalFilterBp, sync, buffer, size)
+            }
+            MacroModel::DigitalFilterHp => {
+                self.render_digital(DigitalShape::DigitalFilterHp, sync, buffer, size)
+            }
         }
     }
 
@@ -1181,10 +1205,15 @@ pub enum DigitalShape {
     SawSwarm,
     Comb,
     Toy,
+    DigitalFilterLp,
+    DigitalFilterPk,
+    DigitalFilterBp,
+    DigitalFilterHp,
 }
 
 const FIR4_COEFFICIENTS: [u32; 4] = [10530, 14751, 16384, 14751];
 const FIR4_DC_OFFSET: i32 = 28208;
+const PHASE_RESET: [u32; 4] = [0, 0x8000_0000, 0x4000_0000, 0x8000_0000];
 
 #[inline]
 fn clip16(x: i32) -> i32 {
@@ -1212,6 +1241,12 @@ pub struct DigitalOscillator {
     toy_decimation_counter: u16,
     toy_held_sample: u8,
     comb_delay: Vec<i16>,
+    // resonant digital-filter (res) state
+    res_modulator_phase_increment: u32,
+    res_modulator_phase: u32,
+    res_square_modulator_phase: u32,
+    res_integrator: i32,
+    res_polarity: bool,
 }
 
 impl Default for DigitalOscillator {
@@ -1233,6 +1268,11 @@ impl Default for DigitalOscillator {
             toy_decimation_counter: 0,
             toy_held_sample: 0,
             comb_delay: vec![0; COMB_DELAY_LENGTH],
+            res_modulator_phase_increment: 0,
+            res_modulator_phase: 0,
+            res_square_modulator_phase: 0,
+            res_integrator: 0,
+            res_polarity: false,
         }
     }
 }
@@ -1269,6 +1309,11 @@ impl DigitalOscillator {
         self.toy_decimation_counter = 0;
         self.toy_held_sample = 0;
         self.comb_delay.iter_mut().for_each(|s| *s = 0);
+        self.res_modulator_phase_increment = 0;
+        self.res_modulator_phase = 0;
+        self.res_square_modulator_phase = 0;
+        self.res_integrator = 0;
+        self.res_polarity = false;
         self.phase = 0;
         self.strike = true;
     }
@@ -1296,7 +1341,107 @@ impl DigitalOscillator {
             DigitalShape::SawSwarm => self.render_saw_swarm(sync, buffer, size),
             DigitalShape::Comb => self.render_comb(buffer, size),
             DigitalShape::Toy => self.render_toy(sync, buffer, size),
+            DigitalShape::DigitalFilterLp => self.render_digital_filter(0, sync, buffer, size),
+            DigitalShape::DigitalFilterPk => self.render_digital_filter(1, sync, buffer, size),
+            DigitalShape::DigitalFilterBp => self.render_digital_filter(2, sync, buffer, size),
+            DigitalShape::DigitalFilterHp => self.render_digital_filter(3, sync, buffer, size),
         }
+    }
+
+    /// The resonant digital filter (LP/PK/BP/HP), a "two-operator"
+    /// formant model: a carrier sine resonant peak swept by `parameter_0`
+    /// over a saw/triangle/square source, balanced by `parameter_1`.
+    fn render_digital_filter(
+        &mut self,
+        filter_type: u8,
+        sync: &[u8],
+        buffer: &mut [i16],
+        size: usize,
+    ) {
+        let t = tables();
+        let mut shifted_pitch =
+            (self.pitch as i32 + ((self.parameter[0] as i32 - 2048) >> 1)) as i16;
+        if shifted_pitch > 16383 {
+            shifted_pitch = 16383;
+        }
+        let mut modulator_phase = self.res_modulator_phase;
+        let mut square_modulator_phase = self.res_square_modulator_phase;
+        let mut square_integrator = self.res_integrator;
+        let mut polarity = self.res_polarity;
+        let mut modulator_phase_increment = self.res_modulator_phase_increment;
+        let target_increment = compute_phase_increment(shifted_pitch);
+        let size_u = size.max(1) as u32;
+        let phase_inc_inc = if modulator_phase_increment < target_increment {
+            (target_increment - modulator_phase_increment) / size_u
+        } else {
+            !((modulator_phase_increment - target_increment) / size_u)
+        };
+
+        for (n, b) in buffer.iter_mut().take(size).enumerate() {
+            self.phase = self.phase.wrapping_add(self.phase_increment);
+            modulator_phase_increment = modulator_phase_increment.wrapping_add(phase_inc_inc);
+            modulator_phase = modulator_phase.wrapping_add(modulator_phase_increment);
+            let integrator_gain = (modulator_phase_increment >> 14) as u16;
+
+            if sync[n] != 0 {
+                polarity = true;
+                self.phase = 0;
+                modulator_phase = 0;
+                square_modulator_phase = 0;
+                square_integrator = 0;
+            }
+            square_modulator_phase =
+                square_modulator_phase.wrapping_add(modulator_phase_increment);
+            if self.phase < self.phase_increment {
+                modulator_phase = PHASE_RESET[filter_type as usize];
+            }
+            if (self.phase << 1) < (self.phase_increment << 1) {
+                polarity = !polarity;
+                square_modulator_phase = PHASE_RESET[((filter_type & 1) + 2) as usize];
+            }
+
+            let carrier = interpolate824(&t.wav_sine, modulator_phase);
+            let square_carrier = interpolate824(&t.wav_sine, square_modulator_phase);
+
+            let saw = !(self.phase >> 16) as u16;
+            let double_saw = !(self.phase >> 15) as u16;
+            let triangle =
+                ((self.phase >> 15) as u16) ^ (if self.phase & 0x8000_0000 != 0 { 0xffff } else { 0 });
+            let window = if self.parameter[1] < 16384 { saw } else { triangle };
+
+            let mut pulse = ((square_carrier as i64 * double_saw as i64) >> 16) as i32;
+            if polarity {
+                pulse = -pulse;
+            }
+            square_integrator += ((pulse as i64 * integrator_gain as i64) >> 16) as i32;
+            square_integrator = clip16(square_integrator);
+
+            let saw_tri_signal: i32;
+            let square_signal: i32;
+            if filter_type & 2 != 0 {
+                saw_tri_signal = ((carrier as i64 * window as i64) >> 16) as i32;
+                square_signal = pulse;
+            } else {
+                saw_tri_signal =
+                    ((window as i64 * (carrier as i64 + 32768) >> 16) - 32768) as i32;
+                square_signal = if filter_type == 1 {
+                    (pulse + square_integrator) >> 1
+                } else {
+                    square_integrator
+                };
+            }
+            let balance = ((if self.parameter[1] < 16384 {
+                self.parameter[1] as i32
+            } else {
+                !(self.parameter[1] as i32)
+            }) << 2) as u16;
+            *b = mix(saw_tri_signal as i16, square_signal as i16, balance);
+        }
+        self.res_modulator_phase = modulator_phase;
+        self.res_square_modulator_phase = square_modulator_phase;
+        self.res_integrator = square_integrator;
+        self.res_modulator_phase_increment = modulator_phase_increment;
+        self.res_polarity = polarity;
     }
 
     fn render_triple_ring_mod(&mut self, sync: &[u8], buffer: &mut [i16], size: usize) {
@@ -1637,6 +1782,10 @@ mod tests {
             MacroModel::SawSwarm,
             MacroModel::SawComb,
             MacroModel::Toy,
+            MacroModel::DigitalFilterLp,
+            MacroModel::DigitalFilterPk,
+            MacroModel::DigitalFilterBp,
+            MacroModel::DigitalFilterHp,
         ] {
             let mut m = MacroOscillator::new();
             m.set_model(model);
