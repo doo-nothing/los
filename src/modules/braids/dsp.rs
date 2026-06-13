@@ -351,10 +351,15 @@ fn mix(a: i16, b: i16, balance: u16) -> i16 {
 
 #[inline]
 fn interpolate824(table: &[i16], phase: u32) -> i32 {
+    // The firmware computes `(b-a)*frac` in int32 and lets it wrap. For
+    // smooth tables (wav_sine) the delta is tiny, but the comb tables reach
+    // deltas ~39000 which, times a 16-bit fraction, overflow i32 — so this
+    // must wrapping_mul (matching the hardware's int32 wrap) rather than
+    // panic in a debug build.
     let i = (phase >> 24) as usize;
     let a = table[i] as i32;
     let b = table[(i + 1).min(table.len() - 1)] as i32;
-    a + ((b - a) * ((phase >> 8) & 0xffff) as i32 >> 16)
+    a + ((b - a).wrapping_mul(((phase >> 8) & 0xffff) as i32) >> 16)
 }
 
 /// stmlib `Interpolate1022`: 10.22 fixed-point read of a 1024(+1)-entry
@@ -380,9 +385,12 @@ fn interpolate88(table: &[i16], index: u16) -> i32 {
 
 #[inline]
 fn crossfade(table_a: &[i16], table_b: &[i16], phase: u32, balance: u16) -> i32 {
+    // wrapping_mul: the comb crossfade can have large inter-zone deltas
+    // whose product with the balance overflows i32 (matches the firmware's
+    // int32 wrap; avoids a debug-build panic).
     let a = interpolate824(table_a, phase);
     let b = interpolate824(table_b, phase);
-    a + ((b - a) * balance as i32 >> 16)
+    a + ((b - a).wrapping_mul(balance as i32) >> 16)
 }
 
 #[inline]
@@ -4254,6 +4262,45 @@ mod tests {
     #[test]
     fn digital_model_count_matches_names() {
         assert_eq!(MODELS.len(), MODEL_NAMES.len());
+    }
+
+    #[test]
+    fn interpolate824_survives_large_table_deltas() {
+        // Regression: the comb tables have deltas ~39000 which, times a near-
+        // full 16-bit fraction, overflow i32 — interpolate824/crossfade must
+        // wrapping_mul (like the firmware) instead of panicking in debug.
+        // (braids tables are always >= 257 entries; build alternating extremes.)
+        let mut a = vec![0i16; 257];
+        let mut b = vec![0i16; 257];
+        for k in 0..257 {
+            a[k] = if k % 2 == 0 { i16::MIN } else { i16::MAX }; // delta 65535
+            b[k] = if k % 2 == 0 { i16::MAX } else { i16::MIN };
+        }
+        for phase in [0x00ff_ff00u32, 0x0100_ff00, 0x0080_0000, 0x7fff_ff00, 0xfeff_ff00] {
+            let _ = interpolate824(&a, phase); // must not panic
+            for balance in [0u16, 1, 32768, 65535] {
+                let _ = crossfade(&a, &b, phase, balance); // must not panic
+            }
+        }
+    }
+
+    #[test]
+    fn buzz_model_renders_across_the_param_space_without_panicking() {
+        // The Buzz (comb) path is what exposes the interpolate824 overflow.
+        let sync = vec![0u8; 64];
+        let mut m = MacroOscillator::new();
+        m.set_model(MacroModel::Buzz);
+        for pitch in [20 << 7, 60 << 7, 110 << 7] {
+            m.set_pitch(pitch);
+            for p in [0, 8000, 16000, 24000, 32767] {
+                m.set_parameters(p, p);
+                let mut out = vec![0i16; 64];
+                for _ in 0..20 {
+                    m.render(&sync, &mut out, 64);
+                    assert!(out.iter().all(|&v| (-32768..=32767).contains(&(v as i32))));
+                }
+            }
+        }
     }
 
     #[test]

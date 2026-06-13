@@ -829,10 +829,13 @@ impl LoopingSamplePlayer {
                 }
                 let error = target_delay - self.current_delay;
                 self.current_delay += 0.00005 * error;
-                let mut delay_int = (buf_l.head() - 4 - remaining as i32 + buf_l.size()) << 12;
-                delay_int -= (self.current_delay * 4096.0) as i32;
-                let l = buf_l.read_hermite(delay_int >> 12, (delay_int << 4) as u16);
-                let r = buf_r.read_hermite(delay_int >> 12, (delay_int << 4) as u16);
+                // carry the 20.12 fixed-point position in i64 — the 3-second
+                // buffer's `head + size` exceeds i32 after the <<12 above 88 kHz
+                let mut delay_int =
+                    ((buf_l.head() - 4 - remaining as i32 + buf_l.size()) as i64) << 12;
+                delay_int -= (self.current_delay * 4096.0) as i64;
+                let l = buf_l.read_hermite((delay_int >> 12) as i32, (delay_int << 4) as u16);
+                let r = buf_r.read_hermite((delay_int >> 12) as i32, (delay_int << 4) as u16);
                 out[n * 2] = l;
                 out[n * 2 + 1] = r;
             }
@@ -873,16 +876,17 @@ impl LoopingSamplePlayer {
                 if self.tail_duration != 0.0 {
                     gain = (self.phase / self.tail_duration).clamp(0.0, 1.0);
                 }
-                let delay_int = (buf_l.head() - 4 - remaining as i32 + buf_l.size()) << 12;
-                let position =
-                    delay_int - ((self.loop_duration - self.phase + self.loop_point) * 4096.0) as i32;
-                let mut l = buf_l.read_hermite(position >> 12, (position << 4) as u16) * gain;
-                let mut r = buf_r.read_hermite(position >> 12, (position << 4) as u16) * gain;
+                let delay_int =
+                    ((buf_l.head() - 4 - remaining as i32 + buf_l.size()) as i64) << 12;
+                let position = delay_int
+                    - ((self.loop_duration - self.phase + self.loop_point) * 4096.0) as i64;
+                let mut l = buf_l.read_hermite((position >> 12) as i32, (position << 4) as u16) * gain;
+                let mut r = buf_r.read_hermite((position >> 12) as i32, (position << 4) as u16) * gain;
                 if gain != 1.0 {
                     let g2 = 1.0 - gain;
-                    let position2 = delay_int - ((-self.phase + self.tail_start) * 4096.0) as i32;
-                    l += buf_l.read_hermite(position2 >> 12, (position2 << 4) as u16) * g2;
-                    r += buf_r.read_hermite(position2 >> 12, (position2 << 4) as u16) * g2;
+                    let position2 = delay_int - ((-self.phase + self.tail_start) * 4096.0) as i64;
+                    l += buf_l.read_hermite((position2 >> 12) as i32, (position2 << 4) as u16) * g2;
+                    r += buf_r.read_hermite((position2 >> 12) as i32, (position2 << 4) as u16) * g2;
                 }
                 out[n * 2] = l;
                 out[n * 2 + 1] = r;
