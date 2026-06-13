@@ -1,0 +1,100 @@
+# warps-demo.toml — the classic warps move: a swarm pad on the carrier,
+# a voice bass on the modulator, ring-modulated and wavefolded. An LFO
+# rides the algorithm knob so it morphs through the cross-mod world.
+# Uncommitted example.
+
+[meta]
+name = "warps-demo"
+created = ""
+format = 2
+
+[[windows]]
+name = "modules"
+
+[[windows.panes]]
+module = "sequencer"
+instance = 0
+
+[windows.panes.patch_inline]
+bpm = 100.0
+playing = false
+
+[[windows.panes.patch_inline.tracks]]
+length = 8
+steps = [
+  { active = true, note = 36, velocity = 100 },
+  { active = false, note = 36, velocity = 80 },
+  { active = true, note = 43, velocity = 88 },
+  { active = false, note = 36, velocity = 80 },
+  { active = true, note = 39, velocity = 92 },
+  { active = false, note = 36, velocity = 80 },
+  { active = true, note = 41, velocity = 84 },
+  { active = false, note = 36, velocity = 80 },
+]
+
+[[windows.panes.patch_inline.tracks]]
+length = 4
+steps = [
+  { active = true, note = 60, velocity = 80 },
+  { active = false, note = 60, velocity = 80 },
+  { active = true, note = 67, velocity = 76 },
+  { active = false, note = 60, velocity = 80 },
+]
+
+[[windows.panes]]
+module = "voice"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+shape = 0.2
+sub = 0.7
+lpg = 0.4
+level = 0.9
+notes_src = "sequencer/0/t1"
+
+[[windows.panes]]
+module = "swarm"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+chord = "5th"
+detune = 0.4
+cutoff = 0.6
+swell = 0.4
+level = 0.7
+notes_src = "sequencer/0/t2"
+
+[[windows.panes]]
+module = "lfo"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+
+[[windows.panes]]
+module = "warps"
+instance = 0
+
+[windows.panes.patch_inline]
+format = 2
+carrier = "swarm/0"
+modulator = "voice/0"
+algorithm = 0.25
+timbre = 0.55
+drive1 = 0.6
+drive2 = 0.65
+shape = "external"
+algorithm_src = "lfo/0/s1"
+
+[[windows.panes]]
+module = "mixer"
+instance = 0
+
+[windows.panes.patch_inline]
+master = 0.9
+
+[[windows.panes]]
+module = "scope"
+instance = 0

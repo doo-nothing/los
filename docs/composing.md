@@ -444,6 +444,22 @@ shape the spread. t1/t2/t3 emit note events (bind them to a voice's
 publish on the bus (x's are pitched CV, y a slower companion). Every
 continuous knob has a `*_src` twin.
 
+**warps** (the Mutable Instruments meta-modulator, full port of the
+cross-mod core): two audio inputs — `carrier` and `modulator` — and
+one `algorithm` knob that sweeps a whole world of cross-modulation:
+cross-fade → wavefold → analog ring-mod → digital ring-mod → XOR →
+comparator → vocoder. `timbre` is each algorithm's parameter (fold
+depth, ring index, comparator window). `drive1`/`drive2` overdrive
+each input into the noise gate. `carrier = "sine"` (or triangle/saw/
+pulse/noise) swaps the external carrier for an internal oscillator at
+`note`, so warps self-oscillates as a synth voice. Patch a bass to
+`modulator` and a pad to `carrier`, then ride the algorithm knob —
+that's the classic warps move. The modulated signal comes out its
+ring; `warps/N/aux` publishes the secondary output. Every knob has a
+`*_src` twin. (Runs at session rate — no 6× oversampling — and the
+vocoder is a 16-band simplification; the cross-mod algorithms are
+exact.)
+
 **mixer**: per-track `level` (0–1), `pan` (−1–1), `drive` (0–1), 3-band
 EQ (±15 dB, `eq_freq` 0–1), `mute`/`solo`; a master strip with the
 same console plus `master_width` (0–2).
@@ -481,10 +497,11 @@ Sources:
 | `streams/N/` | `g1`, `f1`, `g2`, `f2` (gain + frequency CV per side) |
 | `stages/N/` | `o1`–`o6` (segment outputs: envelopes, LFOs, sequencer steps) |
 | `marbles/N/` | `t1`–`t3` (random gates; also note sources), `x1`–`x3`, `y` (random CV) |
+| `warps/N/` | `aux` (the secondary cross-mod output) |
 | `template/N/` | `lfo` |
 
 Audio `input` fields are 2-segment: a producing module (`voice`,
-`swarm`, `tone`, `template`, `delay`, `filterbank`, `streams`) or a mixer virtual
+`swarm`, `tone`, `template`, `delay`, `filterbank`, `streams`, `warps`) or a mixer virtual
 (`send/0`, `send/1`, `mix/0`). Addresses are names, not channel
 numbers — they survive restarts, and a binding to a module not in the
 file is legal-but-dead until `los add` brings it up (check warns).
