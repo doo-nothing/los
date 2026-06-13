@@ -460,6 +460,21 @@ ring; `warps/N/aux` publishes the secondary output. Every knob has a
 vocoder is a 16-band simplification; the cross-mod algorithms are
 exact.)
 
+**braids** (the Mutable Instruments macro-oscillator, analog models):
+a monophonic synth voice driven by a note track. `model` ∈ csaw,
+morph, saw_square, sine_triangle, buzz, square/saw_sub,
+square/saw_sync, triple saw/square/triangle/sine — each a different
+oscillator topology (morph is the famous tri→saw→square→sine sweep
+through a fold/fuzz stage; the sync and sub models are classic
+analog tricks; the triples are three detuned voices). `timbre` and
+`color` are the model's two parameters (they mean different things
+per model — fold depth, pulse width, detune, sub level). `notes_src`
+sets the pitch, `amp_src` (an envelope channel) shapes the level —
+like the voice and elements modules. Every knob has a `*_src` twin.
+Renders at 96 kHz, resampled to the session rate. (The digital
+models — FM, physical models, wavetables, drums — arrive in later
+releases.)
+
 **mixer**: per-track `level` (0–1), `pan` (−1–1), `drive` (0–1), 3-band
 EQ (±15 dB, `eq_freq` 0–1), `mute`/`solo`; a master strip with the
 same console plus `master_width` (0–2).
@@ -498,6 +513,7 @@ Sources:
 | `stages/N/` | `o1`–`o6` (segment outputs: envelopes, LFOs, sequencer steps) |
 | `marbles/N/` | `t1`–`t3` (random gates; also note sources), `x1`–`x3`, `y` (random CV) |
 | `warps/N/` | `aux` (the secondary cross-mod output) |
+| `braids/N/` | `level` (the output follower) |
 | `template/N/` | `lfo` |
 
 Audio `input` fields are 2-segment: a producing module (`voice`,
