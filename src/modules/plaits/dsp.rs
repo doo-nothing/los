@@ -803,6 +803,152 @@ impl Engine for VirtualAnalogEngine {
     }
 }
 
+// ── the chord engine ─────────────────────────────────────────────────────────
+
+const CHORD_NUM_NOTES: usize = 4;
+const CHORD_NUM_VOICES: usize = CHORD_NUM_NOTES + 1; // 5
+const CHORD_NUM_CHORDS: usize = 17;
+
+/// chord_bank.cc — the 17 chord types as semitone intervals.
+const CHORDS: [[f32; CHORD_NUM_NOTES]; CHORD_NUM_CHORDS] = [
+    [0.00, 0.01, 11.99, 12.00], // Octave
+    [0.00, 7.00, 7.01, 12.00],  // Fifth
+    [0.00, 3.00, 7.00, 12.00],  // Minor
+    [0.00, 3.00, 7.00, 10.00],  // Minor 7th
+    [0.00, 3.00, 10.00, 14.00], // Minor 9th
+    [0.00, 3.00, 10.00, 17.00], // Minor 11th
+    [0.00, 4.00, 7.00, 12.00],  // Major
+    [0.00, 4.00, 7.00, 11.00],  // Major 7th
+    [0.00, 4.00, 11.00, 14.00], // Major 9th
+    [0.00, 5.00, 7.00, 12.00],  // Sus4
+    [0.00, 2.00, 9.00, 16.00],  // 69
+    [0.00, 4.00, 7.00, 9.00],   // 6th
+    [0.00, 7.00, 16.00, 23.00], // 10th (spread maj7)
+    [0.00, 4.00, 7.00, 10.00],  // Dominant 7th
+    [0.00, 7.00, 10.00, 13.00], // Dominant 7th b9
+    [0.00, 3.00, 6.00, 10.00],  // Half diminished
+    [0.00, 3.00, 6.00, 9.00],   // Fully diminished
+];
+
+/// A five-voice chord engine: the note's pitch fans out into one of 17
+/// chord types (harmonics), inverted/voiced by timbre, the waveform
+/// morphed saw→square by morph. Voices are variable-shape oscillators
+/// (a documented simplification of the firmware's divide-down +
+/// wavetable blend — the chords and inversions are exact).
+pub struct ChordEngine {
+    voices: Vec<VariableShapeOscillator>,
+    morph_lp: f32,
+    timbre_lp: f32,
+}
+
+impl ChordEngine {
+    pub fn new() -> Self {
+        Self {
+            voices: (0..CHORD_NUM_VOICES).map(|_| VariableShapeOscillator::new()).collect(),
+            morph_lp: 0.0,
+            timbre_lp: 0.0,
+        }
+    }
+
+    fn chord_ratio(chord: usize, note: usize) -> f32 {
+        semitones_to_ratio(CHORDS[chord.min(CHORD_NUM_CHORDS - 1)][note])
+    }
+
+    /// chord_bank.cc ComputeChordInversion: distribute the four chord
+    /// notes across five voices per the inversion knob; returns the
+    /// aux-routing bitmask.
+    fn compute_inversion(
+        chord: usize,
+        inversion: f32,
+        ratios: &mut [f32; CHORD_NUM_VOICES],
+        amplitudes: &mut [f32; CHORD_NUM_VOICES],
+    ) -> u32 {
+        let inv = inversion * (CHORD_NUM_NOTES * CHORD_NUM_VOICES) as f32;
+        let inv_i = inv as i32;
+        let inv_f = inv - inv_i as f32;
+        let num_rotations = inv_i / CHORD_NUM_NOTES as i32;
+        let rotated_note = (inv_i % CHORD_NUM_NOTES as i32) as usize;
+        const BASE_GAIN: f32 = 0.25;
+        let mut mask = 0u32;
+        for i in 0..CHORD_NUM_NOTES {
+            let transposition = 0.25
+                * (1i32 << (((CHORD_NUM_NOTES as i32 - 1 + inv_i - i as i32)
+                    / CHORD_NUM_NOTES as i32)
+                    .clamp(0, 6))) as f32;
+            let target = ((i as i32 - num_rotations + CHORD_NUM_VOICES as i32)
+                % CHORD_NUM_VOICES as i32) as usize;
+            let previous = (target + CHORD_NUM_VOICES - 1) % CHORD_NUM_VOICES;
+            let base = Self::chord_ratio(chord, i);
+            if i == rotated_note {
+                ratios[target] = base * transposition;
+                ratios[previous] = ratios[target] * 2.0;
+                amplitudes[previous] = BASE_GAIN * inv_f;
+                amplitudes[target] = BASE_GAIN * (1.0 - inv_f);
+            } else if i < rotated_note {
+                ratios[previous] = base * transposition;
+                amplitudes[previous] = BASE_GAIN;
+            } else {
+                ratios[target] = base * transposition;
+                amplitudes[target] = BASE_GAIN;
+            }
+            if i == 0 {
+                if i >= rotated_note {
+                    mask |= 1 << target;
+                }
+                if i <= rotated_note {
+                    mask |= 1 << previous;
+                }
+            }
+        }
+        mask
+    }
+}
+
+impl Default for ChordEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Engine for ChordEngine {
+    fn render(&mut self, p: &EngineParameters, out: &mut [f32], aux: &mut [f32]) -> bool {
+        let size = out.len();
+        self.morph_lp += (p.morph - self.morph_lp) * 0.1;
+        self.timbre_lp += (p.timbre - self.timbre_lp) * 0.1;
+        let chord = (p.harmonics.clamp(0.0, 1.0) * (CHORD_NUM_CHORDS as f32 - 1.0)).round() as usize;
+
+        let mut ratios = [1.0_f32; CHORD_NUM_VOICES];
+        let mut amplitudes = [0.0_f32; CHORD_NUM_VOICES];
+        let aux_mask = Self::compute_inversion(chord, self.timbre_lp, &mut ratios, &mut amplitudes);
+
+        out[..size].fill(0.0);
+        aux[..size].fill(0.0);
+
+        let f0 = note_to_frequency(p.note) * 0.998;
+        // morph past the midpoint sweeps saw → square
+        let waveshape = ((self.morph_lp - 0.5) * 2.0).clamp(0.0, 1.0);
+        let pw = 0.5;
+        let mut scratch = vec![0.0_f32; size];
+        for note in 0..CHORD_NUM_VOICES {
+            let amp = amplitudes[note];
+            if amp <= 0.0 {
+                continue;
+            }
+            let note_f0 = (f0 * ratios[note]).min(MAX_FREQUENCY);
+            self.voices[note].render(note_f0, pw, waveshape, &mut scratch);
+            let dest = if (1 << note) & aux_mask != 0 { &mut *aux } else { &mut *out };
+            for (d, &s) in dest.iter_mut().zip(scratch.iter()).take(size) {
+                *d += s * amp;
+            }
+        }
+        for i in 0..size {
+            out[i] += aux[i];
+            aux[i] *= 3.0;
+        }
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -872,6 +1018,39 @@ mod tests {
             energy += out.iter().map(|v| v * v).sum::<f32>();
         }
         assert!(energy > 0.0, "the noise engine sings: {energy}");
+    }
+
+    #[test]
+    fn chord_engine_makes_a_chord() {
+        let mut eng = ChordEngine::new();
+        let mut out = vec![0.0_f32; 64];
+        let mut aux = vec![0.0_f32; 64];
+        // a major chord (harmonics into the major region), root at MIDI 48
+        for harm in [0.0, 0.35, 0.6, 1.0] {
+            let p = EngineParameters {
+                note: 48.0,
+                harmonics: harm,
+                timbre: 0.3,
+                morph: 0.4,
+                ..Default::default()
+            };
+            let mut energy = 0.0;
+            for _ in 0..50 {
+                eng.render(&p, &mut out, &mut aux);
+                assert!(out.iter().chain(aux.iter()).all(|v| v.is_finite()), "chord {harm} finite");
+                energy += out.iter().map(|v| v * v).sum::<f32>();
+            }
+            assert!(energy > 0.1, "chord {harm} sounds: {energy}");
+        }
+    }
+
+    #[test]
+    fn chord_table_has_all_seventeen_types() {
+        assert_eq!(CHORDS.len(), 17);
+        // the octave chord's top note is ~12 semitones
+        assert!((CHORDS[0][3] - 12.0).abs() < 0.01);
+        // the major chord has a major third
+        assert!((CHORDS[6][1] - 4.0).abs() < 0.01);
     }
 
     #[test]
