@@ -9,5 +9,6 @@
 
 pub mod dsp;
 pub mod ui;
+pub mod vocoder;
 
 pub use ui::run;

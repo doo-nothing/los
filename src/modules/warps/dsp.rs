@@ -13,9 +13,11 @@
 //! firmware's 48-tap polyphase SRC (so aliasing matches the hardware).
 //! The hidden single-sideband frequency-shifter easter egg is ported as
 //! carrier shape "freq_shifter" (external-input path; 17-pole Hilbert
-//! all-pass quadrature pair). One documented divergence remains: the
-//! vocoder uses a simplified SVF band bank rather than the firmware's
-//! 20 tuned bands.
+//! all-pass quadrature pair). The channel vocoder is the firmware's full
+//! 20-band tuned filter bank (`vocoder.rs`), run at 96 kHz via 2×
+//! oversampling so the baked `filter_bank_table` stays in range. The port
+//! is faithful throughout; the only divergence is the internal-oscillator
+//! path of the easter egg (it needs the I/Q wavetable extraction).
 
 #![allow(clippy::excessive_precision)]
 
@@ -313,110 +315,10 @@ impl Oscillator {
 
 // ── channel vocoder ─────────────────────────────────────────────────────────
 
-const VOCODER_BANDS: usize = 16;
-
-/// A band-pass + envelope follower pair (one vocoder band).
-#[derive(Debug, Clone, Default)]
-struct VocBand {
-    // SVF state for analysis (carrier + modulator share frequency)
-    f: f32,
-    damp: f32,
-    c_lp: f32,
-    c_bp: f32,
-    m_lp: f32,
-    m_bp: f32,
-    env: f32,
-    last_carrier: f32,
-}
-
-impl VocBand {
-    fn set_frequency(&mut self, hz: f32, sr: f32) {
-        let f = (hz / sr).min(0.45);
-        self.f = 2.0 * (std::f32::consts::PI * f).sin();
-        self.damp = 0.18; // moderate resonance
-    }
-    #[inline]
-    fn bandpass(lp: &mut f32, bp: &mut f32, f: f32, damp: f32, input: f32) -> f32 {
-        let notch = input - *bp * damp;
-        *lp += f * *bp;
-        let hp = notch - *lp;
-        *bp += f * hp;
-        *bp
-    }
-}
-
-/// A simplified channel vocoder: VOCODER_BANDS log-spaced bands,
-/// modulator envelope imposed on the carrier per band. The exact band
-/// count and tuning are a documented simplification of the firmware's
-/// 20-band tuned bank.
-#[derive(Debug, Clone)]
-pub struct Vocoder {
-    bands: Vec<VocBand>,
-    release_time: f32,
-    formant_shift: f32,
-    attack: f32,
-    decay: f32,
-}
-
-impl Vocoder {
-    pub fn new(sample_rate: f32) -> Self {
-        let mut bands = vec![VocBand::default(); VOCODER_BANDS];
-        // 110 Hz .. ~7 kHz, third-octave-ish
-        for (i, b) in bands.iter_mut().enumerate() {
-            let hz = 110.0 * 1.35_f32.powi(i as i32);
-            b.set_frequency(hz, sample_rate);
-        }
-        Self {
-            bands,
-            release_time: 0.5,
-            formant_shift: 0.5,
-            attack: 0.05,
-            decay: 0.01,
-        }
-    }
-
-    pub fn set_release_time(&mut self, t: f32) {
-        self.release_time = t.clamp(0.0, 1.0);
-        // faster release for low values
-        self.decay = 0.02 * 2.0_f32.powf(-4.0 * self.release_time) + 0.0005;
-        self.attack = self.decay * 4.0;
-    }
-
-    pub fn set_formant_shift(&mut self, f: f32) {
-        self.formant_shift = f.clamp(0.0, 1.0);
-    }
-
-    pub fn process(&mut self, modulator: &[f32], carrier: &[f32], out: &mut [f32]) {
-        // formant shift maps which modulator band drives which carrier band
-        let shift = ((self.formant_shift - 0.5) * 2.0 * VOCODER_BANDS as f32 * 0.5) as i32;
-        for (n, o) in out.iter_mut().enumerate() {
-            let m = modulator[n];
-            let c = carrier[n];
-            // analyze both, track modulator envelope
-            for b in self.bands.iter_mut() {
-                let cb = VocBand::bandpass(&mut b.c_lp, &mut b.c_bp, b.f, b.damp, c);
-                let mb = VocBand::bandpass(&mut b.m_lp, &mut b.m_bp, b.f, b.damp, m);
-                let rect = mb.abs();
-                let coeff = if rect > b.env { self.attack } else { self.decay };
-                b.env += (rect - b.env) * coeff;
-                b.c_bp_store(cb);
-            }
-            let mut acc = 0.0;
-            for (i, b) in self.bands.iter().enumerate() {
-                let src = (i as i32 - shift).clamp(0, VOCODER_BANDS as i32 - 1) as usize;
-                acc += b.last_carrier * self.bands[src].env;
-            }
-            *o = soft_limit(acc * (2.5 / VOCODER_BANDS as f32).sqrt() * 4.0);
-        }
-    }
-}
-
-impl VocBand {
-    #[inline]
-    fn c_bp_store(&mut self, v: f32) {
-        self.last_carrier = v;
-    }
-}
+// The faithful 20-band channel vocoder lives in `vocoder.rs` (it runs at
+// 96 kHz via 2× oversampling so the firmware's filter-bank table stays in
+// its valid range). The Modulator drives it through the same interface.
+pub use super::vocoder::Vocoder;
 
 // ── the modulator (top-level process) ───────────────────────────────────────
 
