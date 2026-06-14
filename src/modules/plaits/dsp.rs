@@ -1310,14 +1310,77 @@ fn tame(f0: f32, harmonics: f32, order: f32) -> f32 {
     amount * amount * amount
 }
 
-/// A waveshaping + wavefolding engine: a slope oscillator through one
-/// of five waveshaper transfer curves and a wavefolder. The slope
-/// source uses the variable-shape oscillator (documented simplification
-/// of the firmware's dedicated slope oscillator); the waveshaper and
-/// folder tables are extracted byte-exact.
+/// Minimum oscillator frequency (oscillator.h kMinFrequency).
+const MIN_FREQUENCY: f32 = 0.000_001;
+
+/// oscillator.h `Oscillator::Render<OSCILLATOR_SHAPE_SLOPE>` — a band-limited
+/// asymmetric-triangle (slope) oscillator: it ramps up at `1/pw`, down at
+/// `1/(1-pw)`, with integrated polyBLEP at the pw-crossing and the wrap.
+#[derive(Debug, Clone)]
+struct SlopeOscillator {
+    phase: f32,
+    next_sample: f32,
+    frequency: f32,
+    pw: f32,
+    high: bool,
+}
+
+impl SlopeOscillator {
+    fn new() -> Self {
+        Self { phase: 0.0, next_sample: 0.0, frequency: 0.0, pw: 0.5, high: false }
+    }
+
+    fn render(&mut self, mut frequency: f32, mut pw: f32, out: &mut [f32]) {
+        let size = out.len();
+        frequency = frequency.clamp(MIN_FREQUENCY, MAX_FREQUENCY);
+        pw = pw.clamp(frequency * 2.0, 1.0 - 2.0 * frequency);
+        let mut fm = ParamInterp::new(self.frequency, frequency, size);
+        let mut pwm = ParamInterp::new(self.pw, pw, size);
+
+        let mut next_sample = self.next_sample;
+        let mut phase = self.phase;
+        let mut high = self.high;
+        for o in out.iter_mut() {
+            let mut this_sample = next_sample;
+            next_sample = 0.0;
+            let frequency = fm.next();
+            let pw = pwm.next();
+            phase += frequency;
+
+            let slope_up = 1.0 / pw;
+            let slope_down = 1.0 / (1.0 - pw);
+            if high ^ (phase < pw) {
+                let t = (phase - pw) / frequency;
+                let discontinuity = (slope_up + slope_down) * frequency;
+                this_sample -= pb_this_int(t) * discontinuity;
+                next_sample -= pb_next_int(t) * discontinuity;
+                high = phase < pw;
+            }
+            if phase >= 1.0 {
+                phase -= 1.0;
+                let t = phase / frequency;
+                let discontinuity = (slope_up + slope_down) * frequency;
+                this_sample += pb_this_int(t) * discontinuity;
+                next_sample += pb_next_int(t) * discontinuity;
+                high = true;
+            }
+            next_sample += if high { phase * slope_up } else { 1.0 - (phase - pw) * slope_down };
+            *o = 2.0 * this_sample - 1.0;
+        }
+        self.next_sample = next_sample;
+        self.phase = phase;
+        self.high = high;
+        self.frequency = frequency;
+        self.pw = pw;
+    }
+}
+
+/// A waveshaping + wavefolding engine faithful to waveshaping_engine.cc: a
+/// dedicated slope oscillator through one of five waveshaper transfer
+/// curves and a wavefolder, with a triangle reference for the aux sine.
 pub struct WaveshapingEngine {
-    slope: VariableShapeOscillator,
-    triangle: VariableShapeOscillator,
+    slope: SlopeOscillator,
+    triangle: SlopeOscillator,
     prev_shape: f32,
     prev_wf_gain: f32,
     prev_overtone: f32,
@@ -1327,8 +1390,8 @@ pub struct WaveshapingEngine {
 impl WaveshapingEngine {
     pub fn new() -> Self {
         Self {
-            slope: VariableShapeOscillator::new(),
-            triangle: VariableShapeOscillator::new(),
+            slope: SlopeOscillator::new(),
+            triangle: SlopeOscillator::new(),
             prev_shape: 0.0,
             prev_wf_gain: 0.0,
             prev_overtone: 0.0,
@@ -1352,9 +1415,9 @@ impl Engine for WaveshapingEngine {
         }
         let f0 = note_to_frequency(p.note);
         let pw = p.morph * 0.45 + 0.5;
-        // slope source (variable-shape saw) and a triangle reference
-        self.slope.render(f0, pw, 0.0, &mut self.temp[..size]);
-        self.triangle.render(f0, 0.5, 0.5, aux);
+        // band-limited slope signal + a triangle reference (pw = 0.5)
+        self.slope.render(f0, pw, &mut self.temp[..size]);
+        self.triangle.render(f0, 0.5, aux);
 
         let slope = 3.0 + (p.morph - 0.5).abs() * 5.0;
         let shape_amount = (p.harmonics - 0.5).abs() * 2.0;
