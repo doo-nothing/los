@@ -332,56 +332,252 @@ enum ProcessMode {
 
 const DIRECTION_LAST: usize = 7; // up,down,updown,alt,random,random-no-rep,addressable
 
-/// Simplified tides RampExtractor: period-averaged tap tempo with
-/// the divider-ratio lock. (The upstream pulse-train predictor is a
-/// few hundred lines; period averaging covers the musical contract —
-/// documented divergence.)
+const RAMP_HISTORY_SIZE: usize = 16;
+const RAMP_MAX_PATTERN_PERIOD: usize = 8;
+const RAMP_PULSE_WIDTH_TOLERANCE: f32 = 0.05;
+
+#[derive(Debug, Clone, Copy)]
+struct Pulse {
+    on_duration: u32,
+    total_duration: u32,
+    pulse_width: f32,
+}
+
+/// The tides `RampExtractor` (tides2/ramp/ramp_extractor.cc) — turns an
+/// external clock/gate train into a smooth predicted ramp. Two modes:
+/// a phase-locked-loop for audio-rate tracking, and a pattern-predicting
+/// clocked mode (detects repeating clock patterns up to length 8 and the
+/// average pulse width, so the ramp anticipates the next pulse rather than
+/// chasing it). `ratio` = (multiplier, divider q).
 #[derive(Debug, Clone)]
 struct RampExtractor {
-    period: f32,
-    samples_since_edge: f32,
-    edge_count: u32,
-    phase: f32,
+    current_pulse: usize,
+    history: [Pulse; RAMP_HISTORY_SIZE],
+    prediction_error: [f32; RAMP_MAX_PATTERN_PERIOD + 1],
+    predicted_period: [f32; RAMP_MAX_PATTERN_PERIOD + 1],
+    average_pulse_width: f32,
+    train_phase: f32,
+    frequency_lp: f32,
+    frequency: f32,
+    target_frequency: f32,
+    lp_coefficient: f32,
+    period: i32,
+    reset_counter: i32,
+    f_ratio: f32,
+    max_train_phase: f32,
+    reset_interval: u32,
+    min_period: f32,
+    sample_rate: f32,
 }
 
 impl RampExtractor {
     fn new() -> Self {
+        let sample_rate = NATIVE_SR as f32;
+        let max_frequency = 40.0 / sample_rate;
+        let frequency = 0.1 / sample_rate;
+        let p = Pulse {
+            on_duration: (sample_rate * 0.25) as u32,
+            total_duration: (sample_rate * 0.5) as u32,
+            pulse_width: 0.5,
+        };
+        let mut history = [p; RAMP_HISTORY_SIZE];
+        history[0].on_duration = 0;
+        history[0].total_duration = 0;
+        let mut prediction_error = [50.0_f32; RAMP_MAX_PATTERN_PERIOD + 1];
+        prediction_error[0] = 0.0;
         Self {
-            period: NATIVE_SR as f32, // 1 Hz until taught
-            samples_since_edge: 0.0,
-            edge_count: 0,
-            phase: 0.0,
+            current_pulse: 0,
+            history,
+            prediction_error,
+            predicted_period: [sample_rate * 0.5; RAMP_MAX_PATTERN_PERIOD + 1],
+            average_pulse_width: 0.0,
+            train_phase: 0.0,
+            frequency_lp: frequency,
+            frequency,
+            target_frequency: frequency,
+            lp_coefficient: 0.1,
+            period: (1.0 / frequency) as i32,
+            reset_counter: 1,
+            f_ratio: 1.0,
+            max_train_phase: 0.0,
+            reset_interval: (sample_rate * 3.0) as u32,
+            min_period: 1.0 / max_frequency,
+            sample_rate,
         }
     }
 
-    /// ratio: (multiplier, divider q). Returns frequency; fills ramp.
-    fn process(&mut self, ratio: (f32, u32), gate_flags: &[u8], ramp: &mut [f32]) -> f32 {
-        let q = ratio.1.max(1);
-        let mut frequency = ratio.0 / self.period.max(1.0);
-        for (i, &g) in gate_flags.iter().enumerate() {
-            self.samples_since_edge += 1.0;
-            if g & GATE_RISING != 0 && self.samples_since_edge > 2.0 {
-                // one-pole the period so jitter doesn't snap the LFO
-                let measured = self.samples_since_edge;
-                if self.edge_count == 0 {
-                    self.period = measured;
-                } else {
-                    self.period += 0.5 * (measured - self.period);
-                }
-                self.samples_since_edge = 0.0;
-                self.edge_count += 1;
-                if self.edge_count.is_multiple_of(q) {
-                    self.phase = 0.0; // hard lock every q-th edge
-                }
-                frequency = ratio.0 / self.period.max(1.0);
+    #[inline]
+    fn is_within_tolerance(x: f32, y: f32, error: f32) -> bool {
+        x >= y * (1.0 - error) && x <= y * (1.0 + error)
+    }
+
+    fn compute_average_pulse_width(&self, tolerance: f32) -> f32 {
+        let current_pw = self.history[self.current_pulse].pulse_width;
+        let mut sum = 0.0;
+        for p in &self.history {
+            if !Self::is_within_tolerance(p.pulse_width, current_pw, tolerance) {
+                return 0.0;
             }
-            self.phase += frequency;
-            if self.phase >= 1.0 {
-                self.phase -= 1.0;
-            }
-            ramp[i] = self.phase;
+            sum += p.pulse_width;
         }
-        frequency
+        sum / RAMP_HISTORY_SIZE as f32
+    }
+
+    fn predict_next_period(&mut self) -> f32 {
+        let last_period = self.history[self.current_pulse].total_duration as f32;
+        let mut best = 0usize;
+        for i in 0..=RAMP_MAX_PATTERN_PERIOD {
+            let error = self.predicted_period[i] - last_period;
+            let error_sq = error * error;
+            // SLOPE: rise fast (0.7), fall slow (0.2)
+            let e = error_sq - self.prediction_error[i];
+            self.prediction_error[i] += (if e > 0.0 { 0.7 } else { 0.2 }) * e;
+            if i == 0 {
+                self.predicted_period[0] += (last_period - self.predicted_period[0]) * 0.5;
+            } else {
+                let t = self.current_pulse + 1 + RAMP_HISTORY_SIZE - i;
+                self.predicted_period[i] = self.history[t % RAMP_HISTORY_SIZE].total_duration as f32;
+            }
+            if self.prediction_error[i] < self.prediction_error[best] {
+                best = i;
+            }
+        }
+        self.predicted_period[best]
+    }
+
+    /// ratio: (multiplier, divider q). Returns frequency; fills ramp.
+    fn process(
+        &mut self,
+        smooth_audio_rate_tracking: bool,
+        force_integer_period: bool,
+        ratio: (f32, u32),
+        gate_flags: &[u8],
+        ramp: &mut [f32],
+    ) -> f32 {
+        let block_size = gate_flags.len() as f32;
+        let r_ratio = ratio.0;
+        let r_q = ratio.1.max(1) as i32;
+        for (idx, &flags) in gate_flags.iter().enumerate() {
+            if flags & GATE_RISING != 0 {
+                let p_total = self.history[self.current_pulse].total_duration;
+                let record_pulse = p_total < self.reset_interval;
+                if !record_pulse {
+                    self.reset_counter = r_q;
+                    self.train_phase = 0.0;
+                    self.f_ratio = r_ratio;
+                    self.max_train_phase = r_q as f32;
+                    self.reset_interval = 4 * p_total;
+                } else {
+                    // guard the pathological first-sample rising (p_total == 0)
+                    let period = (p_total as f32).max(1.0);
+                    if smooth_audio_rate_tracking {
+                        let mut no_glide = self.f_ratio != r_ratio;
+                        self.f_ratio = r_ratio;
+                        self.reset_counter -= 1;
+                        let mut phase_error = 0.0;
+                        if self.reset_counter == 0 {
+                            self.reset_counter = r_q;
+                            // compensate for acquisition latency
+                            let mut expected_phase = 2.0 * block_size / period * self.f_ratio;
+                            while expected_phase >= 1.0 {
+                                expected_phase -= 1.0;
+                            }
+                            phase_error = self.train_phase - expected_phase;
+                            if phase_error > 0.5 {
+                                phase_error -= 1.0;
+                            }
+                            if phase_error < -0.5 {
+                                phase_error += 1.0;
+                            }
+                        }
+                        let frequency = 1.0 / period;
+                        let pll_adjustment =
+                            (1.0 - self.lp_coefficient * phase_error / self.f_ratio).clamp(0.99, 1.01);
+                        self.target_frequency = (self.f_ratio * frequency * pll_adjustment).min(0.125);
+                        let up_tolerance = (1.02 + 2.0 * frequency) * self.frequency_lp;
+                        let down_tolerance = (0.98 - 2.0 * frequency) * self.frequency_lp;
+                        no_glide |= self.target_frequency > up_tolerance
+                            || self.target_frequency < down_tolerance;
+                        self.lp_coefficient =
+                            if no_glide { 1.0 } else { (period * 0.00001).min(0.1) };
+                    } else {
+                        if period < self.min_period {
+                            self.frequency = 1.0 / period;
+                            self.target_frequency = self.frequency;
+                        } else {
+                            let on = self.history[self.current_pulse].on_duration;
+                            self.history[self.current_pulse].pulse_width = on as f32 / period;
+                            self.average_pulse_width =
+                                self.compute_average_pulse_width(RAMP_PULSE_WIDTH_TOLERANCE);
+                            if on < 32 {
+                                self.average_pulse_width = 0.0;
+                            }
+                            self.frequency = 1.0 / self.predict_next_period();
+                            self.target_frequency = self.frequency;
+                        }
+                        self.reset_counter -= 1;
+                        if self.reset_counter == 0 {
+                            self.train_phase = 0.0;
+                            self.reset_counter = r_q;
+                            self.f_ratio = r_ratio;
+                            self.max_train_phase = r_q as f32;
+                        } else {
+                            let expected = self.max_train_phase - self.reset_counter as f32;
+                            let warp = expected - self.train_phase + 1.0;
+                            self.frequency *= warp.max(0.01);
+                        }
+                    }
+                    self.reset_interval =
+                        (4.0 / self.target_frequency).max(self.sample_rate * 3.0) as u32;
+                    self.current_pulse = (self.current_pulse + 1) % RAMP_HISTORY_SIZE;
+                }
+                self.history[self.current_pulse].on_duration = 0;
+                self.history[self.current_pulse].total_duration = 0;
+            }
+
+            self.history[self.current_pulse].total_duration += 1;
+            if flags & GATE_HIGH != 0 {
+                self.history[self.current_pulse].on_duration += 1;
+            }
+
+            if smooth_audio_rate_tracking {
+                self.frequency_lp += (self.target_frequency - self.frequency_lp) * self.lp_coefficient;
+                if force_integer_period {
+                    let new_period = (1.0 / self.frequency_lp) as i32;
+                    if (new_period - self.period).abs() > 1 {
+                        self.period = new_period;
+                        self.frequency = 1.0 / new_period as f32;
+                    }
+                } else {
+                    self.frequency = self.frequency_lp;
+                }
+                self.train_phase += self.frequency;
+                if self.train_phase >= 1.0 {
+                    self.train_phase -= 1.0;
+                }
+                ramp[idx] = self.train_phase;
+            } else {
+                if flags & GATE_FALLING != 0 && self.average_pulse_width > 0.0 {
+                    let t_on = (self.history[self.current_pulse].on_duration as f32).max(1.0);
+                    let next = self.max_train_phase - self.reset_counter as f32 + 1.0;
+                    let pw = self.average_pulse_width;
+                    self.frequency =
+                        (next - self.train_phase).max(0.0) * pw / ((1.0 - pw) * t_on);
+                }
+                self.train_phase += self.frequency;
+                if self.train_phase >= self.max_train_phase {
+                    self.train_phase = self.max_train_phase;
+                }
+                let mut phase = self.train_phase * self.f_ratio;
+                phase -= (phase as i32) as f32;
+                ramp[idx] = phase;
+            }
+        }
+        if smooth_audio_rate_tracking {
+            self.frequency
+        } else {
+            self.frequency * self.f_ratio
+        }
     }
 }
 
@@ -923,7 +1119,8 @@ impl SegmentGenerator {
                     .function_quantizer
                     .process((self.parameters[0].primary * 1.03).clamp(0.0, 1.0));
                 let r = DIVIDER_RATIOS[idx.min(6)];
-                frequency = self.ramp_extractor.process(r, g, &mut ramp);
+                // audio_rate -> PLL tracking; clocked LFO -> pattern prediction
+                frequency = self.ramp_extractor.process(audio_rate, false, r, g, &mut ramp);
             }
             None => {
                 let f = (96.0 * (self.parameters[0].primary - 0.5)).clamp(-128.0, 127.0);
@@ -1454,5 +1651,72 @@ mod tests {
         let on = out.iter().filter(|o| o.value > 0.5).count();
         assert!(on > 100, "the pulse outlives the trigger: {on}");
         assert!(out[31_249].value < 0.01, "and ends");
+    }
+
+    #[test]
+    fn ramp_extractor_locks_to_a_steady_clock() {
+        // a steady clock (period 1000, 50% duty) into the clocked LFO mode.
+        // The predicted period must converge and the ramp must reset cleanly
+        // near each rising edge once locked.
+        let mut re = RampExtractor::new();
+        let period = 1000usize;
+        let n = 40 * period;
+        let mut bools = vec![false; n];
+        for k in 0..40 {
+            for b in bools.iter_mut().skip(k * period).take(period / 2) {
+                *b = true;
+            }
+        }
+        let mut prev = GATE_LOW;
+        let flags: Vec<u8> = bools
+            .iter()
+            .map(|&b| {
+                prev = extract_gate_flags(prev, b);
+                prev
+            })
+            .collect();
+        let mut ramp = vec![0.0_f32; n];
+        // ratio 1:1 (q = 1)
+        re.process(false, false, (0.999999, 1), &flags, &mut ramp);
+        assert!(ramp.iter().all(|v| v.is_finite() && (0.0..=1.0001).contains(v)), "ramp bounded 0..1");
+        // after lock, the predicted period should match the clock period
+        let predicted = 1.0 / re.frequency / 1.0;
+        assert!(
+            (predicted - period as f32).abs() < period as f32 * 0.2,
+            "predicted period ~ clock period: {predicted} vs {period}"
+        );
+        // the ramp should sweep a meaningful range over the last cycle
+        let last = &ramp[n - period..];
+        let (mn, mx) = last.iter().fold((1.0_f32, 0.0_f32), |(a, b), &v| (a.min(v), b.max(v)));
+        assert!(mx - mn > 0.5, "ramp sweeps over a cycle: {mn}..{mx}");
+    }
+
+    #[test]
+    fn ramp_extractor_pll_tracks_audio_rate() {
+        // a fast clock into the PLL (audio-rate) mode produces a bounded,
+        // non-degenerate ramp that advances.
+        let mut re = RampExtractor::new();
+        let period = 120usize;
+        let n = 200 * period;
+        let mut bools = vec![false; n];
+        for k in 0..200 {
+            for b in bools.iter_mut().skip(k * period).take(period / 2) {
+                *b = true;
+            }
+        }
+        let mut prev = GATE_LOW;
+        let flags: Vec<u8> = bools
+            .iter()
+            .map(|&b| {
+                prev = extract_gate_flags(prev, b);
+                prev
+            })
+            .collect();
+        let mut ramp = vec![0.0_f32; n];
+        re.process(true, false, (0.999999, 1), &flags, &mut ramp);
+        assert!(ramp.iter().all(|v| v.is_finite() && (0.0..=1.0001).contains(v)), "pll ramp bounded");
+        let last = &ramp[n - 4 * period..];
+        let (mn, mx) = last.iter().fold((1.0_f32, 0.0_f32), |(a, b), &v| (a.min(v), b.max(v)));
+        assert!(mx - mn > 0.5, "pll ramp sweeps: {mn}..{mx}");
     }
 }
