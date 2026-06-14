@@ -5,8 +5,8 @@
 //! firmware's panel — position, size, pitch, density, texture,
 //! dry/wet, stereo spread, feedback, reverb — plus a freeze toggle
 //! that holds the recording buffer. Publishes clouds/N/level (an
-//! output follower) on the bus. The `mode` row selects granular or
-//! looping/delay playback (stretch/spectral are follow-ups).
+//! output follower) on the bus. The `mode` row selects one of four
+//! playback modes: granular, stretch, looping/delay, spectral.
 
 // max/min, not clamp, where modbus values land: clamp(NaN) is NaN and
 // a stale channel must die at the boundary.
@@ -379,6 +379,7 @@ fn audio_thread(shared: Arc<Mutex<CloudsState>>, instance: usize) -> Result<()> 
                     mode: match s.mode {
                         1 => super::dsp::PlaybackMode::Stretch,
                         2 => super::dsp::PlaybackMode::LoopingDelay,
+                        3 => super::dsp::PlaybackMode::Spectral,
                         _ => super::dsp::PlaybackMode::Granular,
                     },
                 },

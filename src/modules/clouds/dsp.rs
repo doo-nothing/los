@@ -9,9 +9,10 @@
 //! firmware's 16-bit store (los has the RAM); linear interpolation is
 //! used for grain playback (the medium-quality path).
 //!
-//! Two playback modes share this core: GRANULAR (the cloud) and
-//! LOOPING_DELAY (a smoothed delay line / crossfaded freeze loop). The
-//! STRETCH (wsola) and SPECTRAL (phase-vocoder) modes are follow-ups.
+//! Four playback modes: GRANULAR (the cloud), STRETCH (WSOLA time-
+//! stretch), LOOPING_DELAY (delay / freeze loop), and SPECTRAL (a phase
+//! vocoder with a self-contained radix-2 FFT — spectral freeze, scrub and
+//! pitch shift).
 
 #![allow(clippy::excessive_precision)]
 
@@ -92,11 +93,25 @@ impl Rng {
         }
     }
     #[inline]
-    pub fn next_float(&mut self) -> f32 {
+    fn next_word(&mut self) -> u32 {
         self.state ^= self.state << 13;
         self.state ^= self.state >> 17;
         self.state ^= self.state << 5;
-        (self.state >> 8) as f32 / 16_777_216.0
+        self.state
+    }
+    #[inline]
+    pub fn next_float(&mut self) -> f32 {
+        (self.next_word() >> 8) as f32 / 16_777_216.0
+    }
+    /// stmlib `Random::GetSample` as u16 (top 16 bits).
+    #[inline]
+    pub fn next_u16(&mut self) -> u16 {
+        (self.next_word() >> 16) as u16
+    }
+    /// stmlib `Random::GetSample` as a signed sample.
+    #[inline]
+    pub fn next_i16(&mut self) -> i16 {
+        (self.next_word() >> 16) as i16
     }
 }
 
@@ -719,9 +734,420 @@ pub enum PlaybackMode {
     Granular,
     Stretch,
     LoopingDelay,
+    Spectral,
 }
 
-pub const MODE_NAMES: [&str; 3] = ["granular", "stretch", "looping_delay"];
+pub const MODE_NAMES: [&str; 4] = ["granular", "stretch", "looping_delay", "spectral"];
+
+// ── spectral (phase-vocoder) mode ────────────────────────────────────────────
+
+const PVOC_FFT_SIZE: usize = 4096;
+const PVOC_HOP: usize = 1024;
+const PVOC_BUFFER: usize = PVOC_FFT_SIZE + PVOC_HOP; // 5120
+const PVOC_SIZE: usize = (PVOC_FFT_SIZE / 2) - 16; // 2032 processed bins
+const PVOC_NUM_TEXTURES: usize = 4;
+/// ShyFFT-normalization makeup: 1 / (fft² / hop / 2) — the FFT round-trip is
+/// N, the window²-COLA sum is ~2 at overlap 4.
+const PVOC_INV_WINDOW: f32 =
+    1.0 / ((PVOC_FFT_SIZE * PVOC_FFT_SIZE / PVOC_HOP / 2) as f32);
+
+/// In-place iterative radix-2 complex FFT (Cooley-Tukey). Forward and
+/// inverse are both unnormalized (round-trip = N), matching the firmware's
+/// ShyFFT so its `inverse_window_size` makeup carries over unchanged.
+fn fft(re: &mut [f32], im: &mut [f32], inverse: bool) {
+    let n = re.len();
+    // bit-reversal permutation
+    let mut j = 0usize;
+    for i in 1..n {
+        let mut bit = n >> 1;
+        while j & bit != 0 {
+            j ^= bit;
+            bit >>= 1;
+        }
+        j ^= bit;
+        if i < j {
+            re.swap(i, j);
+            im.swap(i, j);
+        }
+    }
+    let mut len = 2usize;
+    while len <= n {
+        let ang = if inverse {
+            std::f32::consts::TAU / len as f32
+        } else {
+            -std::f32::consts::TAU / len as f32
+        };
+        let (wr, wi) = (ang.cos(), ang.sin());
+        let half = len / 2;
+        let mut i = 0;
+        while i < n {
+            let (mut cr, mut ci) = (1.0f32, 0.0f32);
+            for k in 0..half {
+                let a = i + k;
+                let b = i + k + half;
+                let tr = re[b] * cr - im[b] * ci;
+                let ti = re[b] * ci + im[b] * cr;
+                re[b] = re[a] - tr;
+                im[b] = im[a] - ti;
+                re[a] += tr;
+                im[a] += ti;
+                let ncr = cr * wr - ci * wi;
+                ci = cr * wi + ci * wr;
+                cr = ncr;
+            }
+            i += len;
+        }
+        len <<= 1;
+    }
+}
+
+/// 16-bit angle (65536 = 2π) from a rectangular sample, plus its magnitude.
+#[inline]
+fn rect_to_polar_bin(re: f32, im: f32) -> (u16, f32) {
+    let mag = (re * re + im * im).sqrt();
+    let angle = (im.atan2(re) * (65536.0 / std::f32::consts::TAU)) as i32 as u16;
+    (angle, mag)
+}
+
+#[inline]
+fn polar_to_rect_bin(mag: f32, angle: u16) -> (f32, f32) {
+    let theta = angle as f32 / 65536.0 * std::f32::consts::TAU;
+    (mag * theta.cos(), mag * theta.sin())
+}
+
+fn pvoc_window() -> &'static Vec<f32> {
+    static W: OnceLock<Vec<f32>> = OnceLock::new();
+    W.get_or_init(|| {
+        // lut_sine_window_4096: power = (1-(2t-1)²)^1.25, normalized for COLA
+        let n = PVOC_FFT_SIZE;
+        let power: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f32 / n as f32;
+                let u = 2.0 * t - 1.0;
+                (1.0 - u * u).max(0.0).powf(1.25)
+            })
+            .collect();
+        (0..n)
+            .map(|i| {
+                let a = power[i % (n / 2)];
+                let b = power[(n / 2) + (i % (n / 2))];
+                let comp = (a * a + b * b).sqrt().max(1e-9);
+                power[i] / comp
+            })
+            .collect()
+    })
+}
+
+/// One channel's STFT + frame transformation (the firmware's STFT +
+/// FrameTransformation, per channel). Implements freeze/position spectral
+/// capture and phase-vocoder pitch shifting.
+struct SpectralChannel {
+    analysis: Vec<i16>,
+    synthesis: Vec<i16>,
+    buffer_ptr: usize,
+    process_ptr: usize,
+    block_size: usize,
+    ready: u32,
+    done: u32,
+    // frame transform state
+    textures: Vec<Vec<f32>>, // [NUM_TEXTURES][SIZE]
+    phases: Vec<u16>,        // accumulated synthesis phase
+    phases_delta: Vec<u16>,  // analysis phase increment
+}
+
+impl SpectralChannel {
+    fn new() -> Self {
+        Self {
+            analysis: vec![0; PVOC_BUFFER],
+            synthesis: vec![0; PVOC_BUFFER],
+            buffer_ptr: 0,
+            process_ptr: (2 * PVOC_HOP) % PVOC_BUFFER,
+            block_size: 0,
+            ready: 0,
+            done: 0,
+            textures: vec![vec![0.0; PVOC_SIZE]; PVOC_NUM_TEXTURES],
+            phases: vec![0; PVOC_SIZE],
+            phases_delta: vec![0; PVOC_SIZE],
+        }
+    }
+
+    /// Run one analysis/synthesis frame when a hop's worth of input is ready.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::needless_range_loop)] // parallel spectral arrays
+    fn buffer(&mut self, params: &CloudsParams, rng: &mut Rng) {
+        if self.ready == self.done {
+            return;
+        }
+        let win = pvoc_window();
+        let mut re = vec![0.0f32; PVOC_FFT_SIZE];
+        let mut im = vec![0.0f32; PVOC_FFT_SIZE];
+        let mut sp = self.process_ptr;
+        for (i, r) in re.iter_mut().enumerate() {
+            *r = win[i] * self.analysis[sp] as f32;
+            sp += 1;
+            if sp >= PVOC_BUFFER {
+                sp -= PVOC_BUFFER;
+            }
+        }
+        fft(&mut re, &mut im, false);
+
+        // ── frame transformation ──
+        let pitch_ratio = semitones_to_ratio(params.pitch);
+        let refresh_rate = 0.01 + 0.99 * params.density;
+        let mut phase_rand = params.density - 0.5;
+        phase_rand = phase_rand * phase_rand * 4.2 - 0.05;
+        phase_rand = phase_rand.clamp(0.0, 1.0);
+        let position = params.position;
+
+        re[0] = 0.0;
+        im[0] = 0.0;
+        let mut polar = vec![0.0f32; PVOC_SIZE + 2];
+        if !params.freeze {
+            for i in 1..PVOC_SIZE {
+                let (angle, mag) = rect_to_polar_bin(re[i], im[i]);
+                self.phases_delta[i] = angle.wrapping_sub(self.phases[i]);
+                self.phases[i] = angle;
+                polar[i] = mag;
+            }
+            self.store_magnitudes(&polar, position, refresh_rate, rng);
+        }
+        let mut replayed = vec![0.0f32; PVOC_SIZE + 2];
+        self.replay_magnitudes(&mut replayed, position);
+        let mut shifted = vec![0.0f32; PVOC_SIZE + 2];
+        Self::shift_magnitudes(&replayed, &mut shifted, pitch_ratio);
+        let synth_phase = self.set_phases(pitch_ratio, phase_rand, rng);
+
+        // polar → rectangular, with conjugate symmetry for the inverse FFT
+        re.iter_mut().for_each(|x| *x = 0.0);
+        im.iter_mut().for_each(|x| *x = 0.0);
+        for i in 1..PVOC_SIZE {
+            let (r, ii) = polar_to_rect_bin(shifted[i], synth_phase[i]);
+            re[i] = r;
+            im[i] = ii;
+            re[PVOC_FFT_SIZE - i] = r;
+            im[PVOC_FFT_SIZE - i] = -ii;
+        }
+        fft(&mut re, &mut im, true);
+
+        // window + overlap-add into the synthesis ring
+        let mut dp = self.process_ptr;
+        for (i, w) in win.iter().enumerate() {
+            let s = re[i] * w * PVOC_INV_WINDOW;
+            let mut x = s as i32;
+            if i < PVOC_FFT_SIZE - PVOC_HOP {
+                x += self.synthesis[dp] as i32;
+            }
+            self.synthesis[dp] = x.clamp(-32768, 32767) as i16;
+            dp += 1;
+            if dp >= PVOC_BUFFER {
+                dp -= PVOC_BUFFER;
+            }
+        }
+        self.done += 1;
+        self.process_ptr += PVOC_HOP;
+        if self.process_ptr >= PVOC_BUFFER {
+            self.process_ptr -= PVOC_BUFFER;
+        }
+    }
+
+    #[allow(clippy::needless_range_loop)] // parallel spectral arrays
+    fn store_magnitudes(&mut self, polar: &[f32], position: f32, feedback: f32, rng: &mut Rng) {
+        let index_float = position * (PVOC_NUM_TEXTURES - 1) as f32;
+        let index_int = index_float as usize;
+        let index_frac = index_float - index_int as f32;
+        let mut gain_a = 1.0 - index_frac;
+        let mut gain_b = index_frac;
+        let bi = if position == 1.0 { index_int } else { index_int + 1 }.min(PVOC_NUM_TEXTURES - 1);
+        let ai = index_int.min(PVOC_NUM_TEXTURES - 1);
+        // borrow the two textures distinctly
+        if feedback >= 0.5 {
+            let mut fb = 2.0 * (feedback - 0.5);
+            if fb < 0.5 {
+                gain_a *= 1.0 - fb;
+                gain_b *= 1.0 - fb;
+                for i in 0..PVOC_SIZE {
+                    let x = polar[i];
+                    self.textures[ai][i] = crossfade(self.textures[ai][i], x, gain_a);
+                    self.textures[bi][i] = crossfade(self.textures[bi][i], x, gain_b);
+                }
+            } else {
+                let t = (fb - 0.5) * 0.7 + 0.5;
+                let mut gain_new = t - 0.5;
+                gain_new = gain_new * gain_new * 2.0 + 0.5;
+                let gna = gain_a * gain_new;
+                let gnb = gain_b * gain_new;
+                let goa = 1.0 - gain_a * (1.0 - t);
+                let gob = 1.0 - gain_b * (1.0 - t);
+                for i in 0..PVOC_SIZE {
+                    let x = polar[i];
+                    self.textures[ai][i] = self.textures[ai][i] * goa + x * gna;
+                    self.textures[bi][i] = self.textures[bi][i] * gob + x * gnb;
+                }
+                fb = 0.0;
+                let _ = fb;
+            }
+        } else {
+            let mut fb = feedback * 2.0;
+            fb *= fb;
+            let threshold = (fb * 65535.0) as u16;
+            for i in 0..PVOC_SIZE {
+                let x = polar[i];
+                let gain = if (rng.next_u16()) <= threshold { 1.0 } else { 0.0 };
+                self.textures[ai][i] = crossfade(self.textures[ai][i], x, gain_a * gain);
+                self.textures[bi][i] = crossfade(self.textures[bi][i], x, gain_b * gain);
+            }
+        }
+    }
+
+    #[allow(clippy::needless_range_loop)] // parallel spectral arrays
+    fn replay_magnitudes(&self, out: &mut [f32], position: f32) {
+        let index_float = position * (PVOC_NUM_TEXTURES - 1) as f32;
+        let index_int = index_float as usize;
+        let index_frac = index_float - index_int as f32;
+        let ai = index_int.min(PVOC_NUM_TEXTURES - 1);
+        let bi = if position == 1.0 { index_int } else { index_int + 1 }.min(PVOC_NUM_TEXTURES - 1);
+        for i in 0..PVOC_SIZE {
+            out[i] = crossfade(self.textures[ai][i], self.textures[bi][i], index_frac);
+        }
+    }
+
+    #[allow(clippy::needless_range_loop)] // parallel spectral arrays
+    fn shift_magnitudes(source: &[f32], out: &mut [f32], pitch_ratio: f32) {
+        if pitch_ratio == 1.0 {
+            out[..PVOC_SIZE].copy_from_slice(&source[..PVOC_SIZE]);
+        } else if pitch_ratio > 1.0 {
+            let mut index = 1.0f32;
+            let increment = 1.0 / pitch_ratio;
+            for o in out.iter_mut().take(PVOC_SIZE).skip(1) {
+                *o = interpolate_mag(source, index);
+                index += increment;
+            }
+        } else {
+            out.iter_mut().take(PVOC_SIZE).for_each(|o| *o = 0.0);
+            let mut index = 1.0f32;
+            let increment = pitch_ratio;
+            for i in 1..PVOC_SIZE {
+                let ii = index as usize;
+                let frac = index - ii as f32;
+                if ii + 1 < PVOC_SIZE {
+                    out[ii] += (1.0 - frac) * source[i];
+                    out[ii + 1] += frac * source[i];
+                }
+                index += increment;
+            }
+        }
+    }
+
+    #[allow(clippy::needless_range_loop)] // parallel spectral arrays
+    fn set_phases(&mut self, pitch_ratio: f32, phase_rand: f32, rng: &mut Rng) -> Vec<u16> {
+        let mut synth = vec![0u16; PVOC_SIZE];
+        let mut r = (phase_rand - 0.05) * 1.06;
+        r = r.clamp(0.0, 1.0);
+        r *= r;
+        let amount = (r * 32768.0) as i32;
+        for i in 0..PVOC_SIZE {
+            let mut p = self.phases[i];
+            self.phases[i] = self.phases[i]
+                .wrapping_add((self.phases_delta[i] as f32 * pitch_ratio) as i32 as u16);
+            if amount != 0 {
+                let noise = (rng.next_i16() as i32 * amount) >> 14;
+                p = p.wrapping_add(noise as u16);
+            }
+            synth[i] = p;
+        }
+        synth
+    }
+
+    /// Stream `size` samples through the channel (firmware STFT::Process).
+    fn process(&mut self, input: &[f32], output: &mut [f32], stride: usize, n: usize) {
+        let mut size = n;
+        let mut in_ptr = 0;
+        let mut out_ptr = 0;
+        while size > 0 {
+            let processed = size.min(PVOC_HOP - self.block_size);
+            for _ in 0..processed {
+                let sample = (input[in_ptr] * 32768.0) as i32;
+                self.analysis[self.buffer_ptr] = sample.clamp(-32768, 32767) as i16;
+                output[out_ptr] = self.synthesis[self.buffer_ptr] as f32 / 16384.0;
+                in_ptr += stride;
+                out_ptr += stride;
+                self.buffer_ptr += 1;
+                if self.buffer_ptr >= PVOC_BUFFER {
+                    self.buffer_ptr -= PVOC_BUFFER;
+                }
+            }
+            self.block_size += processed;
+            size -= processed;
+            if self.block_size >= PVOC_HOP {
+                self.block_size -= PVOC_HOP;
+                self.ready += 1;
+            }
+        }
+    }
+}
+
+#[inline]
+fn interpolate_mag(table: &[f32], index: f32) -> f32 {
+    let i = index as usize;
+    let frac = index - i as f32;
+    let a = table[i.min(table.len() - 1)];
+    let b = table[(i + 1).min(table.len() - 1)];
+    a + (b - a) * frac
+}
+
+/// The two-channel phase vocoder (clouds `PhaseVocoder`).
+pub struct PhaseVocoder {
+    channels: [SpectralChannel; 2],
+    rng: Rng,
+    in_l: Vec<f32>,
+    in_r: Vec<f32>,
+    out_l: Vec<f32>,
+    out_r: Vec<f32>,
+}
+
+impl Default for PhaseVocoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PhaseVocoder {
+    pub fn new() -> Self {
+        Self {
+            channels: [SpectralChannel::new(), SpectralChannel::new()],
+            rng: Rng::new(0x5eed_face),
+            in_l: Vec::new(),
+            in_r: Vec::new(),
+            out_l: Vec::new(),
+            out_r: Vec::new(),
+        }
+    }
+
+    /// Process `size` interleaved stereo frames in place (io = [L,R,...]).
+    pub fn process(&mut self, io: &mut [f32], params: &CloudsParams, size: usize) {
+        self.in_l.resize(size, 0.0);
+        self.in_r.resize(size, 0.0);
+        self.out_l.resize(size, 0.0);
+        self.out_r.resize(size, 0.0);
+        for i in 0..size {
+            self.in_l[i] = io[i * 2];
+            self.in_r[i] = io[i * 2 + 1];
+        }
+        self.channels[0].process(&self.in_l, &mut self.out_l, 1, size);
+        self.channels[1].process(&self.in_r, &mut self.out_r, 1, size);
+        // run any ready frames (firmware calls Buffer() once per Prepare tick;
+        // here we drain all frames that became ready this block)
+        for ch in self.channels.iter_mut() {
+            while ch.ready != ch.done {
+                ch.buffer(params, &mut self.rng);
+            }
+        }
+        for i in 0..size {
+            io[i * 2] = self.out_l[i];
+            io[i * 2 + 1] = self.out_r[i];
+        }
+    }
+}
 
 const MAX_WSOLA_SIZE: i32 = 4096;
 const CORRELATOR_BLOCK: usize = (MAX_WSOLA_SIZE as usize / 32) + 2;
@@ -1283,6 +1709,7 @@ pub struct GranularProcessor {
     looping: LoopingSamplePlayer,
     ws_player: WsolaSamplePlayer,
     correlator: Correlator,
+    pvoc: PhaseVocoder,
     diffuser: Diffuser,
     reverb: Reverb,
     rng: Rng,
@@ -1304,6 +1731,7 @@ impl GranularProcessor {
             looping: LoopingSamplePlayer::new(),
             ws_player: WsolaSamplePlayer::new(),
             correlator: Correlator::new(),
+            pvoc: PhaseVocoder::new(),
             diffuser: Diffuser::new(sample_rate),
             reverb: Reverb::new(sample_rate),
             rng: Rng::new(seed),
@@ -1333,7 +1761,9 @@ impl GranularProcessor {
             rec_l[i] = io[i * 2] + fb_gain * hp_l;
             rec_r[i] = io[i * 2 + 1] + fb_gain * hp_r;
         }
-        if !params.freeze {
+        // spectral has its own STFT analysis ring — it does not record into
+        // the granular buffer (matches the firmware's `!= SPECTRAL` guard)
+        if !params.freeze && params.mode != PlaybackMode::Spectral {
             self.buf_l.write_block(&rec_l);
             self.buf_r.write_block(&rec_r);
         }
@@ -1341,8 +1771,15 @@ impl GranularProcessor {
         if self.scratch.len() < size * 2 {
             self.scratch.resize(size * 2, 0.0);
         }
-        // 2. the playback engine (granular or looping/delay)
+        // 2. the playback engine (granular / looping / stretch / spectral)
         match params.mode {
+            PlaybackMode::Spectral => {
+                for i in 0..size {
+                    self.scratch[i * 2] = rec_l[i];
+                    self.scratch[i * 2 + 1] = rec_r[i];
+                }
+                self.pvoc.process(&mut self.scratch, params, size);
+            }
             PlaybackMode::Granular => {
                 let density = params.density;
                 let overlap = if density >= 0.53 {
@@ -1436,6 +1873,49 @@ mod tests {
         let n = buf.size() as usize;
         let block: Vec<f32> = (0..n).map(gen).collect();
         buf.write_block(&block);
+    }
+
+    #[test]
+    fn fft_round_trips() {
+        let n = 64;
+        let mut re: Vec<f32> = (0..n).map(|i| (i as f32 * 0.3).sin()).collect();
+        let orig = re.clone();
+        let mut im = vec![0.0_f32; n];
+        fft(&mut re, &mut im, false);
+        fft(&mut re, &mut im, true);
+        // inverse is unnormalized → divide by N
+        for (a, b) in re.iter().zip(orig.iter()) {
+            assert!((a / n as f32 - b).abs() < 1e-3, "fft round-trip");
+        }
+    }
+
+    #[test]
+    fn spectral_mode_produces_bounded_sound() {
+        let mut proc = GranularProcessor::new(48000.0, 1.0, 13);
+        let params = CloudsParams {
+            mode: PlaybackMode::Spectral,
+            position: 0.0,
+            density: 0.7,
+            texture: 0.5,
+            pitch: 7.0, // pitch shift via the phase vocoder
+            dry_wet: 1.0,
+            ..Default::default()
+        };
+        let mut energy = 0.0;
+        // push enough hops (4096-pt FFT, 1024 hop) for the vocoder to fill+emit
+        for blk in 0..1200 {
+            let mut io = vec![0.0_f32; 64];
+            for (i, s) in io.iter_mut().enumerate() {
+                let t = (blk * 32 + i / 2) as f32;
+                *s = 0.4 * (t * 0.08).sin();
+            }
+            proc.process(&mut io, &params, 32);
+            assert!(io.iter().all(|v| v.is_finite() && v.abs() <= 8.0), "spectral bounded");
+            if blk > 400 {
+                energy += io.iter().map(|v| v * v).sum::<f32>();
+            }
+        }
+        assert!(energy > 1e-4, "spectral produces sound: {energy}");
     }
 
     #[test]
