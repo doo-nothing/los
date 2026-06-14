@@ -851,13 +851,239 @@ const CHORDS: [[f32; CHORD_NUM_NOTES]; CHORD_NUM_CHORDS] = [
     [0.00, 3.00, 6.00, 9.00],   // Fully diminished
 ];
 
-/// A five-voice chord engine: the note's pitch fans out into one of 17
-/// chord types (harmonics), inverted/voiced by timbre, the waveform
-/// morphed saw→square by morph. Voices are variable-shape oscillators
-/// (a documented simplification of the firmware's divide-down +
-/// wavetable blend — the chords and inversions are exact).
+const CHORD_NUM_HARMONICS: usize = 3;
+
+/// string_synth_oscillator.h — a divide-down organ/string-machine voice:
+/// four band-limited sawtooths (8'→1') from one phase counter, with the
+/// square waveforms reconstructed by `Square = 2·Saw_n − Saw_{n−1}`. The
+/// seven registration weights are saw 8', square 8', saw 4', …, saw 1'.
+#[derive(Debug, Clone)]
+struct StringSynthOscillator {
+    phase: f32,
+    next_sample: f32,
+    segment: i32,
+    frequency: f32,
+    saw_8_gain: f32,
+    saw_4_gain: f32,
+    saw_2_gain: f32,
+    saw_1_gain: f32,
+}
+
+impl StringSynthOscillator {
+    fn new() -> Self {
+        Self {
+            phase: 0.0,
+            next_sample: 0.0,
+            segment: 0,
+            frequency: 0.001,
+            saw_8_gain: 0.0,
+            saw_4_gain: 0.0,
+            saw_2_gain: 0.0,
+            saw_1_gain: 0.0,
+        }
+    }
+
+    fn render(&mut self, mut frequency: f32, unshifted_registration: &[f32; 7], gain: f32, out: &mut [f32]) {
+        let size = out.len();
+        frequency *= 8.0;
+        // Shift very high frequencies down by octaves (play the 2nd harmonic
+        // of a half-frequency wave rather than the 1st of the original).
+        let mut shift = 0usize;
+        while frequency > 0.5 {
+            shift += 2;
+            frequency *= 0.5;
+        }
+        if shift >= 8 {
+            return;
+        }
+        let mut registration = [0.0_f32; 7];
+        registration[shift..7].copy_from_slice(&unshifted_registration[..7 - shift]);
+
+        let saw_8_target = (registration[0] + 2.0 * registration[1]) * gain;
+        let saw_4_target = (registration[2] - registration[1] + 2.0 * registration[3]) * gain;
+        let saw_2_target = (registration[4] - registration[3] + 2.0 * registration[5]) * gain;
+        let saw_1_target = (registration[6] - registration[5]) * gain;
+        let mut fm = ParamInterp::new(self.frequency, frequency, size);
+        let mut g8 = ParamInterp::new(self.saw_8_gain, saw_8_target, size);
+        let mut g4 = ParamInterp::new(self.saw_4_gain, saw_4_target, size);
+        let mut g2 = ParamInterp::new(self.saw_2_gain, saw_2_target, size);
+        let mut g1 = ParamInterp::new(self.saw_1_gain, saw_1_target, size);
+
+        let mut phase = self.phase;
+        let mut next_sample = self.next_sample;
+        let mut segment = self.segment;
+        for o in out.iter_mut() {
+            let mut this_sample = next_sample;
+            next_sample = 0.0;
+            let frequency = fm.next();
+            let saw_8_gain = g8.next();
+            let saw_4_gain = g4.next();
+            let saw_2_gain = g2.next();
+            let saw_1_gain = g1.next();
+
+            phase += frequency;
+            let mut next_segment = phase as i32;
+            if next_segment != segment {
+                let mut discontinuity = 0.0;
+                if next_segment == 8 {
+                    phase -= 8.0;
+                    next_segment -= 8;
+                    discontinuity -= saw_8_gain;
+                }
+                if (next_segment & 3) == 0 {
+                    discontinuity -= saw_4_gain;
+                }
+                if (next_segment & 1) == 0 {
+                    discontinuity -= saw_2_gain;
+                }
+                discontinuity -= saw_1_gain;
+                if discontinuity != 0.0 {
+                    let fraction = phase - next_segment as f32;
+                    let t = fraction / frequency;
+                    this_sample += this_blep(t) * discontinuity;
+                    next_sample += next_blep(t) * discontinuity;
+                }
+            }
+            segment = next_segment;
+
+            next_sample += (phase - 4.0) * saw_8_gain * 0.125;
+            next_sample += (phase - (segment & 4) as f32 - 2.0) * saw_4_gain * 0.25;
+            next_sample += (phase - (segment & 6) as f32 - 1.0) * saw_2_gain * 0.5;
+            next_sample += (phase - (segment & 7) as f32 - 0.5) * saw_1_gain;
+            *o += 2.0 * this_sample;
+        }
+        self.next_sample = next_sample;
+        self.phase = phase;
+        self.segment = segment;
+        self.frequency = frequency;
+        self.saw_8_gain = saw_8_target;
+        self.saw_4_gain = saw_4_target;
+        self.saw_2_gain = saw_2_target;
+        self.saw_1_gain = saw_1_target;
+    }
+}
+
+/// wavetable_oscillator.h `WavetableOscillator<128, 15>` (approximate_scale,
+/// attenuate_high_frequencies): a band-limited wavetable voice scanning a
+/// 15-wave row of the integrated wavetable, differentiated back to audio.
+#[derive(Debug, Clone)]
+struct ChordWavetableOsc {
+    phase: f32,
+    frequency: f32,
+    amplitude: f32,
+    waveform: f32,
+    lp: f32,
+    differentiator: Differentiator,
+}
+
+/// The chord engine's 15-wave selection from `wav_integrated_waves`
+/// (chord_engine.cc `wavetable[]`): flat index = bank·64 + row·8 + column.
+const CHORD_WAVE_INDICES: [usize; 15] = [
+    2 * 64 + 6 * 8 + 1, // (2,6,1)=177
+    2 * 64 + 6 * 8 + 6, // (2,6,6)=182
+    2 * 64 + 6 * 8 + 4, // (2,6,4)=180
+    6 * 8,              // (0,6,0)=48
+    6 * 8 + 1,          // (0,6,1)=49
+    6 * 8 + 2,          // (0,6,2)=50
+    6 * 8 + 7,          // (0,6,7)=55
+    2 * 64 + 4 * 8 + 7, // (2,4,7)=167
+    2 * 64 + 4 * 8 + 6, // (2,4,6)=166
+    2 * 64 + 4 * 8 + 5, // (2,4,5)=165
+    2 * 64 + 4 * 8 + 4, // (2,4,4)=164
+    2 * 64 + 4 * 8 + 3, // (2,4,3)=163
+    2 * 64 + 4 * 8 + 2, // (2,4,2)=162
+    2 * 64 + 4 * 8 + 1, // (2,4,1)=161
+    2 * 64 + 4 * 8,     // (2,4,0)=160
+];
+const CHORD_NUM_WT_WAVES: usize = CHORD_WAVE_INDICES.len();
+
+impl ChordWavetableOsc {
+    fn new() -> Self {
+        Self {
+            phase: 0.0,
+            frequency: 0.0,
+            amplitude: 0.0,
+            waveform: 0.0,
+            lp: 0.0,
+            differentiator: Differentiator::new(),
+        }
+    }
+
+    #[inline]
+    fn interpolate_wave(wave: &[i16], idx: usize, frac: f32) -> f32 {
+        let a = wave[idx] as f32;
+        let b = wave[idx + 1] as f32;
+        a + (b - a) * frac
+    }
+
+    fn render(&mut self, mut frequency: f32, mut amplitude: f32, waveform: f32, out: &mut [f32]) {
+        let size = out.len();
+        frequency = frequency.clamp(0.000_000_1, MAX_FREQUENCY);
+        amplitude *= 1.0 - 2.0 * frequency; // attenuate_high_frequencies
+        amplitude *= 1.0 / (frequency * 131072.0); // approximate_scale
+
+        let waves = wt_waves();
+        let mut fm = ParamInterp::new(self.frequency, frequency, size);
+        let mut am = ParamInterp::new(self.amplitude, amplitude, size);
+        let mut wm =
+            ParamInterp::new(self.waveform, waveform * (CHORD_NUM_WT_WAVES as f32 - 1.0001), size);
+
+        let mut lp = self.lp;
+        let mut phase = self.phase;
+        for o in out.iter_mut() {
+            let f0 = fm.next();
+            let cutoff = (WT_TABLE_SIZE as f32 * f0).min(1.0);
+            phase += f0;
+            if phase >= 1.0 {
+                phase -= 1.0;
+            }
+            let wf = wm.next();
+            let wf_i = wf as usize;
+            let wf_f = wf - wf_i as f32;
+            let p = phase * WT_TABLE_SIZE as f32;
+            let p_i = p as usize;
+            let p_f = p - p_i as f32;
+
+            let w0 = &waves[CHORD_WAVE_INDICES[wf_i] * WT_STRIDE..];
+            let w1 = &waves[CHORD_WAVE_INDICES[wf_i + 1] * WT_STRIDE..];
+            let x0 = Self::interpolate_wave(w0, p_i, p_f);
+            let x1 = Self::interpolate_wave(w1, p_i, p_f);
+            let s = self.differentiator.process(cutoff, x0 + (x1 - x0) * wf_f);
+            lp += (s - lp) * cutoff;
+            *o += am.next() * lp;
+        }
+        self.lp = lp;
+        self.phase = phase;
+        self.frequency = frequency;
+        self.amplitude = amplitude;
+        self.waveform = waveform * (CHORD_NUM_WT_WAVES as f32 - 1.0001);
+    }
+}
+
+/// chord_engine.cc registration table — eight organ stops blended by morph.
+#[rustfmt::skip]
+const CHORD_REGISTRATIONS: [[f32; CHORD_NUM_HARMONICS * 2]; 8] = [
+    [0.00, 1.00, 0.00, 0.00, 0.00, 0.00], // Square
+    [1.00, 0.00, 0.00, 0.00, 0.00, 0.00], // Saw
+    [0.50, 0.00, 0.50, 0.00, 0.00, 0.00], // Saw + saw
+    [0.33, 0.00, 0.33, 0.00, 0.33, 0.00], // Full saw
+    [0.33, 0.00, 0.00, 0.33, 0.00, 0.33], // Full saw + square hybrid
+    [0.50, 0.00, 0.00, 0.00, 0.00, 0.50], // Saw + high square harmo
+    [0.00, 0.50, 0.00, 0.00, 0.00, 0.50], // Square + high square harmo
+    [0.00, 0.10, 0.10, 0.00, 0.20, 0.60], // Saw+square + high harmo
+];
+
+/// chord_engine.cc `fade_point[]` — the per-voice morph crossover between
+/// the divide-down voice and the wavetable voice.
+const CHORD_FADE_POINT: [f32; CHORD_NUM_VOICES] = [0.55, 0.47, 0.49, 0.51, 0.53];
+
+/// A five-voice chord engine faithful to chord_engine.cc: the note's pitch
+/// fans out into one of 17 chord types (harmonics), inverted/voiced by
+/// timbre. Each voice crossfades (by morph) between a divide-down
+/// organ/string oscillator and a wavetable oscillator.
 pub struct ChordEngine {
-    voices: Vec<VariableShapeOscillator>,
+    divide_down: Vec<StringSynthOscillator>,
+    wavetable: Vec<ChordWavetableOsc>,
     morph_lp: f32,
     timbre_lp: f32,
 }
@@ -865,10 +1091,25 @@ pub struct ChordEngine {
 impl ChordEngine {
     pub fn new() -> Self {
         Self {
-            voices: (0..CHORD_NUM_VOICES).map(|_| VariableShapeOscillator::new()).collect(),
+            divide_down: (0..CHORD_NUM_VOICES).map(|_| StringSynthOscillator::new()).collect(),
+            wavetable: (0..CHORD_NUM_VOICES).map(|_| ChordWavetableOsc::new()).collect(),
             morph_lp: 0.0,
             timbre_lp: 0.0,
         }
+    }
+
+    /// chord_engine.cc ComputeRegistration — blend the 8 organ stops.
+    fn compute_registration(registration: f32) -> [f32; 7] {
+        let r = registration * (8.0 - 1.001);
+        let ri = r as usize;
+        let rf = r - ri as f32;
+        let mut amps = [0.0_f32; 7];
+        for (i, a) in amps.iter_mut().enumerate().take(CHORD_NUM_HARMONICS * 2) {
+            let lo = CHORD_REGISTRATIONS[ri][i];
+            let hi = CHORD_REGISTRATIONS[ri + 1][i];
+            *a = lo + (hi - lo) * rf;
+        }
+        amps
     }
 
     fn chord_ratio(chord: usize, note: usize) -> f32 {
@@ -945,21 +1186,42 @@ impl Engine for ChordEngine {
         out[..size].fill(0.0);
         aux[..size].fill(0.0);
 
+        // morph drives both the organ-stop registration (low morph) and
+        // the wavetable-vs-divide-down crossfade (high morph).
+        let registration_amt = (1.0 - self.morph_lp * 2.15).max(0.0);
+        let registration = Self::compute_registration(registration_amt);
         let f0 = note_to_frequency(p.note) * 0.998;
-        // morph past the midpoint sweeps saw → square
-        let waveshape = ((self.morph_lp - 0.5) * 2.0).clamp(0.0, 1.0);
-        let pw = 0.5;
+        let waveform = ((self.morph_lp - 0.535) * 2.15).max(0.0);
+
         let mut scratch = vec![0.0_f32; size];
         for note in 0..CHORD_NUM_VOICES {
+            let wavetable_amount = (50.0 * (self.morph_lp - CHORD_FADE_POINT[note])).clamp(0.0, 1.0);
+            let mut divide_down_amount = 1.0 - wavetable_amount;
+            let note_f0 = f0 * ratios[note];
+            let divide_down_gain = (4.0 - note_f0 * 32.0).clamp(0.0, 1.0);
+            divide_down_amount *= divide_down_gain;
             let amp = amplitudes[note];
-            if amp <= 0.0 {
-                continue;
+
+            scratch[..size].fill(0.0);
+            if wavetable_amount > 0.0 {
+                self.wavetable[note].render(
+                    note_f0 * 1.004,
+                    amp * wavetable_amount,
+                    waveform,
+                    &mut scratch,
+                );
             }
-            let note_f0 = (f0 * ratios[note]).min(MAX_FREQUENCY);
-            self.voices[note].render(note_f0, pw, waveshape, &mut scratch);
+            if divide_down_amount > 0.0 {
+                self.divide_down[note].render(
+                    note_f0,
+                    &registration,
+                    amp * divide_down_amount,
+                    &mut scratch,
+                );
+            }
             let dest = if (1 << note) & aux_mask != 0 { &mut *aux } else { &mut *out };
             for (d, &s) in dest.iter_mut().zip(scratch.iter()).take(size) {
-                *d += s * amp;
+                *d += s;
             }
         }
         for i in 0..size {
@@ -5482,6 +5744,47 @@ mod tests {
             }
             assert!(energy > 0.1, "chord {harm} sounds: {energy}");
         }
+    }
+
+    #[test]
+    fn chord_engine_morph_crosses_divide_down_to_wavetable() {
+        // morph=0 -> pure divide-down organ; morph=1 -> pure wavetable.
+        // Both paths must be bounded, non-silent, and spectrally distinct.
+        let render = |morph: f32| {
+            let mut eng = ChordEngine::new();
+            let mut out = vec![0.0_f32; 64];
+            let mut aux = vec![0.0_f32; 64];
+            let p = EngineParameters {
+                note: 48.0,
+                harmonics: 0.6,
+                timbre: 0.3,
+                morph,
+                ..Default::default()
+            };
+            // settle the morph one-pole + differentiator
+            for _ in 0..200 {
+                eng.render(&p, &mut out, &mut aux);
+            }
+            let mut tail = Vec::new();
+            let mut energy = 0.0;
+            for _ in 0..40 {
+                eng.render(&p, &mut out, &mut aux);
+                assert!(
+                    out.iter().chain(aux.iter()).all(|v| v.is_finite() && v.abs() <= 8.0),
+                    "morph {morph} bounded"
+                );
+                tail.extend_from_slice(&out);
+                energy += out.iter().map(|v| v * v).sum::<f32>();
+            }
+            (energy, tail)
+        };
+        let (e_organ, organ) = render(0.0);
+        let (e_wt, wt) = render(1.0);
+        assert!(e_organ > 0.05, "divide-down voice sounds: {e_organ}");
+        assert!(e_wt > 0.05, "wavetable voice sounds: {e_wt}");
+        // the two morph extremes should differ audibly
+        let diff: f32 = organ.iter().zip(wt.iter()).map(|(a, b)| (a - b) * (a - b)).sum();
+        assert!(diff > 0.01, "divide-down and wavetable differ: {diff}");
     }
 
     #[test]
