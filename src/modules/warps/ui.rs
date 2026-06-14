@@ -38,7 +38,8 @@ use crate::state;
 
 const FALLBACK_RATE: f32 = 48_000.0;
 
-pub const SHAPE_NAMES: [&str; 6] = ["external", "sine", "triangle", "saw", "pulse", "noise"];
+pub const SHAPE_NAMES: [&str; 7] =
+    ["external", "sine", "triangle", "saw", "pulse", "noise", "freq_shifter"];
 
 fn algo_name(a: f32) -> &'static str {
     let x = a * 8.0;
@@ -408,8 +409,10 @@ fn audio_thread(shared: Arc<Mutex<WarpsState>>, instance: usize) -> Result<()> {
                 timbre: vals[1],
                 drive1: vals[2],
                 drive2: vals[3],
-                carrier_shape: s.shape,
+                // shape 6 = the SSB frequency-shifter easter egg (external in)
+                carrier_shape: if s.shape == 6 { 0 } else { s.shape },
                 note: 24.0 + vals[4] * 96.0,
+                frequency_shifter: s.shape == 6,
             }
         };
 

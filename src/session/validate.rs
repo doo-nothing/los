@@ -2038,7 +2038,8 @@ fn check_warps(
     declared: &BTreeSet<(String, usize)>,
     r: &mut Report,
 ) {
-    const SHAPES: [&str; 6] = ["external", "sine", "triangle", "saw", "pulse", "noise"];
+    const SHAPES: [&str; 7] =
+        ["external", "sine", "triangle", "saw", "pulse", "noise", "freq_shifter"];
     if let Some(sh) = p.shape.as_deref() {
         if !SHAPES.contains(&sh) {
             r.error(loc, format!("shape {sh:?} — one of {}", SHAPES.join(" ")));

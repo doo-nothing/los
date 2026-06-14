@@ -11,9 +11,11 @@
 //!
 //! The cross-modulation algorithms are 6× oversampled through the
 //! firmware's 48-tap polyphase SRC (so aliasing matches the hardware).
-//! Documented divergences that remain: the vocoder uses a simplified
-//! SVF band bank rather than the firmware's 20 tuned bands, and the
-//! hidden frequency-shifter easter egg is not ported.
+//! The hidden single-sideband frequency-shifter easter egg is ported as
+//! carrier shape "freq_shifter" (external-input path; 17-pole Hilbert
+//! all-pass quadrature pair). One documented divergence remains: the
+//! vocoder uses a simplified SVF band bank rather than the firmware's
+//! 20 tuned bands.
 
 #![allow(clippy::excessive_precision)]
 
@@ -427,6 +429,7 @@ pub struct Params {
     pub drive2: f32,     // modulator channel drive
     pub carrier_shape: usize, // 0 = external, 1..5 = internal osc shape
     pub note: f32,       // internal-oscillator pitch
+    pub frequency_shifter: bool, // the SSB freq-shifter easter egg
 }
 
 impl Default for Params {
@@ -438,6 +441,7 @@ impl Default for Params {
             drive2: 0.5,
             carrier_shape: 0,
             note: 48.0,
+            frequency_shifter: false,
         }
     }
 }
@@ -532,12 +536,71 @@ impl SrcDown {
     }
 }
 
+/// The 17 all-pass pole coefficients of the Hilbert transform network
+/// (warps `lut_ap_poles` — an elliptic half-band all-pass decomposition).
+#[rustfmt::skip]
+const AP_POLES: [f32; 17] = [
+    0.9999174437, 0.9997160329, 0.9993897602, 0.9987952776,
+    0.9976718129, 0.9955280098, 0.9914315323, 0.9836199785,
+    0.9688016569, 0.9409767040, 0.8897147107, 0.7984785110,
+    0.6454684139, 0.4118108699, 0.0972566715, -0.2775386379,
+    -0.7176356738,
+];
+
+/// A polyphase all-pass IIR Hilbert transform (warps `QuadratureTransform`):
+/// 17 first-order all-passes split into an in-phase (I) and quadrature (Q)
+/// chain, producing a 90°-shifted pair for single-sideband modulation.
+#[derive(Debug, Clone)]
+struct QuadratureTransform {
+    coef: [f32; 17],
+    x: [f32; 17],
+    y: [f32; 17],
+}
+
+impl Default for QuadratureTransform {
+    fn default() -> Self {
+        Self {
+            coef: std::array::from_fn(|i| -AP_POLES[i]),
+            x: [0.0; 17],
+            y: [0.0; 17],
+        }
+    }
+}
+
+impl QuadratureTransform {
+    #[inline]
+    fn process(&mut self, input: f32) -> (f32, f32) {
+        let mut i_out = 0.0;
+        let mut q_out = 0.0;
+        for k in 0..17 {
+            let src = if k <= 1 {
+                input
+            } else if k & 1 == 1 {
+                q_out
+            } else {
+                i_out
+            };
+            let y = self.coef[k] * (src - self.y[k]) + self.x[k];
+            self.x[k] = src;
+            self.y[k] = y;
+            if k & 1 == 1 {
+                q_out = y;
+            } else {
+                i_out = y;
+            }
+        }
+        (i_out, q_out)
+    }
+}
+
 pub struct Modulator {
     amp: [SaturatingAmplifier; 2],
     osc: Oscillator,
     vocoder: Vocoder,
     src_up: [SrcUp; 2],
     src_down: SrcDown,
+    qt: [QuadratureTransform; 2],
+    feedback_sample: f32,
     prev_algorithm: f32,
     prev_timbre: f32,
 }
@@ -550,9 +613,64 @@ impl Modulator {
             vocoder: Vocoder::new(sample_rate),
             src_up: [SrcUp::default(), SrcUp::default()],
             src_down: SrcDown::default(),
+            qt: [QuadratureTransform::default(), QuadratureTransform::default()],
+            feedback_sample: 0.0,
             prev_algorithm: 0.0,
             prev_timbre: 0.5,
         }
+    }
+
+    /// The single-sideband frequency-shifter easter egg (warps
+    /// `ProcessEasterEgg`, external-input path): Hilbert-transform the
+    /// carrier (input 1) and modulator (input 2) into quadrature, rotate the
+    /// carrier by `algorithm`, ring-modulate, and crossfade the upper/lower
+    /// sideband by `timbre`. `drive1` = feedback, `drive2` = dry/wet.
+    pub fn process_easter_egg(
+        &mut self,
+        p: &Params,
+        carrier_in: &[f32],
+        modulator_in: &[f32],
+        main: &mut [f32],
+        aux: &mut [f32],
+    ) {
+        let t = tables();
+        let size = main.len();
+        let phase_shift = p.algorithm;
+        // carrier I/Q, rotated by the phase shift
+        let r_sin = interpolate(&t.sin, phase_shift, 1024.0);
+        let r_cos = interpolate(&t.sin[256..], phase_shift, 1024.0);
+        let mut feedback = self.feedback_sample;
+        for i in 0..size {
+            let (ci0, cq0) = self.qt[0].process(carrier_in[i]);
+            let carrier_i = r_sin * ci0 + r_cos * cq0;
+            let carrier_q = r_sin * cq0 - r_cos * ci0;
+
+            let timbre = p.timbre;
+            let in_ = modulator_in[i];
+            let mut amount = p.drive1;
+            amount *= 2.0 - amount;
+            amount *= 2.0 - amount;
+            let max_fb = 1.0 + 2.0 * (timbre - 0.5) * (timbre - 0.5);
+            let modulator =
+                in_ + amount * (soft_clip(in_ + max_fb * feedback * amount) - in_);
+            let (mi, mq) = self.qt[1].process(modulator);
+
+            let a = carrier_i * mi;
+            let b = carrier_q * mq;
+            let up = a - b;
+            let down = a + b;
+            let fade_in = interpolate(&t.xfade_in, timbre, 256.0);
+            let fade_out = interpolate(&t.xfade_out, timbre, 256.0);
+            let mut m = up * fade_in + down * fade_out;
+            let mut x = down * fade_in + up * fade_out;
+            feedback += 0.2 * (m - feedback); // one-pole LP on the feedback
+            let wet_dry = 1.0 - p.drive2;
+            m += wet_dry * (in_ - m);
+            x += wet_dry * (in_ - x);
+            main[i] = m;
+            aux[i] = x;
+        }
+        self.feedback_sample = feedback;
     }
 
     /// Process a block. `carrier_in`/`modulator_in` are the two audio
@@ -567,6 +685,10 @@ impl Modulator {
         main: &mut [f32],
         aux: &mut [f32],
     ) {
+        if p.frequency_shifter {
+            self.process_easter_egg(p, carrier_in, modulator_in, main, aux);
+            return;
+        }
         let size = main.len();
         let vocoder_amount = ((p.algorithm - 0.7) * 20.0 + 0.5).clamp(0.0, 1.0);
 
@@ -662,6 +784,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn frequency_shifter_easter_egg_shifts() {
+        let mut m = Modulator::new(48000.0);
+        let params = Params {
+            algorithm: 0.3, // phase-shift / rotation amount
+            timbre: 0.5,    // USB/LSB balance
+            drive1: 0.0,    // no feedback
+            drive2: 1.0,    // fully wet
+            carrier_shape: 0,
+            note: 60.0,
+            frequency_shifter: true,
+        };
+        let n = 64;
+        let mut energy = 0.0;
+        for blk in 0..40 {
+            let carrier: Vec<f32> =
+                (0..n).map(|i| 0.5 * ((blk * n + i) as f32 * 0.20).sin()).collect();
+            let modulator: Vec<f32> =
+                (0..n).map(|i| 0.5 * ((blk * n + i) as f32 * 0.05).sin()).collect();
+            let mut main = vec![0.0_f32; n];
+            let mut aux = vec![0.0_f32; n];
+            m.process(&params, &carrier, &modulator, &mut main, &mut aux);
+            assert!(
+                main.iter().chain(aux.iter()).all(|v| v.is_finite() && v.abs() <= 8.0),
+                "freq shifter bounded"
+            );
+            if blk > 4 {
+                energy += main.iter().map(|v| v * v).sum::<f32>();
+            }
+        }
+        assert!(energy > 1e-5, "frequency shifter produces sound: {energy}");
+    }
+
+    #[test]
     fn oversampled_xmod_is_bounded_and_audible() {
         let mut m = Modulator::new(48000.0);
         // digital ring-mod region (algorithm ~0.45 < 0.5 = cross-mod, not vocoder)
@@ -672,6 +827,7 @@ mod tests {
             drive2: 0.8,
             carrier_shape: 0,
             note: 60.0,
+            frequency_shifter: false,
         };
         let n = 64;
         let mut energy = 0.0;
@@ -797,7 +953,8 @@ mod tests {
                 drive2: 0.6,
                 carrier_shape: 0,
                 note: 48.0,
-            };
+            frequency_shifter: false,
+        };
             // run a few blocks so the amp gates settle
             for _ in 0..30 {
                 m.process(&p, &carrier, &modulator, &mut main, &mut aux);
@@ -824,6 +981,7 @@ mod tests {
             drive2: 0.6,
             carrier_shape: 1, // sine
             note: 50.0,
+            frequency_shifter: false,
         };
         for _ in 0..30 {
             m.process(&p, &silent, &modulator, &mut main, &mut aux);
