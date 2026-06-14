@@ -376,10 +376,10 @@ fn audio_thread(shared: Arc<Mutex<CloudsState>>, instance: usize) -> Result<()> 
                     reverb: v[8],
                     freeze,
                     trigger: false,
-                    mode: if s.mode == 1 {
-                        super::dsp::PlaybackMode::LoopingDelay
-                    } else {
-                        super::dsp::PlaybackMode::Granular
+                    mode: match s.mode {
+                        1 => super::dsp::PlaybackMode::Stretch,
+                        2 => super::dsp::PlaybackMode::LoopingDelay,
+                        _ => super::dsp::PlaybackMode::Granular,
                     },
                 },
                 freeze,

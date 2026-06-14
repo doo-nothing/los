@@ -711,15 +711,387 @@ impl Diffuser {
 // ── the granular processor (top level) ───────────────────────────────────────
 
 /// Full clouds parameters (the panel).
-/// Clouds playback modes (the firmware's `PlaybackMode`). Granular and
-/// looping/delay are implemented; stretch/spectral are follow-ups.
+/// Clouds playback modes (the firmware's `PlaybackMode`). Granular,
+/// looping/delay and stretch (WSOLA) are implemented; spectral is a
+/// follow-up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaybackMode {
     Granular,
+    Stretch,
     LoopingDelay,
 }
 
-pub const MODE_NAMES: [&str; 2] = ["granular", "looping_delay"];
+pub const MODE_NAMES: [&str; 3] = ["granular", "stretch", "looping_delay"];
+
+const MAX_WSOLA_SIZE: i32 = 4096;
+const CORRELATOR_BLOCK: usize = (MAX_WSOLA_SIZE as usize / 32) + 2;
+
+/// One overlap-add window of the WSOLA stretch player (clouds `Window`):
+/// a triangular-enveloped grain read at a pitch-shifted rate.
+#[derive(Debug, Clone, Copy)]
+struct WsolaWindow {
+    first_sample: i32,
+    phase: i32,
+    phase_increment: i32,
+    envelope_phase_increment: f32,
+    done: bool,
+    half: bool,
+    regenerated: bool,
+}
+
+impl Default for WsolaWindow {
+    fn default() -> Self {
+        Self {
+            first_sample: 0,
+            phase: 0,
+            phase_increment: 0,
+            envelope_phase_increment: 0.0,
+            done: true,
+            half: false,
+            regenerated: false,
+        }
+    }
+}
+
+impl WsolaWindow {
+    fn start(&mut self, buffer_size: i32, start: i32, width: i32, phase_increment: i32) {
+        self.first_sample = (start + buffer_size).rem_euclid(buffer_size);
+        self.phase_increment = phase_increment;
+        self.phase = 0;
+        self.regenerated = false;
+        // a freshly started window must render — the firmware relies on
+        // overlap_add recomputing `done` from phase, but the early-out at the
+        // top of overlap_add would otherwise keep a previously-finished window
+        // inert, so clear it explicitly here.
+        self.done = false;
+        self.half = false;
+        self.envelope_phase_increment = 2.0 / width.max(1) as f32;
+    }
+
+    fn overlap_add(&mut self, buf_l: &AudioBuffer, buf_r: &AudioBuffer, out: &mut [f32]) {
+        if self.done {
+            return;
+        }
+        let phase_integral = self.phase >> 16;
+        let phase_fractional = (self.phase & 0xffff) as u16;
+        let sample_index = self.first_sample + phase_integral;
+        let envelope_phase = phase_integral as f32 * self.envelope_phase_increment;
+        self.done = envelope_phase >= 2.0;
+        self.half = envelope_phase >= 1.0;
+        let gain = if envelope_phase >= 1.0 {
+            2.0 - envelope_phase
+        } else {
+            envelope_phase
+        };
+        let l = buf_l.read_hermite(sample_index, phase_fractional) * gain;
+        let r = buf_r.read_hermite(sample_index, phase_fractional) * gain;
+        out[0] += l;
+        out[1] += r;
+        self.phase = self.phase.wrapping_add(self.phase_increment);
+    }
+
+    fn needs_regeneration(&self) -> bool {
+        self.half && !self.regenerated
+    }
+}
+
+/// The WSOLA correlator (clouds `Correlator`): a sign-bit cross-correlation
+/// search that finds the buffer offset best aligning two windows, evaluated
+/// incrementally over many blocks.
+struct Correlator {
+    source: Vec<u32>,
+    destination: Vec<u32>,
+    offset: i32,
+    increment: i32,
+    size: i32,
+    candidate: i32,
+    best_match: i32,
+    best_score: u32,
+    done: bool,
+}
+
+impl Correlator {
+    fn new() -> Self {
+        Self {
+            source: vec![0; CORRELATOR_BLOCK],
+            destination: vec![0; CORRELATOR_BLOCK],
+            offset: 0,
+            increment: 0,
+            size: 0,
+            candidate: 0,
+            best_match: 0,
+            best_score: 0,
+            done: true,
+        }
+    }
+
+    fn best_match(&self) -> i32 {
+        self.offset + (((self.best_match as i64 * (self.increment >> 4) as i64) >> 12) as i32)
+    }
+
+    fn start_search(&mut self, size: i32, offset: i32, increment: i32) {
+        self.offset = offset;
+        self.increment = increment;
+        self.best_score = 0;
+        self.best_match = 0;
+        self.candidate = 0;
+        self.size = size;
+        self.done = false;
+    }
+
+    fn evaluate_some_candidates(&mut self) {
+        let mut num = (self.size >> 2) + 16;
+        while num > 0 {
+            self.evaluate_next_candidate();
+            num -= 1;
+        }
+    }
+
+    fn evaluate_next_candidate(&mut self) {
+        if self.done {
+            return;
+        }
+        let num_words = (self.size >> 5) as usize;
+        let offset_words = (self.candidate >> 5) as usize;
+        let offset_bits = (self.candidate & 0x1f) as u32;
+        let mut xcorr = 0u32;
+        for i in 0..num_words {
+            let source_bits = self.source[i.min(CORRELATOR_BLOCK - 1)];
+            let di = offset_words + i;
+            let lo = self.destination[di.min(CORRELATOR_BLOCK - 1)];
+            let hi = self.destination[(di + 1).min(CORRELATOR_BLOCK - 1)];
+            let destination_bits = if offset_bits == 0 {
+                lo
+            } else {
+                (lo << offset_bits) | (hi >> (32 - offset_bits))
+            };
+            xcorr += (!(source_bits ^ destination_bits)).count_ones();
+        }
+        if xcorr > self.best_score {
+            self.best_match = self.candidate;
+            self.best_score = xcorr;
+        }
+        self.candidate += 1;
+        self.done = self.candidate >= self.size;
+    }
+}
+
+/// The WSOLA time-stretch player (clouds `WSOLASamplePlayer`): two
+/// overlapping windows whose start points the correlator aligns to the
+/// recorded material so pitch and time decouple.
+pub struct WsolaSamplePlayer {
+    windows: [WsolaWindow; 2],
+    window_size: i32,
+    pitch: f32,
+    smoothed_pitch: f32,
+    position: f32,
+    size_factor: f32,
+    next_pitch_ratio: f32,
+    correlator_loaded: bool,
+    search_source: i32,
+    search_target: i32,
+    env_phase: f32,
+    env_phase_increment: f32,
+    elapsed: i32,
+}
+
+impl Default for WsolaSamplePlayer {
+    fn default() -> Self {
+        Self {
+            windows: [WsolaWindow::default(); 2],
+            window_size: MAX_WSOLA_SIZE / 2,
+            pitch: 0.0,
+            smoothed_pitch: 0.0,
+            position: 0.0,
+            size_factor: 0.0,
+            next_pitch_ratio: 1.0,
+            correlator_loaded: true,
+            search_source: 0,
+            search_target: 0,
+            env_phase: 0.0,
+            env_phase_increment: 0.5,
+            elapsed: 0,
+        }
+    }
+}
+
+impl WsolaSamplePlayer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Read sign bits of the (summed) buffer into the correlator bit array.
+    fn read_sign_bits(
+        buf_l: &AudioBuffer,
+        buf_r: &AudioBuffer,
+        phase_increment: i32,
+        mut source: i32,
+        size: i32,
+        destination: &mut [u32],
+    ) -> i32 {
+        let mut phase = 0i32;
+        let mut bits = 0u32;
+        let mut bit_counter = 0u32;
+        let mut num_samples = 0i32;
+        if source < 0 {
+            source += buf_l.size();
+        }
+        while (phase >> 16) < size {
+            let integral = source + (phase >> 16);
+            let fractional = (phase & 0xffff) as u16;
+            let s = buf_l.read(integral, fractional) + buf_r.read(integral, fractional);
+            bits |= if s > 0.0 { 1 } else { 0 };
+            if (bit_counter & 0x1f) == 0x1f {
+                destination[(bit_counter >> 5) as usize] = bits;
+                num_samples += 32;
+            }
+            bit_counter += 1;
+            bits <<= 1;
+            phase = phase.wrapping_add(phase_increment);
+        }
+        while bit_counter & 0x1f != 0 {
+            if (bit_counter & 0x1f) == 0x1f {
+                destination[(bit_counter >> 5) as usize] = bits;
+                num_samples += 32;
+            }
+            bit_counter += 1;
+            bits <<= 1;
+        }
+        num_samples
+    }
+
+    /// Fill the correlator's two bit arrays and (re)start its search.
+    fn load_correlator(&mut self, correlator: &mut Correlator, buf_l: &AudioBuffer, buf_r: &AudioBuffer) {
+        if self.correlator_loaded {
+            return;
+        }
+        let mut stride = (self.window_size as f32 / 2048.0).clamp(1.0, 2.0);
+        stride *= 65536.0;
+        let increment =
+            (stride * if self.next_pitch_ratio < 1.25 { 1.25 } else { self.next_pitch_ratio }) as i32;
+        let num_samples = Self::read_sign_bits(
+            buf_l,
+            buf_r,
+            increment,
+            self.search_source,
+            self.window_size,
+            &mut correlator.source,
+        );
+        Self::read_sign_bits(
+            buf_l,
+            buf_r,
+            increment,
+            self.search_target - self.window_size,
+            self.window_size * 2,
+            &mut correlator.destination,
+        );
+        correlator.start_search(
+            num_samples,
+            self.search_target - self.window_size + (self.window_size >> 1),
+            increment,
+        );
+        self.correlator_loaded = true;
+    }
+
+    fn schedule_aligned_window(
+        &mut self,
+        correlator: &Correlator,
+        buf_l: &AudioBuffer,
+        idx: usize,
+    ) {
+        let next_window_position = correlator.best_match();
+        self.correlator_loaded = false;
+        self.windows[idx].start(
+            buf_l.size(),
+            next_window_position - (self.window_size >> 1),
+            self.window_size,
+            (self.next_pitch_ratio * 65536.0) as i32,
+        );
+        let mut pitch_error = self.pitch - self.smoothed_pitch;
+        let sign = if pitch_error < 0.0 { -1.0 } else { 1.0 };
+        pitch_error *= sign;
+        if pitch_error >= 12.0 {
+            pitch_error = 12.0;
+        }
+        self.smoothed_pitch += pitch_error * sign;
+        let pitch_ratio = semitones_to_ratio(self.smoothed_pitch);
+        let inv_pitch_ratio = semitones_to_ratio(-self.smoothed_pitch);
+        self.next_pitch_ratio = pitch_ratio;
+
+        let size_factor = semitones_to_ratio((self.size_factor - 1.0) * 60.0);
+        let mut new_window_size = (size_factor * MAX_WSOLA_SIZE as f32) as i32;
+        if (new_window_size - self.window_size).abs() > 64 {
+            let error = (new_window_size - self.window_size) >> 5;
+            new_window_size = self.window_size + error;
+            self.window_size = new_window_size - (new_window_size % 4);
+        }
+
+        let mut limit = buf_l.size();
+        limit -= (2.0 * self.window_size as f32 * inv_pitch_ratio) as i32;
+        limit -= 2 * self.window_size;
+        if limit < 0 {
+            limit = 0;
+        }
+        let position = self.position;
+        let mut target_position = buf_l.head();
+        target_position -= (limit as f32 * position) as i32;
+        target_position -= self.window_size;
+        self.search_source = next_window_position;
+        self.search_target = target_position;
+    }
+
+    /// Render `size` stereo frames into `out` (interleaved). The correlator
+    /// search is advanced once per block (the firmware does this in Prepare).
+    fn play(
+        &mut self,
+        correlator: &mut Correlator,
+        buf_l: &AudioBuffer,
+        buf_r: &AudioBuffer,
+        params: &CloudsParams,
+        out: &mut [f32],
+        size: usize,
+    ) {
+        // advance the background correlator search (firmware: Prepare())
+        self.load_correlator(correlator, buf_l, buf_r);
+        correlator.evaluate_some_candidates();
+
+        self.elapsed += 1;
+        if params.trigger {
+            self.env_phase = 0.0;
+            self.env_phase_increment = (1.0 / self.elapsed.max(1) as f32).clamp(0.0001, 0.1);
+            self.elapsed = 0;
+        }
+        self.env_phase += self.env_phase_increment;
+        if self.env_phase >= 1.0 {
+            self.env_phase = 1.0;
+        }
+        self.position = params.position;
+        self.position += (1.0 - self.env_phase) * (1.0 - self.position);
+        self.pitch = params.pitch;
+        self.size_factor = params.size;
+
+        if self.windows[0].done && self.windows[1].done {
+            self.windows[1].regenerated = true;
+            self.schedule_aligned_window(correlator, buf_l, 0);
+        }
+
+        for n in 0..size {
+            out[n * 2] = 0.0;
+            out[n * 2 + 1] = 0.0;
+            let frame = &mut out[n * 2..n * 2 + 2];
+            self.windows[0].overlap_add(buf_l, buf_r, frame);
+            self.windows[1].overlap_add(buf_l, buf_r, frame);
+            for i in 0..2 {
+                if self.windows[i].needs_regeneration() {
+                    self.windows[i].regenerated = true;
+                    self.schedule_aligned_window(correlator, buf_l, 1 - i);
+                    let frame = &mut out[n * 2..n * 2 + 2];
+                    self.windows[1 - i].overlap_add(buf_l, buf_r, frame);
+                }
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct CloudsParams {
@@ -909,6 +1281,8 @@ pub struct GranularProcessor {
     buf_r: AudioBuffer,
     player: GranularSamplePlayer,
     looping: LoopingSamplePlayer,
+    ws_player: WsolaSamplePlayer,
+    correlator: Correlator,
     diffuser: Diffuser,
     reverb: Reverb,
     rng: Rng,
@@ -928,6 +1302,8 @@ impl GranularProcessor {
             buf_r: AudioBuffer::new(n),
             player: GranularSamplePlayer::new(48),
             looping: LoopingSamplePlayer::new(),
+            ws_player: WsolaSamplePlayer::new(),
+            correlator: Correlator::new(),
             diffuser: Diffuser::new(sample_rate),
             reverb: Reverb::new(sample_rate),
             rng: Rng::new(seed),
@@ -1003,10 +1379,20 @@ impl GranularProcessor {
                 self.looping
                     .play(&self.buf_l, &self.buf_r, params, &mut self.scratch, size);
             }
+            PlaybackMode::Stretch => {
+                self.ws_player.play(
+                    &mut self.correlator,
+                    &self.buf_l,
+                    &self.buf_r,
+                    params,
+                    &mut self.scratch,
+                    size,
+                );
+            }
         }
 
         // 3. diffuser (granular mode: texture > 0.75 → diffusion; the
-        // looping/delay mode does not diffuse)
+        // looping/delay and stretch modes do not diffuse)
         let diffusion = if params.mode == PlaybackMode::Granular && params.texture > 0.75 {
             (params.texture - 0.75) * 4.0
         } else {
@@ -1050,6 +1436,34 @@ mod tests {
         let n = buf.size() as usize;
         let block: Vec<f32> = (0..n).map(gen).collect();
         buf.write_block(&block);
+    }
+
+    #[test]
+    fn stretch_mode_produces_bounded_sound() {
+        let mut proc = GranularProcessor::new(48000.0, 1.0, 11);
+        let params = CloudsParams {
+            mode: PlaybackMode::Stretch,
+            position: 0.0, // read near the write head (the freshly recorded tone)
+            size: 0.5,
+            pitch: 5.0, // shift up a few semitones (time/pitch decoupled)
+            dry_wet: 1.0,
+            ..Default::default()
+        };
+        // record a tone into the buffer, then stretch it
+        let mut energy = 0.0;
+        for blk in 0..500 {
+            let mut io = vec![0.0_f32; 64];
+            for (i, s) in io.iter_mut().enumerate() {
+                let t = (blk * 32 + i / 2) as f32;
+                *s = 0.4 * (t * 0.05).sin();
+            }
+            proc.process(&mut io, &params, 32);
+            assert!(io.iter().all(|v| v.is_finite() && v.abs() <= 4.0), "stretch bounded");
+            if blk > 100 {
+                energy += io.iter().map(|v| v * v).sum::<f32>();
+            }
+        }
+        assert!(energy > 1e-4, "stretch produces sound: {energy}");
     }
 
     #[test]
