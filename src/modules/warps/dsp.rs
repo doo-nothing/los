@@ -9,12 +9,11 @@
 //! internal carrier oscillator, and a channel vocoder for the top of
 //! the algorithm sweep.
 //!
-//! Documented divergences from the firmware: the engine runs at the
-//! session rate rather than 6× oversampled (the SRC polyphase chain
-//! is omitted; aliasing is bounded by the soft-limiters), the
-//! vocoder uses a simplified SVF band bank rather than the firmware's
-//! 20 tuned bands, and the hidden frequency-shifter easter egg is not
-//! ported. The cross-modulation algorithms themselves are exact.
+//! The cross-modulation algorithms are 6× oversampled through the
+//! firmware's 48-tap polyphase SRC (so aliasing matches the hardware).
+//! Documented divergences that remain: the vocoder uses a simplified
+//! SVF band bank rather than the firmware's 20 tuned bands, and the
+//! hidden frequency-shifter easter egg is not ported.
 
 #![allow(clippy::excessive_precision)]
 
@@ -445,10 +444,100 @@ impl Default for Params {
 
 /// Ties the cross-mod algorithms, the saturating amplifiers, the
 /// internal oscillator and the vocoder into warps' Process.
+/// The 6× / 48-tap polyphase sample-rate-conversion filters (warps
+/// `sample_rate_conversion_filters.h`), stored half-length and mirrored.
+const SRC_OVERSAMPLING: usize = 6;
+#[rustfmt::skip]
+const SRC_UP_HALF: [f32; 24] = [
+     4.357278576e-04, -2.297029461e-03, -4.703810602e-03, -8.774604727e-03,
+    -1.433899145e-02, -2.112793398e-02, -2.853108802e-02, -3.552868193e-02,
+    -4.069862931e-02, -4.228981313e-02, -3.836519645e-02, -2.700780696e-02,
+    -6.569014106e-03,  2.407089704e-02,  6.526452513e-02,  1.164165703e-01,
+     1.758932961e-01,  2.410483237e-01,  3.083744498e-01,  3.737697127e-01,
+     4.328923682e-01,  4.815728403e-01,  5.162355916e-01,  5.342582974e-01,
+];
+#[rustfmt::skip]
+const SRC_DOWN_HALF: [f32; 24] = [
+     7.262130960e-05, -3.828382434e-04, -7.839684337e-04, -1.462434121e-03,
+    -2.389831909e-03, -3.521322331e-03, -4.755181337e-03, -5.921446989e-03,
+    -6.783104885e-03, -7.048302188e-03, -6.394199409e-03, -4.501301159e-03,
+    -1.094835684e-03,  4.011816173e-03,  1.087742085e-02,  1.940276171e-02,
+     2.931554935e-02,  4.017472062e-02,  5.139574163e-02,  6.229495212e-02,
+     7.214872804e-02,  8.026214006e-02,  8.603926526e-02,  8.904304957e-02,
+];
+
+#[inline]
+fn src_fir(half: &[f32; 24], i: usize) -> f32 {
+    if i < 24 {
+        half[i]
+    } else {
+        half[47 - i]
+    }
+}
+
+/// Polyphase 1→6 upsampler.
+#[derive(Debug, Clone, Default)]
+struct SrcUp {
+    hist: [f32; 8], // 48 / 6
+}
+
+impl SrcUp {
+    fn process(&mut self, x: f32, out: &mut [f32; SRC_OVERSAMPLING]) {
+        for k in (1..8).rev() {
+            self.hist[k] = self.hist[k - 1];
+        }
+        self.hist[0] = x;
+        for (p, o) in out.iter_mut().enumerate() {
+            let mut acc = 0.0;
+            for k in 0..8 {
+                acc += src_fir(&SRC_UP_HALF, p + k * SRC_OVERSAMPLING) * self.hist[k];
+            }
+            *o = acc;
+        }
+    }
+}
+
+/// Polyphase 6→1 downsampler (a 48-tap FIR evaluated at the decimation
+/// points).
+#[derive(Debug, Clone)]
+struct SrcDown {
+    hist: [f32; 48],
+    write: usize,
+    phase: usize,
+}
+
+impl Default for SrcDown {
+    fn default() -> Self {
+        Self { hist: [0.0; 48], write: 0, phase: 0 }
+    }
+}
+
+impl SrcDown {
+    /// Push one oversampled sample; returns `Some(out)` on every 6th.
+    fn process(&mut self, x: f32) -> Option<f32> {
+        let newest = self.write % 48;
+        self.hist[newest] = x;
+        self.write += 1;
+        self.phase += 1;
+        if self.phase == SRC_OVERSAMPLING {
+            self.phase = 0;
+            let mut acc = 0.0;
+            for j in 0..48 {
+                acc += src_fir(&SRC_DOWN_HALF, j) * self.hist[(newest + 96 - j) % 48];
+            }
+            Some(acc)
+        } else {
+            None
+        }
+    }
+}
+
 pub struct Modulator {
     amp: [SaturatingAmplifier; 2],
     osc: Oscillator,
     vocoder: Vocoder,
+    src_up: [SrcUp; 2],
+    src_down: SrcDown,
     prev_algorithm: f32,
     prev_timbre: f32,
 }
@@ -459,6 +548,8 @@ impl Modulator {
             amp: [SaturatingAmplifier::default(), SaturatingAmplifier::default()],
             osc: Oscillator::new(sample_rate),
             vocoder: Vocoder::new(sample_rate),
+            src_up: [SrcUp::default(), SrcUp::default()],
+            src_down: SrcDown::default(),
             prev_algorithm: 0.0,
             prev_timbre: 0.5,
         }
@@ -519,13 +610,27 @@ impl Modulator {
             let b = ALGO_ORDER[(ai + 1).min(6)];
             let param0 = skewed_parameter(prev * 8.0 / 8.0, self.prev_timbre);
             let param1 = skewed_parameter(p.algorithm * 8.0, p.timbre);
+            // 6× oversample the cross-modulation to suppress aliasing (the
+            // firmware runs the xmod algorithms at kOscillatorSampleRate via a
+            // polyphase SRC).
+            let os_size = size * SRC_OVERSAMPLING;
+            let mut up_c = [0.0f32; SRC_OVERSAMPLING];
+            let mut up_m = [0.0f32; SRC_OVERSAMPLING];
             for i in 0..size {
-                let frac = i as f32 / size as f32;
-                let xfade = prev_f + (af - prev_f) * frac;
-                let param = param0 + (param1 - param0) * frac;
-                let ya = xmod(a, modulator[i], carrier[i], param);
-                let yb = xmod(b, modulator[i], carrier[i], param);
-                main[i] = ya + (yb - ya) * xfade;
+                self.src_up[0].process(carrier[i], &mut up_c);
+                self.src_up[1].process(modulator[i], &mut up_m);
+                for p in 0..SRC_OVERSAMPLING {
+                    let j = i * SRC_OVERSAMPLING + p;
+                    let frac = j as f32 / os_size as f32;
+                    let xfade = prev_f + (af - prev_f) * frac;
+                    let param = param0 + (param1 - param0) * frac;
+                    let ya = xmod(a, up_m[p], up_c[p], param);
+                    let yb = xmod(b, up_m[p], up_c[p], param);
+                    let os = ya + (yb - ya) * xfade;
+                    if let Some(down) = self.src_down.process(os) {
+                        main[i] = down;
+                    }
+                }
             }
             let _ = &mut af;
             // crossfade to raw modulator at the vocoder transition
@@ -555,6 +660,36 @@ impl Modulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oversampled_xmod_is_bounded_and_audible() {
+        let mut m = Modulator::new(48000.0);
+        // digital ring-mod region (algorithm ~0.45 < 0.5 = cross-mod, not vocoder)
+        let params = Params {
+            algorithm: 0.45,
+            timbre: 0.6,
+            drive1: 0.8,
+            drive2: 0.8,
+            carrier_shape: 0,
+            note: 60.0,
+        };
+        let n = 64;
+        let mut energy = 0.0;
+        for blk in 0..40 {
+            let carrier: Vec<f32> =
+                (0..n).map(|i| 0.5 * ((blk * n + i) as f32 * 0.10).sin()).collect();
+            let modulator: Vec<f32> =
+                (0..n).map(|i| 0.5 * ((blk * n + i) as f32 * 0.013).sin()).collect();
+            let mut main = vec![0.0_f32; n];
+            let mut aux = vec![0.0_f32; n];
+            m.process(&params, &carrier, &modulator, &mut main, &mut aux);
+            assert!(main.iter().all(|v| v.is_finite() && v.abs() <= 8.0), "xmod bounded");
+            if blk > 4 {
+                energy += main.iter().map(|v| v * v).sum::<f32>();
+            }
+        }
+        assert!(energy > 1e-4, "oversampled xmod produces sound: {energy}");
+    }
 
     #[test]
     fn fold_table_loads_and_is_centred() {
