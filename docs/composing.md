@@ -495,8 +495,10 @@ field, `feedback` re-injects the cloud, and `reverb` is the space.
 texture. Every knob has a `*_src` twin — an LFO on `position`, a
 sequence on `pitch`, an envelope on `density`… Patch a pad, a drum
 break, or another voice to the input and granulate it; publishes
-`clouds/N/level`. (v1 is the granular playback mode; the stretch,
-looping-delay and spectral modes are follow-ups.)
+`clouds/N/level`. The `mode` row selects one of four playback modes:
+granular (the cloud), stretch (WSOLA time-stretch), looping_delay (a
+delay / freeze loop), and spectral (a phase vocoder — spectral freeze,
+scrub and pitch-shift).
 
 **plaits** (the Mutable Instruments macro-oscillator, the engine
 bank): a monophonic synth voice driven by a note track. `engine`
